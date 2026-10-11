@@ -1,0 +1,20 @@
+name: my_app
+description: GPS Camera Application
+publish_to: 'none'
+version: 1.0.0+1
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  camera: ^0.11.0
+  geolocator: ^13.0.0
+  sensors_plus: ^5.0.0
+  image: ^4.2.0
+  gal: ^2.3.0
+  native_exif: ^0.5.2
+  permission_handler: ^11.3.1
+
+flutter:
+  uses-material-design: true
