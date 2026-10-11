@@ -16,6 +16,12 @@ List<CameraDescription> cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // 💡 가로 모드 시 화면 찌그러짐 방지를 위해 앱을 세로 모드로 강력 고정
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
+
   try {
     cameras = await availableCameras();
   } catch (e) {
@@ -24,7 +30,7 @@ Future<void> main() async {
 
   // 네이버 지도 SDK 초기화
   await NaverMapSdk.instance.initialize(
-    clientId: 'b3agnvaern', // 여기에 네이버 클라우드 플랫폼 Client ID 입력
+    clientId: 'b3agnvaern', // 네이버 클라우드 플랫폼 Client ID
     onAuthFailed: (ex) {
       debugPrint("네이버 지도 인증 실패: $ex");
     },
@@ -131,6 +137,16 @@ class _CameraScreenState extends State<CameraScreen> {
     return 'N (북)';
   }
 
+  // 💡 GPS 좌표를 안드로이드 EXIF가 요구하는 규격(문자열)으로 변환하는 함수
+  String _toDms(double val) {
+    final double absVal = val.abs();
+    final int d = absVal.toInt();
+    final double mVal = (absVal - d) * 60;
+    final int m = mVal.toInt();
+    final double sVal = (mVal - m) * 60;
+    return '$d/1,$m/1,${(sVal * 100).toInt()}/100';
+  }
+
   Future<void> _takePicture() async {
     if (_controller == null || !_controller!.value.isInitialized || _isProcessing) return;
     setState(() { _isProcessing = true; });
@@ -188,16 +204,16 @@ class _CameraScreenState extends State<CameraScreen> {
         final savedFile = File(savedPath);
         await savedFile.writeAsBytes(outBytes);
 
-        // EXIF 데이터 입력
+        // 💡 EXIF 데이터 입력 (에러 해결: 숫자를 EXIF 호환 문자열로 모두 변환하여 안전하게 저장)
         final exif = await Exif.fromPath(savedPath);
         await exif.writeAttributes({
-          'GPSLatitude': _currentPosition!.latitude,
+          'GPSLatitude': _toDms(_currentPosition!.latitude),
           'GPSLatitudeRef': _currentPosition!.latitude > 0 ? 'N' : 'S',
-          'GPSLongitude': _currentPosition!.longitude,
+          'GPSLongitude': _toDms(_currentPosition!.longitude),
           'GPSLongitudeRef': _currentPosition!.longitude > 0 ? 'E' : 'W',
-          'GPSAltitude': _currentPosition!.altitude,
-          'GPSAltitudeRef': 0,
-          'GPSImgDirection': _azimuth,
+          'GPSAltitude': '${(_currentPosition!.altitude * 100).toInt()}/100',
+          'GPSAltitudeRef': '0',
+          'GPSImgDirection': '${(_azimuth * 100).toInt()}/100',
           'GPSImgDirectionRef': 'T',
         });
         await exif.close();
@@ -205,6 +221,7 @@ class _CameraScreenState extends State<CameraScreen> {
         // 갤러리 저장
         await Gal.putImage(savedPath);
 
+        // 정장적으로 저장이 끝났으므로, 지도 버튼을 활성화하기 위해 리스트에 추가
         setState(() {
           _capturedPhotos.add(PhotoData(
             path: savedPath,
@@ -231,7 +248,6 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  // 갤러리 및 지도 대시보드 화면 열기
   void _openGalleryMapModal() {
     showModalBottomSheet(
       context: context,
@@ -279,7 +295,6 @@ class _CameraScreenState extends State<CameraScreen> {
               child: CameraPreview(_controller!),
             ),
           ),
-          // 화면 비율 변경 버튼
           Positioned(
             top: 50,
             left: 0,
@@ -302,7 +317,6 @@ class _CameraScreenState extends State<CameraScreen> {
               }).toList(),
             ),
           ),
-          // 촬영 정보 오버레이
           Positioned(
             bottom: 110,
             left: 20,
@@ -315,7 +329,7 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 갤러리 보기 버튼 (우측 하단)
+          // 💡 지도 버튼 (사진이 정상적으로 추가되면 파란색으로 활성화됨)
           Positioned(
             bottom: 35,
             right: 30,
@@ -326,7 +340,6 @@ class _CameraScreenState extends State<CameraScreen> {
               child: const Icon(Icons.map, color: Colors.white),
             ),
           ),
-          // 촬영 셔터 버튼 (중앙 하단)
           Positioned(
             bottom: 25,
             left: 0,
@@ -348,7 +361,6 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 }
 
-// 갤러리 및 네이버 지도 연동 대시보드 위젯
 class GalleryMapDashboard extends StatefulWidget {
   final List<PhotoData> photos;
   const GalleryMapDashboard({super.key, required this.photos});
@@ -364,7 +376,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   @override
   void initState() {
     super.initState();
-    _selectedIndex = widget.photos.length - 1; // 가장 최근 사진 기본 선택
+    _selectedIndex = widget.photos.length - 1;
   }
 
   @override
@@ -375,7 +387,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       padding: const EdgeInsets.all(12.0),
       child: Column(
         children: [
-          // 상단바
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -387,11 +398,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
             ],
           ),
           const Divider(color: Colors.white24),
-          // 본문 좌우 분할 (좌측: 사진, 우측: 네이버 지도)
           Expanded(
             child: Row(
               children: [
-                // 좌측: 선택된 사진 및 상세 정보
                 Expanded(
                   flex: 5,
                   child: Column(
@@ -416,7 +425,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                   ),
                 ),
                 const SizedBox(width: 10),
-                // 우측: 네이버 지도 연동
                 Expanded(
                   flex: 5,
                   child: NaverMap(
@@ -436,7 +444,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
             ),
           ),
           const SizedBox(height: 10),
-          // 하단 사진 리스트 가로 스크롤
           SizedBox(
             height: 70,
             child: ListView.builder(
@@ -450,14 +457,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                       _selectedIndex = index;
                     });
                     if (_mapController != null) {
-_mapController!.updateCamera(
-  NCameraUpdate.fromCameraPosition(
-    NCameraPosition(
-      target: NLatLng(widget.photos[index].latitude, widget.photos[index].longitude),
-      zoom: 16,
-    ),
-  ),
-);
+                      _mapController!.updateCamera(
+                        NCameraUpdate.fromCameraPosition(
+                          NCameraPosition(
+                            target: NLatLng(widget.photos[index].latitude, widget.photos[index].longitude),
+                            zoom: 16,
+                          ),
+                        ),
+                      );
                     }
                   },
                   child: Container(
