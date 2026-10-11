@@ -1,5 +1,5 @@
 name: my_app
-description: GPS Camera Application
+description: GPS Camera Application with Naver Map
 publish_to: 'none'
 version: 1.0.0+1
 environment:
@@ -11,10 +11,12 @@ dependencies:
   camera: ^0.11.0
   geolocator: ^13.0.0
   sensors_plus: ^5.0.0
+  permission_handler: ^11.3.1
   image: ^4.2.0
   gal: ^2.3.0
   native_exif: ^0.8.0
-  permission_handler: ^11.3.1
+  flutter_naver_map: ^1.4.0
+  path_provider: ^2.1.2
 
 flutter:
   uses-material-design: true
