@@ -12,14 +12,13 @@ import 'package:gal/gal.dart';
 import 'package:native_exif/native_exif.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:native_camera_sound/native_camera_sound.dart';
 
 List<CameraDescription> cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // 가로/세로 자유롭게 회전할 수 있도록 세로 고정(setPreferredOrientations) 삭제!
-
   try {
     cameras = await availableCameras();
   } catch (e) {
@@ -112,7 +111,6 @@ class _CameraScreenState extends State<CameraScreen> {
       }
     });
     
-    // 나침반 센서 가로/세로 보정 적용
     FlutterCompass.events?.listen((CompassEvent event) {
       if (mounted && event.heading != null) {
         setState(() {
@@ -120,18 +118,16 @@ class _CameraScreenState extends State<CameraScreen> {
           
           if (_controller != null) {
             final orientation = _controller!.value.deviceOrientation;
-            // 스마트폰이 가로로 누워있을 경우 90도씩 틀어지는 것을 뺄셈/덧셈으로 완벽하게 보정!
             if (orientation == DeviceOrientation.landscapeLeft) {
-              calcAzimuth += 90;
-            } else if (orientation == DeviceOrientation.landscapeRight) {
               calcAzimuth -= 90;
+            } else if (orientation == DeviceOrientation.landscapeRight) {
+              calcAzimuth += 90;
             } else if (orientation == DeviceOrientation.portraitDown) {
               calcAzimuth += 180;
             }
           }
           
-          calcAzimuth = calcAzimuth % 360;
-          if (calcAzimuth < 0) calcAzimuth += 360;
+          calcAzimuth = (calcAzimuth % 360 + 360) % 360;
           _azimuth = calcAzimuth;
         });
       }
@@ -155,8 +151,9 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() { _isProcessing = true; });
 
     try {
-      SystemSound.play(SystemSoundType.click);
-      HapticFeedback.mediumImpact();
+      // 💡 여기서 '진짜' 카메라 셔터 소리를 재생해!
+      NativeCameraSound.playShutter();
+      HapticFeedback.heavyImpact();
 
       final XFile file = await _controller!.takePicture();
       final bytes = await file.readAsBytes();
@@ -166,20 +163,19 @@ class _CameraScreenState extends State<CameraScreen> {
         int origW = capturedImage.width;
         int origH = capturedImage.height;
         
-        // 가로, 세로 방향에 맞춰 안전하게 자르기 비율 조정
         if (_aspectRatioMode == '1:1') {
           int size = origW < origH ? origW : origH;
           int offsetX = (origW - size) ~/ 2;
           int offsetY = (origH - size) ~/ 2;
           capturedImage = img.copyCrop(capturedImage, x: offsetX, y: offsetY, width: size, height: size);
         } else if (_aspectRatioMode == '4:3') {
-          if (origH > origW) { // 세로 화면일 때
+          if (origH > origW) {
             int targetH = (origW * 4 ~/ 3);
             if (origH > targetH) {
               int offsetY = (origH - targetH) ~/ 2;
               capturedImage = img.copyCrop(capturedImage, x: 0, y: offsetY, width: origW, height: targetH);
             }
-          } else { // 가로 화면일 때
+          } else {
             int targetW = (origH * 4 ~/ 3);
             if (origW > targetW) {
               int offsetX = (origW - targetW) ~/ 2;
@@ -217,7 +213,6 @@ class _CameraScreenState extends State<CameraScreen> {
         final savedFile = File(savedPath);
         await savedFile.writeAsBytes(outBytes);
 
-        // 시스템 충돌 없이 소수점 문자열로 변경하여 완벽하게 EXIF 저장!
         final exif = await Exif.fromPath(savedPath);
         await exif.writeAttributes({
           'GPSLatitude': _currentPosition!.latitude.toString(),
@@ -259,17 +254,12 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  void _openGalleryMapModal() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.black87,
-      builder: (context) {
-        return FractionallySizedBox(
-          heightFactor: 0.85,
-          child: GalleryMapDashboard(photos: _capturedPhotos),
-        );
-      },
+  void _openGalleryMapDashboard() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => GalleryMapDashboard(photos: _capturedPhotos),
+      ),
     );
   }
 
@@ -291,7 +281,6 @@ class _CameraScreenState extends State<CameraScreen> {
     
     String displaySensor = "방위각: ${_azimuth.toStringAsFixed(1)}° ($directionStr)\n피치각: ${_pitch.toStringAsFixed(1)}°";
 
-    // 현재 화면 회전 상태에 맞춰서 카메라 뷰 비율 적용
     bool isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
     double previewRatio;
     if (_aspectRatioMode == '1:1') {
@@ -352,7 +341,7 @@ class _CameraScreenState extends State<CameraScreen> {
             right: 30,
             child: FloatingActionButton(
               heroTag: 'galleryBtn',
-              onPressed: _capturedPhotos.isEmpty ? null : _openGalleryMapModal,
+              onPressed: _capturedPhotos.isEmpty ? null : _openGalleryMapDashboard,
               backgroundColor: _capturedPhotos.isEmpty ? Colors.grey : Colors.blueAccent,
               child: const Icon(Icons.map, color: Colors.white),
             ),
@@ -399,70 +388,70 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   @override
   Widget build(BuildContext context) {
     final currentPhoto = widget.photos[_selectedIndex];
+    bool isPortrait = MediaQuery.of(context).orientation == Orientation.portrait;
 
-    return Padding(
-      padding: const EdgeInsets.all(12.0),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('촬영 사진 & 지도 위치 대시보드', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-              IconButton(
-                icon: const Icon(Icons.close, color: Colors.white),
-                onPressed: () => Navigator.pop(context),
-              ),
-            ],
+    Widget photoSection = Column(
+      children: [
+        Expanded(
+          child: Image.file(File(currentPhoto.path), fit: BoxFit.contain),
+        ),
+        Container(
+          padding: const EdgeInsets.all(8),
+          color: Colors.black87,
+          width: double.infinity,
+          child: Text(
+            '위도: ${currentPhoto.latitude.toStringAsFixed(6)} (±${currentPhoto.accuracy.toStringAsFixed(1)}m)\n'
+            '경도: ${currentPhoto.longitude.toStringAsFixed(6)} (±${currentPhoto.accuracy.toStringAsFixed(1)}m)\n'
+            '표고: ${currentPhoto.altitude.toStringAsFixed(1)}m\n'
+            '방위각: ${currentPhoto.azimuth.toStringAsFixed(1)}° | 시간: ${currentPhoto.time}',
+            style: const TextStyle(color: Colors.white, fontSize: 12),
           ),
-          const Divider(color: Colors.white24),
+        ),
+      ],
+    );
+
+    Widget mapSection = NaverMap(
+      options: NaverMapViewOptions(
+        initialCameraPosition: NCameraPosition(
+          target: NLatLng(currentPhoto.latitude, currentPhoto.longitude),
+          zoom: 16,
+        ),
+      ),
+      onMapReady: (controller) {
+        _mapController = controller;
+        _updateMarkers();
+      },
+    );
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: const Text('촬영 사진 & 지도 위치 대시보드', style: TextStyle(color: Colors.white, fontSize: 16)),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+      body: Column(
+        children: [
           Expanded(
-            child: Row(
-              children: [
-                Expanded(
-                  flex: 5,
-                  child: Column(
+            child: isPortrait
+                ? Column(
                     children: [
-                      Expanded(
-                        child: Image.file(File(currentPhoto.path), fit: BoxFit.contain),
-                      ),
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        color: Colors.black54,
-                        width: double.infinity,
-                        child: Text(
-                          '위도: ${currentPhoto.latitude.toStringAsFixed(6)} (±${currentPhoto.accuracy.toStringAsFixed(1)}m)\n'
-                          '경도: ${currentPhoto.longitude.toStringAsFixed(6)} (±${currentPhoto.accuracy.toStringAsFixed(1)}m)\n'
-                          '표고: ${currentPhoto.altitude.toStringAsFixed(1)}m\n'
-                          '방위각: ${currentPhoto.azimuth.toStringAsFixed(1)}° | 시간: ${currentPhoto.time}',
-                          style: const TextStyle(color: Colors.white, fontSize: 11),
-                        ),
-                      ),
+                      Expanded(flex: 4, child: photoSection),
+                      Expanded(flex: 5, child: mapSection),
+                    ],
+                  )
+                : Row(
+                    children: [
+                      Expanded(flex: 5, child: photoSection),
+                      Expanded(flex: 5, child: mapSection),
                     ],
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  flex: 5,
-                  child: NaverMap(
-                    options: NaverMapViewOptions(
-                      initialCameraPosition: NCameraPosition(
-                        target: NLatLng(currentPhoto.latitude, currentPhoto.longitude),
-                        zoom: 16,
-                      ),
-                    ),
-                    onMapReady: (controller) {
-                      _mapController = controller;
-                      _updateMarkers();
-                    },
-                  ),
-                ),
-              ],
-            ),
           ),
-          const SizedBox(height: 10),
           SizedBox(
-            height: 70,
+            height: 80,
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
               itemCount: widget.photos.length,
@@ -470,9 +459,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 bool isSelected = _selectedIndex == index;
                 return GestureDetector(
                   onTap: () {
-                    setState(() {
-                      _selectedIndex = index;
-                    });
+                    setState(() { _selectedIndex = index; });
                     if (_mapController != null) {
                       _mapController!.updateCamera(
                         NCameraUpdate.fromCameraPosition(
@@ -485,7 +472,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                     }
                   },
                   child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
                     decoration: BoxDecoration(
                       border: Border.all(color: isSelected ? Colors.amber : Colors.transparent, width: 3),
                     ),
@@ -500,20 +487,58 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  void _updateMarkers() {
+  Future<void> _updateMarkers() async {
     if (_mapController == null) return;
+    _mapController!.clearOverlays();
+
     for (int i = 0; i < widget.photos.length; i++) {
       final photo = widget.photos[i];
-      final marker = NMarker(
-        id: 'photo_$i',
-        position: NLatLng(photo.latitude, photo.longitude),
-      );
-      marker.setOnTapListener((_) {
-        setState(() {
-          _selectedIndex = i;
+      
+      try {
+        final markerIcon = await NOverlayImage.fromWidget(
+          widget: Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.3),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.red, width: 2),
+                ),
+              ),
+              Transform.rotate(
+                angle: photo.azimuth * (pi / 180),
+                child: const Icon(Icons.navigation, color: Colors.red, size: 36),
+              ),
+            ],
+          ),
+          size: const Size(44, 44),
+          context: context,
+        );
+
+        final marker = NMarker(
+          id: 'photo_$i',
+          position: NLatLng(photo.latitude, photo.longitude),
+          icon: markerIcon,
+        );
+        
+        marker.setOnTapListener((overlay) {
+          setState(() { _selectedIndex = i; });
+          _mapController!.updateCamera(
+            NCameraUpdate.fromCameraPosition(
+              NCameraPosition(
+                target: NLatLng(photo.latitude, photo.longitude),
+                zoom: 16,
+              ),
+            ),
+          );
         });
-      });
-      _mapController!.addOverlay(marker);
+        _mapController!.addOverlay(marker);
+      } catch (e) {
+        debugPrint('마커 생성 에러: $e');
+      }
     }
   }
 }
