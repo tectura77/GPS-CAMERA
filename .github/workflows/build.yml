@@ -1,0 +1,42 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          
+      - name: Create Flutter Project
+        run: |
+          flutter create my_app
+          cp pubspec.yaml my_app/
+          mkdir -p my_app/lib
+          cp main.dart my_app/lib/
+          
+      - name: Add Android Permissions
+        run: |
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />' my_app/android/app/src/main/AndroidManifest.xml
+          
+      - name: Build APK
+        working-directory: ./my_app
+        run: |
+          flutter pub get
+          flutter build apk --release
+          
+      - name: Upload APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-release.apk
+          path: my_app/build/app/outputs/flutter-apk/app-release.apk
