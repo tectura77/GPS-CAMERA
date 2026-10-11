@@ -18,9 +18,7 @@ List<CameraDescription> cameras = [];
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-  ]);
+  // 가로/세로 자유롭게 회전할 수 있도록 세로 고정(setPreferredOrientations) 삭제!
 
   try {
     cameras = await availableCameras();
@@ -29,7 +27,7 @@ Future<void> main() async {
   }
 
   await NaverMapSdk.instance.initialize(
-    clientId: 'b3agnvaern', 
+    clientId: 'b3agnvaern',
     onAuthFailed: (ex) {
       debugPrint("네이버 지도 인증 실패: $ex");
     },
@@ -106,7 +104,6 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   void _initSensors() {
-    // 1. 피치각(위아래 기울기)은 가속도 센서로 계산
     accelerometerEventStream().listen((AccelerometerEvent acc) {
       if (mounted) {
         setState(() {
@@ -115,11 +112,25 @@ class _CameraScreenState extends State<CameraScreen> {
       }
     });
     
-    // 2. 방위각(나침반)은 폰의 기울기(센서 퓨전)를 자동 보정해주는 패키지 사용
+    // 나침반 센서 가로/세로 보정 적용
     FlutterCompass.events?.listen((CompassEvent event) {
       if (mounted && event.heading != null) {
         setState(() {
           double calcAzimuth = event.heading!;
+          
+          if (_controller != null) {
+            final orientation = _controller!.value.deviceOrientation;
+            // 스마트폰이 가로로 누워있을 경우 90도씩 틀어지는 것을 뺄셈/덧셈으로 완벽하게 보정!
+            if (orientation == DeviceOrientation.landscapeLeft) {
+              calcAzimuth += 90;
+            } else if (orientation == DeviceOrientation.landscapeRight) {
+              calcAzimuth -= 90;
+            } else if (orientation == DeviceOrientation.portraitDown) {
+              calcAzimuth += 180;
+            }
+          }
+          
+          calcAzimuth = calcAzimuth % 360;
           if (calcAzimuth < 0) calcAzimuth += 360;
           _azimuth = calcAzimuth;
         });
@@ -139,15 +150,6 @@ class _CameraScreenState extends State<CameraScreen> {
     return 'N (북)';
   }
 
-  String _toDms(double val) {
-    final double absVal = val.abs();
-    final int d = absVal.toInt();
-    final double mVal = (absVal - d) * 60;
-    final int m = mVal.toInt();
-    final double sVal = (mVal - m) * 60;
-    return '$d/1,$m/1,${(sVal * 100).toInt()}/100';
-  }
-
   Future<void> _takePicture() async {
     if (_controller == null || !_controller!.value.isInitialized || _isProcessing) return;
     setState(() { _isProcessing = true; });
@@ -163,16 +165,26 @@ class _CameraScreenState extends State<CameraScreen> {
       if (capturedImage != null && _currentPosition != null) {
         int origW = capturedImage.width;
         int origH = capturedImage.height;
+        
+        // 가로, 세로 방향에 맞춰 안전하게 자르기 비율 조정
         if (_aspectRatioMode == '1:1') {
           int size = origW < origH ? origW : origH;
           int offsetX = (origW - size) ~/ 2;
           int offsetY = (origH - size) ~/ 2;
           capturedImage = img.copyCrop(capturedImage, x: offsetX, y: offsetY, width: size, height: size);
         } else if (_aspectRatioMode == '4:3') {
-          int targetH = (origW * 4 ~/ 3);
-          if (origH > targetH) {
-            int offsetY = (origH - targetH) ~/ 2;
-            capturedImage = img.copyCrop(capturedImage, x: 0, y: offsetY, width: origW, height: targetH);
+          if (origH > origW) { // 세로 화면일 때
+            int targetH = (origW * 4 ~/ 3);
+            if (origH > targetH) {
+              int offsetY = (origH - targetH) ~/ 2;
+              capturedImage = img.copyCrop(capturedImage, x: 0, y: offsetY, width: origW, height: targetH);
+            }
+          } else { // 가로 화면일 때
+            int targetW = (origH * 4 ~/ 3);
+            if (origW > targetW) {
+              int offsetX = (origW - targetW) ~/ 2;
+              capturedImage = img.copyCrop(capturedImage, x: offsetX, y: 0, width: targetW, height: origH);
+            }
           }
         }
 
@@ -205,15 +217,16 @@ class _CameraScreenState extends State<CameraScreen> {
         final savedFile = File(savedPath);
         await savedFile.writeAsBytes(outBytes);
 
+        // 시스템 충돌 없이 소수점 문자열로 변경하여 완벽하게 EXIF 저장!
         final exif = await Exif.fromPath(savedPath);
         await exif.writeAttributes({
-          'GPSLatitude': _toDms(_currentPosition!.latitude),
+          'GPSLatitude': _currentPosition!.latitude.toString(),
           'GPSLatitudeRef': _currentPosition!.latitude > 0 ? 'N' : 'S',
-          'GPSLongitude': _toDms(_currentPosition!.longitude),
+          'GPSLongitude': _currentPosition!.longitude.toString(),
           'GPSLongitudeRef': _currentPosition!.longitude > 0 ? 'E' : 'W',
-          'GPSAltitude': '${(_currentPosition!.altitude * 100).toInt()}/100',
+          'GPSAltitude': _currentPosition!.altitude.toString(),
           'GPSAltitudeRef': '0',
-          'GPSImgDirection': '${(_azimuth * 100).toInt()}/100',
+          'GPSImgDirection': _azimuth.toString(),
           'GPSImgDirectionRef': 'T',
         });
         await exif.close();
@@ -278,6 +291,17 @@ class _CameraScreenState extends State<CameraScreen> {
     
     String displaySensor = "방위각: ${_azimuth.toStringAsFixed(1)}° ($directionStr)\n피치각: ${_pitch.toStringAsFixed(1)}°";
 
+    // 현재 화면 회전 상태에 맞춰서 카메라 뷰 비율 적용
+    bool isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    double previewRatio;
+    if (_aspectRatioMode == '1:1') {
+      previewRatio = 1.0;
+    } else if (_aspectRatioMode == '4:3') {
+      previewRatio = isLandscape ? 4.0 / 3.0 : 3.0 / 4.0;
+    } else {
+      previewRatio = isLandscape ? 16.0 / 9.0 : 9.0 / 16.0;
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -285,11 +309,7 @@ class _CameraScreenState extends State<CameraScreen> {
         children: [
           Center(
             child: AspectRatio(
-              aspectRatio: _aspectRatioMode == '1:1'
-                  ? 1.0
-                  : _aspectRatioMode == '4:3'
-                      ? 3.0 / 4.0
-                      : 9.0 / 16.0,
+              aspectRatio: previewRatio,
               child: CameraPreview(_controller!),
             ),
           ),
