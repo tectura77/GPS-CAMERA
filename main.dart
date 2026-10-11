@@ -450,14 +450,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                       _selectedIndex = index;
                     });
                     if (_mapController != null) {
-                      _mapController!.updateCamera(
-                        NCameraUpdate.toCameraPosition(
-                          NCameraPosition(
-                            target: NLatLng(widget.photos[index].latitude, widget.photos[index].longitude),
-                            zoom: 16,
-                          ),
-                        ),
-                      );
+_mapController!.updateCamera(
+  NCameraUpdate.fromCameraPosition(
+    NCameraPosition(
+      target: NLatLng(widget.photos[index].latitude, widget.photos[index].longitude),
+      zoom: 16,
+    ),
+  ),
+);
                     }
                   },
                   child: Container(
