@@ -25,7 +25,7 @@ Future<void> main() async {
   }
 
   await NaverMapSdk.instance.initialize(
-    clientId: 'b3agnvaern',
+    clientId: 'b3agnvaern', // 💡 본인의 네이버 클라우드 Client ID가 맞는지 꼭 확인하세요!
     onAuthFailed: (ex) {
       debugPrint("네이버 지도 인증 실패: $ex");
     },
@@ -110,22 +110,11 @@ class _CameraScreenState extends State<CameraScreen> {
       }
     });
     
+    // 💡 스마트폰 자체 센서 자동 보정을 믿고 수동 각도 조절 로직 삭제 (동/서 오류 해결)
     FlutterCompass.events?.listen((CompassEvent event) {
       if (mounted && event.heading != null) {
         setState(() {
           double calcAzimuth = event.heading!;
-          
-          if (_controller != null) {
-            final orientation = _controller!.value.deviceOrientation;
-            if (orientation == DeviceOrientation.landscapeLeft) {
-              calcAzimuth += 90;
-            } else if (orientation == DeviceOrientation.landscapeRight) {
-              calcAzimuth -= 90;
-            } else if (orientation == DeviceOrientation.portraitDown) {
-              calcAzimuth += 180;
-            }
-          }
-          
           calcAzimuth = (calcAzimuth % 360 + 360) % 360;
           _azimuth = calcAzimuth;
         });
@@ -461,6 +450,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 return GestureDetector(
                   onTap: () {
                     setState(() { _selectedIndex = index; });
+                    // 💡 목록 클릭 시 마커 색상 변경 적용
+                    _updateMarkers(); 
                     if (_mapController != null) {
                       _mapController!.updateCamera(
                         NCameraUpdate.fromCameraPosition(
@@ -488,34 +479,37 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
+  // 💡 선택된 마커는 파란색, 나머지는 빨간색으로 실시간 변경
   Future<void> _updateMarkers() async {
     if (_mapController == null) return;
     _mapController!.clearOverlays();
 
     for (int i = 0; i < widget.photos.length; i++) {
       final photo = widget.photos[i];
-      
+      bool isSelected = (i == _selectedIndex);
+      Color markerColor = isSelected ? Colors.blueAccent : Colors.red;
+
       try {
         final markerIcon = await NOverlayImage.fromWidget(
           widget: Stack(
             alignment: Alignment.center,
             children: [
               Container(
-                width: 24,
-                height: 24,
+                width: 28,
+                height: 28,
                 decoration: BoxDecoration(
-                  color: Colors.red.withOpacity(0.3),
+                  color: markerColor.withOpacity(0.3),
                   shape: BoxShape.circle,
-                  border: Border.all(color: Colors.red, width: 1.5),
+                  border: Border.all(color: markerColor, width: 2),
                 ),
               ),
               Transform.rotate(
                 angle: photo.azimuth * (pi / 180),
-                child: const Icon(Icons.navigation, color: Colors.red, size: 18),
+                child: Icon(Icons.navigation, color: markerColor, size: 20),
               ),
             ],
           ),
-          size: const Size(24, 24),
+          size: const Size(28, 28),
           context: context,
         );
 
@@ -527,6 +521,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         
         marker.setOnTapListener((overlay) {
           setState(() { _selectedIndex = i; });
+          // 💡 마커 직접 클릭 시에도 색상 즉시 변경 적용
+          _updateMarkers();
           _mapController!.updateCamera(
             NCameraUpdate.fromCameraPosition(
               NCameraPosition(
