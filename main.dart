@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:flutter_compass/flutter_compass.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:image/image.dart' as img;
 import 'package:gal/gal.dart';
@@ -17,7 +18,6 @@ List<CameraDescription> cameras = [];
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // 💡 가로 모드 시 화면 찌그러짐 방지를 위해 앱을 세로 모드로 강력 고정
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
   ]);
@@ -28,9 +28,8 @@ Future<void> main() async {
     debugPrint(e.toString());
   }
 
-  // 네이버 지도 SDK 초기화
   await NaverMapSdk.instance.initialize(
-    clientId: 'b3agnvaern', // 네이버 클라우드 플랫폼 Client ID
+    clientId: 'b3agnvaern', 
     onAuthFailed: (ex) {
       debugPrint("네이버 지도 인증 실패: $ex");
     },
@@ -107,6 +106,7 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   void _initSensors() {
+    // 1. 피치각(위아래 기울기)은 가속도 센서로 계산
     accelerometerEventStream().listen((AccelerometerEvent acc) {
       if (mounted) {
         setState(() {
@@ -114,10 +114,12 @@ class _CameraScreenState extends State<CameraScreen> {
         });
       }
     });
-    magnetometerEventStream().listen((MagnetometerEvent mag) {
-      if (mounted) {
+    
+    // 2. 방위각(나침반)은 폰의 기울기(센서 퓨전)를 자동 보정해주는 패키지 사용
+    FlutterCompass.events?.listen((CompassEvent event) {
+      if (mounted && event.heading != null) {
         setState(() {
-          double calcAzimuth = atan2(mag.y, mag.x) * 180 / pi;
+          double calcAzimuth = event.heading!;
           if (calcAzimuth < 0) calcAzimuth += 360;
           _azimuth = calcAzimuth;
         });
@@ -137,7 +139,6 @@ class _CameraScreenState extends State<CameraScreen> {
     return 'N (북)';
   }
 
-  // 💡 GPS 좌표를 안드로이드 EXIF가 요구하는 규격(문자열)으로 변환하는 함수
   String _toDms(double val) {
     final double absVal = val.abs();
     final int d = absVal.toInt();
@@ -204,7 +205,6 @@ class _CameraScreenState extends State<CameraScreen> {
         final savedFile = File(savedPath);
         await savedFile.writeAsBytes(outBytes);
 
-        // 💡 EXIF 데이터 입력 (에러 해결: 숫자를 EXIF 호환 문자열로 모두 변환하여 안전하게 저장)
         final exif = await Exif.fromPath(savedPath);
         await exif.writeAttributes({
           'GPSLatitude': _toDms(_currentPosition!.latitude),
@@ -218,10 +218,8 @@ class _CameraScreenState extends State<CameraScreen> {
         });
         await exif.close();
 
-        // 갤러리 저장
         await Gal.putImage(savedPath);
 
-        // 정장적으로 저장이 끝났으므로, 지도 버튼을 활성화하기 위해 리스트에 추가
         setState(() {
           _capturedPhotos.add(PhotoData(
             path: savedPath,
@@ -329,7 +327,6 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 💡 지도 버튼 (사진이 정상적으로 추가되면 파란색으로 활성화됨)
           Positioned(
             bottom: 35,
             right: 30,
