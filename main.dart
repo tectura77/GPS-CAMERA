@@ -12,7 +12,6 @@ import 'package:gal/gal.dart';
 import 'package:native_exif/native_exif.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:native_camera_sound/native_camera_sound.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -151,9 +150,12 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() { _isProcessing = true; });
 
     try {
-      // 💡 여기서 '진짜' 카메라 셔터 소리를 재생해!
-      NativeCameraSound.playShutter();
+      // 💡 강력한 이중 진동(징-징!)과 알림음으로 촬영 피드백을 확실하게 줌
+      SystemSound.play(SystemSoundType.alert);
       HapticFeedback.heavyImpact();
+      Future.delayed(const Duration(milliseconds: 150), () {
+        HapticFeedback.heavyImpact();
+      });
 
       final XFile file = await _controller!.takePicture();
       final bytes = await file.readAsBytes();
