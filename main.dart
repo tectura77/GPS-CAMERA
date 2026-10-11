@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
@@ -75,8 +76,10 @@ class _CameraScreenState extends State<CameraScreen> {
     magnetometerEventStream().listen((MagnetometerEvent mag) {
       if (mounted) {
         setState(() {
-          _azimuth = (atan2(mag.y, mag.x) * 180 / pi);
-          if (_azimuth < 0) _azimuth += 360;
+          // 방위각 보정 및 0~360 범위 설정
+          double calcAzimuth = atan2(mag.y, mag.x) * 180 / pi;
+          if (calcAzimuth < 0) calcAzimuth += 360;
+          _azimuth = calcAzimuth;
         });
       }
     });
@@ -91,7 +94,7 @@ class _CameraScreenState extends State<CameraScreen> {
     if (azimuth >= 202.5 && azimuth < 247.5) return 'SW (남서)';
     if (azimuth >= 247.5 && azimuth < 292.5) return 'W (서)';
     if (azimuth >= 292.5 && azimuth < 337.5) return 'NW (북서)';
-    return '';
+    return 'N (북)';
   }
 
   Future<void> _takePicture() async {
@@ -99,6 +102,10 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() { _isProcessing = true; });
 
     try {
+      // 1. 찰칵 소리 재생
+      SystemSound.play(SystemSoundType.click);
+      HapticFeedback.mediumImpact();
+
       final XFile file = await _controller!.takePicture();
       final bytes = await file.readAsBytes();
       img.Image? capturedImage = img.decodeImage(bytes);
@@ -106,25 +113,26 @@ class _CameraScreenState extends State<CameraScreen> {
       if (capturedImage != null) {
         String waterMarkText = "";
         String dateTime = DateTime.now().toString().substring(0, 16);
+        String directionStr = _getDirection(_azimuth);
         
         if (_currentPosition != null) {
           waterMarkText = 'Lat: ${_currentPosition!.latitude.toStringAsFixed(6)}\n'
               'Lng: ${_currentPosition!.longitude.toStringAsFixed(6)}\n'
               'Alt: ${_currentPosition!.altitude.toStringAsFixed(1)}m\n'
-              'Acc: ${_currentPosition!.accuracy.toStringAsFixed(1)}m\n';
+              'Acc: ±${_currentPosition!.accuracy.toStringAsFixed(1)}m\n';
         }
-        waterMarkText += 'Azimuth: ${_azimuth.toStringAsFixed(1)} deg\n'
-            'Pitch: ${_pitch.toStringAsFixed(1)} deg\n'
+        waterMarkText += 'Azimuth: ${_azimuth.toStringAsFixed(1)}° ($directionStr)\n'
+            'Pitch: ${_pitch.toStringAsFixed(1)}°\n'
             'Time: $dateTime';
 
-        // 1. 사진 겉면에 텍스트(워터마크) 그리기
+        // 2. 사진 겉면에 텍스트(워터마크) 그리기
         img.drawString(
           capturedImage,
           waterMarkText,
           font: img.arial24,
           x: 20,
-          y: capturedImage.height - 200,
-          color: img.ColorRgb8(255, 200, 50), // 노란색 글씨
+          y: capturedImage.height - 220,
+          color: img.ColorRgb8(255, 200, 50),
         );
 
         final outBytes = img.encodeJpg(capturedImage, quality: 90);
@@ -133,7 +141,7 @@ class _CameraScreenState extends State<CameraScreen> {
         final tempFile = File(tempFilePath);
         await tempFile.writeAsBytes(outBytes);
 
-        // 2. 사진 속옷(EXIF)에 실제 GPS 데이터 심기
+        // 3. 사진 속옷(EXIF)에 위도, 경도, 고도, 방위각 데이터 모두 심기
         if (_currentPosition != null) {
           final exif = await Exif.fromPath(tempFilePath);
           await exif.writeAttributes({
@@ -141,11 +149,15 @@ class _CameraScreenState extends State<CameraScreen> {
             'GPSLatitudeRef': _currentPosition!.latitude > 0 ? 'N' : 'S',
             'GPSLongitude': _currentPosition!.longitude,
             'GPSLongitudeRef': _currentPosition!.longitude > 0 ? 'E' : 'W',
+            'GPSAltitude': _currentPosition!.altitude,
+            'GPSAltitudeRef': 0, // 해발고도 기준
+            'GPSImgDirection': _azimuth,
+            'GPSImgDirectionRef': 'T', // 진북 기준 방향
           });
           await exif.close();
         }
 
-        // 3. 갤러리에 최종 저장
+        // 4. 갤러리에 최종 저장
         await Gal.putImage(tempFilePath);
         
         if (mounted) {
@@ -167,11 +179,12 @@ class _CameraScreenState extends State<CameraScreen> {
       return const Scaffold(backgroundColor: Colors.black, body: Center(child: CircularProgressIndicator(color: Colors.white)));
     }
 
+    String directionStr = _getDirection(_azimuth);
     String displayLocation = _currentPosition == null
         ? "위치 정보 찾는 중..."
-        : "위도: ${_currentPosition!.latitude.toStringAsFixed(6)}\n경도: ${_currentPosition!.longitude.toStringAsFixed(6)}\n표고: ${_currentPosition!.altitude.toStringAsFixed(1)}m\n정확도: ±${_currentPosition!.accuracy.toStringAsFixed(1)}m";
+        : "위도: ${_currentPosition!.latitude.toStringAsFixed(6)}\n경도: ${_currentPosition!.longitude.toStringAsFixed(6)}\n표고: ${_currentPosition!.altitude.toStringAsFixed(1)}m\n오차: ±${_currentPosition!.accuracy.toStringAsFixed(1)}m";
     
-    String displaySensor = "방위각: ${_azimuth.toStringAsFixed(1)}° (${_getDirection(_azimuth)})\n피치각: ${_pitch.toStringAsFixed(1)}°";
+    String displaySensor = "방위각: ${_azimuth.toStringAsFixed(1)}° ($directionStr)\n피치각: ${_pitch.toStringAsFixed(1)}°";
 
     return Scaffold(
       body: Stack(
