@@ -17,6 +17,7 @@ dependencies:
   native_exif: ^0.8.0
   flutter_naver_map: ^1.4.0
   path_provider: ^2.1.2
+  flutter_compass: ^0.7.3
 
 flutter:
   uses-material-design: true
