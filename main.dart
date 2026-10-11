@@ -118,9 +118,9 @@ class _CameraScreenState extends State<CameraScreen> {
           if (_controller != null) {
             final orientation = _controller!.value.deviceOrientation;
             if (orientation == DeviceOrientation.landscapeLeft) {
-              calcAzimuth -= 90;
-            } else if (orientation == DeviceOrientation.landscapeRight) {
               calcAzimuth += 90;
+            } else if (orientation == DeviceOrientation.landscapeRight) {
+              calcAzimuth -= 90;
             } else if (orientation == DeviceOrientation.portraitDown) {
               calcAzimuth += 180;
             }
@@ -150,7 +150,6 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() { _isProcessing = true; });
 
     try {
-      // 💡 강력한 이중 진동(징-징!)과 알림음으로 촬영 피드백을 확실하게 줌
       SystemSound.play(SystemSoundType.alert);
       HapticFeedback.heavyImpact();
       Future.delayed(const Duration(milliseconds: 150), () {
@@ -502,21 +501,21 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
             alignment: Alignment.center,
             children: [
               Container(
-                width: 44,
-                height: 44,
+                width: 24,
+                height: 24,
                 decoration: BoxDecoration(
                   color: Colors.red.withOpacity(0.3),
                   shape: BoxShape.circle,
-                  border: Border.all(color: Colors.red, width: 2),
+                  border: Border.all(color: Colors.red, width: 1.5),
                 ),
               ),
               Transform.rotate(
                 angle: photo.azimuth * (pi / 180),
-                child: const Icon(Icons.navigation, color: Colors.red, size: 36),
+                child: const Icon(Icons.navigation, color: Colors.red, size: 18),
               ),
             ],
           ),
-          size: const Size(44, 44),
+          size: const Size(24, 24),
           context: context,
         );
 
