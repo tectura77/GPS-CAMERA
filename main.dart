@@ -24,7 +24,7 @@ Future<void> main() async {
 
   // 네이버 지도 SDK 초기화
   await NaverMapSdk.instance.initialize(
-    clientId: 'YOUR_NAVER_CLIENT_ID', // 여기에 네이버 클라우드 플랫폼 Client ID 입력
+    clientId: b3agnvaern, // 여기에 네이버 클라우드 플랫폼 Client ID 입력
     onAuthFailed: (ex) {
       debugPrint("네이버 지도 인증 실패: $ex");
     },
