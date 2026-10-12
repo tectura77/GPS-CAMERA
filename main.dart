@@ -14,6 +14,7 @@ import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:path_provider/path_provider.dart';
 
 List<CameraDescription> cameras = [];
+String? globalNaverAuthError; // 💡 네이버 지도 인증 에러를 화면에 띄우기 위한 변수
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,12 +25,17 @@ Future<void> main() async {
     debugPrint(e.toString());
   }
 
-  await NaverMapSdk.instance.initialize(
-    clientId: 'b3agnvaern', // 💡 본인의 네이버 클라우드 Client ID가 맞는지 꼭 확인하세요!
-    onAuthFailed: (ex) {
-      debugPrint("네이버 지도 인증 실패: $ex");
-    },
-  );
+  try {
+    await NaverMapSdk.instance.initialize(
+      clientId: 'b3agnvaern',
+      onAuthFailed: (ex) {
+        // 💡 에러가 발생하면 변수에 저장해 화면에 보여줍니다.
+        globalNaverAuthError = "인증 실패 에러: $ex";
+      },
+    );
+  } catch (e) {
+    globalNaverAuthError = "초기화 에러: $e";
+  }
 
   runApp(const MaterialApp(home: CameraScreen(), debugShowCheckedModeBanner: false));
 }
@@ -110,7 +116,6 @@ class _CameraScreenState extends State<CameraScreen> {
       }
     });
     
-    // 💡 스마트폰 자체 센서 자동 보정을 믿고 수동 각도 조절 로직 삭제 (동/서 오류 해결)
     FlutterCompass.events?.listen((CompassEvent event) {
       if (mounted && event.heading != null) {
         setState(() {
@@ -400,18 +405,31 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       ],
     );
 
-    Widget mapSection = NaverMap(
-      options: NaverMapViewOptions(
-        initialCameraPosition: NCameraPosition(
-          target: NLatLng(currentPhoto.latitude, currentPhoto.longitude),
-          zoom: 16,
-        ),
-      ),
-      onMapReady: (controller) {
-        _mapController = controller;
-        _updateMarkers();
-      },
-    );
+    // 💡 에러가 있으면 빨간 화면으로 원인을 띄우고, 정상이면 지도를 띄웁니다!
+    Widget mapSection = globalNaverAuthError != null
+        ? Container(
+            color: Colors.white,
+            padding: const EdgeInsets.all(20),
+            child: Center(
+              child: Text(
+                '🚨 네이버 지도 차단됨!\n\n(원인 분석용 코드)\n$globalNaverAuthError\n\n이 텍스트가 보이게 화면을 캡처해서 보여주세요!',
+                style: const TextStyle(color: Colors.red, fontSize: 15, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          )
+        : NaverMap(
+            options: NaverMapViewOptions(
+              initialCameraPosition: NCameraPosition(
+                target: NLatLng(currentPhoto.latitude, currentPhoto.longitude),
+                zoom: 16,
+              ),
+            ),
+            onMapReady: (controller) {
+              _mapController = controller;
+              _updateMarkers();
+            },
+          );
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -450,7 +468,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 return GestureDetector(
                   onTap: () {
                     setState(() { _selectedIndex = index; });
-                    // 💡 목록 클릭 시 마커 색상 변경 적용
                     _updateMarkers(); 
                     if (_mapController != null) {
                       _mapController!.updateCamera(
@@ -479,7 +496,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // 💡 선택된 마커는 파란색, 나머지는 빨간색으로 실시간 변경
   Future<void> _updateMarkers() async {
     if (_mapController == null) return;
     _mapController!.clearOverlays();
@@ -521,7 +537,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         
         marker.setOnTapListener((overlay) {
           setState(() { _selectedIndex = i; });
-          // 💡 마커 직접 클릭 시에도 색상 즉시 변경 적용
           _updateMarkers();
           _mapController!.updateCamera(
             NCameraUpdate.fromCameraPosition(
