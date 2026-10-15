@@ -27,10 +27,13 @@ Future<void> main() async {
   }
 
   try {
-    await NaverMapSdk.instance.initialize(
+    // 💡 핵심 수정: 구버전(NaverMapSdk.instance.initialize) 대신
+    // 신규 Maps 콘솔 전용 최신 인증 함수인 FlutterNaverMap().init 사용!
+    await FlutterNaverMap().init(
       clientId: 'b3agnvaern',
       onAuthFailed: (ex) {
         globalNaverAuthError = "인증 실패 에러:\n$ex";
+        debugPrint("네이버 지도 인증 실패: $ex");
       },
     );
   } catch (e) {
@@ -40,7 +43,6 @@ Future<void> main() async {
   runApp(const MaterialApp(home: CameraScreen(), debugShowCheckedModeBanner: false));
 }
 
-// 💡 JSON 데이터로 변환/복원할 수 있도록 업그레이드된 PhotoData
 class PhotoData {
   final String path;
   final double latitude;
@@ -99,13 +101,12 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _requestPermissions() async {
     await [Permission.camera, Permission.location, Permission.storage, Permission.photos].request();
-    await _loadSavedPhotos(); // 💡 앱 켤 때 저장된 사진 불러오기
+    await _loadSavedPhotos();
     _initCamera(ResolutionPreset.high);
     _initLocation();
     _initSensors();
   }
 
-  // 💡 스마트폰 내부에 사진 목록 데이터를 영구 저장
   Future<void> _savePhotosData() async {
     try {
       final directory = await getApplicationDocumentsDirectory();
@@ -117,7 +118,6 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  // 💡 앱을 다시 켰을 때 저장된 사진 목록 데이터를 불러오기
   Future<void> _loadSavedPhotos() async {
     try {
       final directory = await getApplicationDocumentsDirectory();
@@ -189,6 +189,18 @@ class _CameraScreenState extends State<CameraScreen> {
     return 'N (북)';
   }
 
+  String _getDirectionEn(double azimuth) {
+    if (azimuth >= 337.5 || azimuth < 22.5) return 'N';
+    if (azimuth >= 22.5 && azimuth < 67.5) return 'NE';
+    if (azimuth >= 67.5 && azimuth < 112.5) return 'E';
+    if (azimuth >= 112.5 && azimuth < 157.5) return 'SE';
+    if (azimuth >= 157.5 && azimuth < 202.5) return 'S';
+    if (azimuth >= 202.5 && azimuth < 247.5) return 'SW';
+    if (azimuth >= 247.5 && azimuth < 292.5) return 'W';
+    if (azimuth >= 292.5 && azimuth < 337.5) return 'NW';
+    return 'N';
+  }
+
   Future<void> _takePicture() async {
     if (_controller == null || !_controller!.value.isInitialized || _isProcessing) return;
     setState(() { _isProcessing = true; });
@@ -230,17 +242,18 @@ class _CameraScreenState extends State<CameraScreen> {
         }
 
         String dateTime = DateTime.now().toString().substring(0, 16);
-        String dateOnly = dateTime.substring(0, 10); // 💡 YYYY-MM-DD 날짜 추출
-        String directionStr = _getDirection(_azimuth);
+        String dateOnly = dateTime.substring(0, 10);
+        String directionEn = _getDirectionEn(_azimuth);
         
         double acc = _currentPosition!.accuracy;
         double altAcc = acc * 1.5;
         
-        String waterMarkText = 'Lat: ${_currentPosition!.latitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n'
-            'Lng: ${_currentPosition!.longitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n'
-            'Alt: ${_currentPosition!.altitude.toStringAsFixed(1)}m (±${altAcc.toStringAsFixed(1)}m)\n'
-            'Azimuth: ${_azimuth.toStringAsFixed(1)}° ($directionStr)\n'
-            'Pitch: ${_pitch.toStringAsFixed(1)}°\n'
+        // 💡 이미지 워터마크에서 특수문자/한글이 깨지지 않도록 영문 표준 표기 적용
+        String waterMarkText = 'Lat: ${_currentPosition!.latitude.toStringAsFixed(6)} (+-${acc.toStringAsFixed(1)}m)\n'
+            'Lng: ${_currentPosition!.longitude.toStringAsFixed(6)} (+-${acc.toStringAsFixed(1)}m)\n'
+            'Alt: ${_currentPosition!.altitude.toStringAsFixed(1)}m (+-${altAcc.toStringAsFixed(1)}m)\n'
+            'Azimuth: ${_azimuth.toStringAsFixed(1)} deg ($directionEn)\n'
+            'Pitch: ${_pitch.toStringAsFixed(1)} deg\n'
             'Time: $dateTime';
 
         img.drawString(
@@ -255,7 +268,6 @@ class _CameraScreenState extends State<CameraScreen> {
         final outBytes = img.encodeJpg(capturedImage, quality: 90);
         final appDir = await getApplicationDocumentsDirectory();
         
-        // 💡 날짜별 폴더 생성 후 그 안에 저장
         final folderPath = '${appDir.path}/$dateOnly';
         final folder = Directory(folderPath);
         if (!await folder.exists()) await folder.create(recursive: true);
@@ -292,7 +304,7 @@ class _CameraScreenState extends State<CameraScreen> {
           ));
         });
         
-        await _savePhotosData(); // 💡 사진을 찍을 때마다 데이터를 안전하게 영구 저장
+        await _savePhotosData();
         
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('사진이 촬영되어 저장되었습니다!')));
@@ -431,9 +443,8 @@ class GalleryMapDashboard extends StatefulWidget {
 class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   int _selectedIndex = 0;
   NaverMapController? _mapController;
-  String _selectedDate = '전체 보기'; // 💡 날짜별 폴더(필터) 기본값
+  String _selectedDate = '전체 보기';
 
-  // 💡 선택한 날짜에 해당하는 사진만 필터링해서 보여주기
   List<PhotoData> get _filteredPhotos {
     if (_selectedDate == '전체 보기') return widget.photos;
     return widget.photos.where((p) => p.time.startsWith(_selectedDate)).toList();
@@ -466,7 +477,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    // 💡 날짜 목록(폴더) 추출
     List<String> dateOptions = ['전체 보기'];
     Set<String> uniqueDates = widget.photos.map((p) => p.time.substring(0, 10)).toSet();
     List<String> sortedDates = uniqueDates.toList()..sort((a, b) => b.compareTo(a));
@@ -510,7 +520,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
             padding: const EdgeInsets.all(20),
             child: Center(
               child: Text(
-                '🚨 네이버 지도 차단됨!\n\n(원인 분석용 코드)\n$globalNaverAuthError\n\n이 텍스트가 보이게 화면을 캡처해서 보여주세요!',
+                '🚨 네이버 지도 차단됨!\n\n$globalNaverAuthError',
                 style: const TextStyle(color: Colors.red, fontSize: 15, fontWeight: FontWeight.bold),
                 textAlign: TextAlign.center,
               ),
@@ -533,7 +543,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        // 💡 상단에 날짜(폴더) 선택 드롭다운 버튼 추가!
         title: DropdownButton<String>(
           value: _selectedDate,
           dropdownColor: Colors.black87,
