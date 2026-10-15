@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -14,7 +15,7 @@ import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:path_provider/path_provider.dart';
 
 List<CameraDescription> cameras = [];
-String? globalNaverAuthError; // 💡 네이버 지도 인증 에러를 화면에 띄우기 위한 변수
+String? globalNaverAuthError;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,8 +30,7 @@ Future<void> main() async {
     await NaverMapSdk.instance.initialize(
       clientId: 'b3agnvaern',
       onAuthFailed: (ex) {
-        // 💡 에러가 발생하면 변수에 저장해 화면에 보여줍니다.
-        globalNaverAuthError = "인증 실패 에러: $ex";
+        globalNaverAuthError = "인증 실패 에러:\n$ex";
       },
     );
   } catch (e) {
@@ -40,6 +40,7 @@ Future<void> main() async {
   runApp(const MaterialApp(home: CameraScreen(), debugShowCheckedModeBanner: false));
 }
 
+// 💡 JSON 데이터로 변환/복원할 수 있도록 업그레이드된 PhotoData
 class PhotoData {
   final String path;
   final double latitude;
@@ -60,6 +61,18 @@ class PhotoData {
     required this.pitch,
     required this.time,
   });
+
+  Map<String, dynamic> toJson() => {
+    'path': path, 'latitude': latitude, 'longitude': longitude,
+    'altitude': altitude, 'accuracy': accuracy, 'azimuth': azimuth,
+    'pitch': pitch, 'time': time
+  };
+
+  factory PhotoData.fromJson(Map<String, dynamic> json) => PhotoData(
+    path: json['path'], latitude: json['latitude'], longitude: json['longitude'],
+    altitude: json['altitude'], accuracy: json['accuracy'],
+    azimuth: json['azimuth'], pitch: json['pitch'], time: json['time']
+  );
 }
 
 class CameraScreen extends StatefulWidget {
@@ -86,9 +99,46 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _requestPermissions() async {
     await [Permission.camera, Permission.location, Permission.storage, Permission.photos].request();
+    await _loadSavedPhotos(); // 💡 앱 켤 때 저장된 사진 불러오기
     _initCamera(ResolutionPreset.high);
     _initLocation();
     _initSensors();
+  }
+
+  // 💡 스마트폰 내부에 사진 목록 데이터를 영구 저장
+  Future<void> _savePhotosData() async {
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/photos_meta.json');
+      final String contents = jsonEncode(_capturedPhotos.map((e) => e.toJson()).toList());
+      await file.writeAsString(contents);
+    } catch (e) {
+      debugPrint("데이터 저장 에러: $e");
+    }
+  }
+
+  // 💡 앱을 다시 켰을 때 저장된 사진 목록 데이터를 불러오기
+  Future<void> _loadSavedPhotos() async {
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/photos_meta.json');
+      if (await file.exists()) {
+        final String contents = await file.readAsString();
+        final List<dynamic> jsonList = jsonDecode(contents);
+        
+        setState(() {
+          _capturedPhotos.clear();
+          for (var item in jsonList) {
+            final photo = PhotoData.fromJson(item);
+            if (File(photo.path).existsSync()) {
+              _capturedPhotos.add(photo);
+            }
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint("데이터 로드 에러: $e");
+    }
   }
 
   void _initCamera(ResolutionPreset preset) async {
@@ -179,14 +229,14 @@ class _CameraScreenState extends State<CameraScreen> {
           }
         }
 
-        String waterMarkText = "";
         String dateTime = DateTime.now().toString().substring(0, 16);
+        String dateOnly = dateTime.substring(0, 10); // 💡 YYYY-MM-DD 날짜 추출
         String directionStr = _getDirection(_azimuth);
         
         double acc = _currentPosition!.accuracy;
         double altAcc = acc * 1.5;
         
-        waterMarkText = 'Lat: ${_currentPosition!.latitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n'
+        String waterMarkText = 'Lat: ${_currentPosition!.latitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n'
             'Lng: ${_currentPosition!.longitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n'
             'Alt: ${_currentPosition!.altitude.toStringAsFixed(1)}m (±${altAcc.toStringAsFixed(1)}m)\n'
             'Azimuth: ${_azimuth.toStringAsFixed(1)}° ($directionStr)\n'
@@ -204,7 +254,13 @@ class _CameraScreenState extends State<CameraScreen> {
 
         final outBytes = img.encodeJpg(capturedImage, quality: 90);
         final appDir = await getApplicationDocumentsDirectory();
-        final savedPath = '${appDir.path}/photo_${DateTime.now().millisecondsSinceEpoch}.jpg';
+        
+        // 💡 날짜별 폴더 생성 후 그 안에 저장
+        final folderPath = '${appDir.path}/$dateOnly';
+        final folder = Directory(folderPath);
+        if (!await folder.exists()) await folder.create(recursive: true);
+        
+        final savedPath = '$folderPath/photo_${DateTime.now().millisecondsSinceEpoch}.jpg';
         final savedFile = File(savedPath);
         await savedFile.writeAsBytes(outBytes);
 
@@ -235,6 +291,8 @@ class _CameraScreenState extends State<CameraScreen> {
             time: dateTime,
           ));
         });
+        
+        await _savePhotosData(); // 💡 사진을 찍을 때마다 데이터를 안전하게 영구 저장
         
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('사진이 촬영되어 저장되었습니다!')));
@@ -373,17 +431,58 @@ class GalleryMapDashboard extends StatefulWidget {
 class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   int _selectedIndex = 0;
   NaverMapController? _mapController;
+  String _selectedDate = '전체 보기'; // 💡 날짜별 폴더(필터) 기본값
+
+  // 💡 선택한 날짜에 해당하는 사진만 필터링해서 보여주기
+  List<PhotoData> get _filteredPhotos {
+    if (_selectedDate == '전체 보기') return widget.photos;
+    return widget.photos.where((p) => p.time.startsWith(_selectedDate)).toList();
+  }
 
   @override
   void initState() {
     super.initState();
-    _selectedIndex = widget.photos.length - 1;
+    if (widget.photos.isNotEmpty) {
+      _selectedIndex = _filteredPhotos.length - 1;
+    }
+  }
+
+  void _onDateChanged(String? newDate) {
+    if (newDate != null) {
+      setState(() {
+        _selectedDate = newDate;
+        _selectedIndex = _filteredPhotos.isNotEmpty ? _filteredPhotos.length - 1 : 0;
+      });
+      _updateMarkers();
+      
+      if (_filteredPhotos.isNotEmpty && _mapController != null) {
+        final photo = _filteredPhotos[_selectedIndex];
+        _mapController!.updateCamera(NCameraUpdate.fromCameraPosition(
+          NCameraPosition(target: NLatLng(photo.latitude, photo.longitude), zoom: 16)
+        ));
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final currentPhoto = widget.photos[_selectedIndex];
+    // 💡 날짜 목록(폴더) 추출
+    List<String> dateOptions = ['전체 보기'];
+    Set<String> uniqueDates = widget.photos.map((p) => p.time.substring(0, 10)).toSet();
+    List<String> sortedDates = uniqueDates.toList()..sort((a, b) => b.compareTo(a));
+    dateOptions.addAll(sortedDates);
+
     bool isPortrait = MediaQuery.of(context).orientation == Orientation.portrait;
+
+    if (_filteredPhotos.isEmpty) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(backgroundColor: Colors.black, title: const Text('지도 대시보드')),
+        body: const Center(child: Text("해당 날짜에 찍은 사진이 없습니다.", style: TextStyle(color: Colors.white))),
+      );
+    }
+
+    final currentPhoto = _filteredPhotos[_selectedIndex];
 
     Widget photoSection = Column(
       children: [
@@ -405,7 +504,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       ],
     );
 
-    // 💡 에러가 있으면 빨간 화면으로 원인을 띄우고, 정상이면 지도를 띄웁니다!
     Widget mapSection = globalNaverAuthError != null
         ? Container(
             color: Colors.white,
@@ -435,7 +533,16 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('촬영 사진 & 지도 위치 대시보드', style: TextStyle(color: Colors.white, fontSize: 16)),
+        // 💡 상단에 날짜(폴더) 선택 드롭다운 버튼 추가!
+        title: DropdownButton<String>(
+          value: _selectedDate,
+          dropdownColor: Colors.black87,
+          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+          underline: Container(),
+          icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+          items: dateOptions.map((date) => DropdownMenuItem(value: date, child: Text(date))).toList(),
+          onChanged: _onDateChanged,
+        ),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.white),
           onPressed: () => Navigator.pop(context),
@@ -462,7 +569,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
             height: 80,
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
-              itemCount: widget.photos.length,
+              itemCount: _filteredPhotos.length,
               itemBuilder: (context, index) {
                 bool isSelected = _selectedIndex == index;
                 return GestureDetector(
@@ -473,7 +580,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                       _mapController!.updateCamera(
                         NCameraUpdate.fromCameraPosition(
                           NCameraPosition(
-                            target: NLatLng(widget.photos[index].latitude, widget.photos[index].longitude),
+                            target: NLatLng(_filteredPhotos[index].latitude, _filteredPhotos[index].longitude),
                             zoom: 16,
                           ),
                         ),
@@ -485,7 +592,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                     decoration: BoxDecoration(
                       border: Border.all(color: isSelected ? Colors.amber : Colors.transparent, width: 3),
                     ),
-                    child: Image.file(File(widget.photos[index].path), width: 70, height: 70, fit: BoxFit.cover),
+                    child: Image.file(File(_filteredPhotos[index].path), width: 70, height: 70, fit: BoxFit.cover),
                   ),
                 );
               },
@@ -500,8 +607,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     if (_mapController == null) return;
     _mapController!.clearOverlays();
 
-    for (int i = 0; i < widget.photos.length; i++) {
-      final photo = widget.photos[i];
+    for (int i = 0; i < _filteredPhotos.length; i++) {
+      final photo = _filteredPhotos[i];
       bool isSelected = (i == _selectedIndex);
       Color markerColor = isSelected ? Colors.blueAccent : Colors.red;
 
