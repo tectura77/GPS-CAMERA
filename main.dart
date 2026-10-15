@@ -455,6 +455,26 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
+  // 💡 현재 확대(줌) 배율을 그대로 유지하면서 지도 중심만 이동시키는 함수
+  Future<void> _moveCameraKeepZoom(double lat, double lng) async {
+    if (_mapController == null) return;
+    try {
+      final currentPos = await _mapController!.getCameraPosition();
+      await _mapController!.updateCamera(
+        NCameraUpdate.fromCameraPosition(
+          NCameraPosition(
+            target: NLatLng(lat, lng),
+            zoom: currentPos.zoom,
+            tilt: currentPos.tilt,
+            bearing: currentPos.bearing,
+          ),
+        ),
+      );
+    } catch (e) {
+      debugPrint('카메라 이동 에러: $e');
+    }
+  }
+
   void _onDateChanged(String? newDate) {
     if (newDate != null) {
       setState(() {
@@ -463,12 +483,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       });
       _updateMarkers();
       
-      if (_filteredPhotos.isNotEmpty && _mapController != null) {
+      if (_filteredPhotos.isNotEmpty) {
         final photo = _filteredPhotos[_selectedIndex];
-        // 날짜 바꿀 때만 최초 위치로 이동하며 줌인 (16레벨 유지)
-        _mapController!.updateCamera(NCameraUpdate.fromCameraPosition(
-          NCameraPosition(target: NLatLng(photo.latitude, photo.longitude), zoom: 16)
-        ));
+        _moveCameraKeepZoom(photo.latitude, photo.longitude);
       }
     }
   }
@@ -492,24 +509,12 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
     final currentPhoto = _filteredPhotos[_selectedIndex];
 
-    Widget photoSection = Column(
-      children: [
-        Expanded(
-          child: Image.file(File(currentPhoto.path), fit: BoxFit.contain),
-        ),
-        Container(
-          padding: const EdgeInsets.all(8),
-          color: Colors.black87,
-          width: double.infinity,
-          child: Text(
-            '위도: ${currentPhoto.latitude.toStringAsFixed(6)} (±${currentPhoto.accuracy.toStringAsFixed(1)}m)\n'
-            '경도: ${currentPhoto.longitude.toStringAsFixed(6)} (±${currentPhoto.accuracy.toStringAsFixed(1)}m)\n'
-            '표고: ${currentPhoto.altitude.toStringAsFixed(1)}m\n'
-            '방위각: ${currentPhoto.azimuth.toStringAsFixed(1)}° | 시간: ${currentPhoto.time}',
-            style: const TextStyle(color: Colors.white, fontSize: 12),
-          ),
-        ),
-      ],
+    // 💡 아래쪽 위도/경도 텍스트 박스를 제거해서 사진이 옆의 지도만큼 꽉 차게 보이도록 수정!
+    Widget photoSection = Container(
+      color: Colors.black,
+      width: double.infinity,
+      height: double.infinity,
+      child: Image.file(File(currentPhoto.path), fit: BoxFit.contain),
     );
 
     Widget mapSection = globalNaverAuthError != null
@@ -561,13 +566,15 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
             child: isPortrait
                 ? Column(
                     children: [
-                      Expanded(flex: 4, child: photoSection),
+                      Expanded(flex: 5, child: photoSection),
+                      const SizedBox(height: 4),
                       Expanded(flex: 5, child: mapSection),
                     ],
                   )
                 : Row(
                     children: [
                       Expanded(flex: 5, child: photoSection),
+                      const SizedBox(width: 4),
                       Expanded(flex: 5, child: mapSection),
                     ],
                   ),
@@ -582,17 +589,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 return GestureDetector(
                   onTap: () {
                     setState(() { _selectedIndex = index; });
-                    _updateMarkers(); 
-                    if (_mapController != null) {
-                      // 💡 아래 목록을 터치할 때는 기존 줌 레벨을 유지한 채 위치만 이동
-                      _mapController!.info(
-                        target: NLatLng(_filteredPhotos[index].latitude, _filteredPhotos[index].longitude),
-                      );
-                      // 현재 지도 줌을 유지하기 위해 별도 카메라 업데이트 대신 위치만 부드럽게 이동
-                      _mapController!.updateCamera(NCameraUpdate.scrollAndZoomTo(
-                        target: NLatLng(_filteredPhotos[index].latitude, _filteredPhotos[index].longitude),
-                      ));
-                    }
+                    _updateMarkers();
+                    _moveCameraKeepZoom(
+                      _filteredPhotos[index].latitude,
+                      _filteredPhotos[index].longitude,
+                    );
                   },
                   child: Container(
                     margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
@@ -614,29 +615,20 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     if (_mapController == null) return;
     _mapController!.clearOverlays();
 
-    // 💡 겹쳐있는 마커 그룹핑 처리 (위도가 거의 같고 경도가 거의 같은 사진들 찾기)
-    Map<String, List<int>> locationGroups = {};
+    // 💡 빨간색(선택 안 된) 마커들을 먼저 그리고, 파란색(선택된) 마커를 맨 마지막에 그려서
+    // 겹쳐 있을 때도 파란색 화살표가 항상 맨 위에 선명하게 보이도록 순서 정렬!
+    List<int> drawOrder = [];
     for (int i = 0; i < _filteredPhotos.length; i++) {
-      final p = _filteredPhotos[i];
-      // 소수점 5자리(약 1미터 단위)로 반올림하여 키값 생성
-      String key = "${p.latitude.toStringAsFixed(5)}_${p.longitude.toStringAsFixed(5)}";
-      locationGroups.putIfAbsent(key, () => []).add(i);
+      if (i != _selectedIndex) drawOrder.add(i);
+    }
+    if (_selectedIndex >= 0 && _selectedIndex < _filteredPhotos.length) {
+      drawOrder.add(_selectedIndex);
     }
 
-    for (var entry in locationGroups.entries) {
-      List<int> indices = entry.value;
-      
-      // 해당 위치에 속한 사진들 중 현재 선택된(_selectedIndex) 사진이 포함되어 있는지 확인
-      bool groupContainsSelected = indices.contains(_selectedIndex);
-      // 그룹 내에서 현재 선택된 사진의 인덱스 찾기
-      int currentSelectedInGroupIndex = indices.indexOf(_selectedIndex);
-
-      // 마커 색상 결정: 그룹에 선택된 사진이 포함되어 있으면 파란색, 아니면 빨간색
-      Color markerColor = groupContainsSelected ? Colors.blueAccent : Colors.red;
-      
-      // 대표 사진 (그룹의 첫 번째 사진 또는 현재 선택된 사진)
-      int representativeIndex = groupContainsSelected ? _selectedIndex : indices.first;
-      final photo = _filteredPhotos[representativeIndex];
+    for (int i in drawOrder) {
+      final photo = _filteredPhotos[i];
+      bool isSelected = (i == _selectedIndex);
+      Color markerColor = isSelected ? Colors.blueAccent : Colors.red;
 
       try {
         final markerIcon = await NOverlayImage.fromWidget(
@@ -656,20 +648,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 angle: photo.azimuth * (pi / 180),
                 child: Icon(Icons.navigation, color: markerColor, size: 20),
               ),
-              // 만약 겹쳐진 사진이 2장 이상이라면 우측 상단에 숫자를 표시해 줍니다!
-              if (indices.length > 1)
-                Positioned(
-                  top: 0,
-                  right: 0,
-                  child: Container(
-                    padding: const EdgeInsets.all(2),
-                    decoration: const BoxDecoration(color: Colors.black, shape: BoxShape.circle),
-                    child: Text(
-                      '${indices.length}',
-                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                ),
             ],
           ),
           size: const Size(28, 28),
@@ -677,32 +655,40 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         );
 
         final marker = NMarker(
-          id: 'group_${entry.key}',
+          id: 'photo_$i',
           position: NLatLng(photo.latitude, photo.longitude),
           icon: markerIcon,
         );
         
         marker.setOnTapListener((overlay) async {
-          setState(() {
-            if (groupContainsSelected) {
-              // 💡 이미 선택된 그룹이라면, 터치할 때마다 다음 사진으로 순환(Cycle)합니다!
-              int nextInGroupPos = (currentSelectedInGroupIndex + 1) % indices.length;
-              _selectedIndex = indices[nextInGroupPos];
-            } else {
-              // 처음 선택하는 그룹이라면 첫 번째 사진 선택
-              _selectedIndex = indices.first;
+          // 💡 클릭한 동그라미 주변(반경 20m 이내)에 겹쳐 있는 사진들을 모두 찾아서
+          // 누를 때마다 다음 사진으로 순환(Cycle)하도록 처리!
+          List<int> overlappingIndices = [];
+          for (int j = 0; j < _filteredPhotos.length; j++) {
+            double dist = Geolocator.distanceBetween(
+              photo.latitude, photo.longitude,
+              _filteredPhotos[j].latitude, _filteredPhotos[j].longitude,
+            );
+            if (dist <= 20.0) {
+              overlappingIndices.add(j);
             }
-          });
-          
-          _updateMarkers();
-
-          // 💡 마커를 눌러도 기존 지도 줌 레벨과 위치가 초기화되지 않고 그대로 유지되도록 스크롤만 이동
-          if (_mapController != null) {
-            final targetPhoto = _filteredPhotos[_selectedIndex];
-            _mapController!.updateCamera(NCameraUpdate.scrollAndZoomTo(
-              target: NLatLng(targetPhoto.latitude, targetPhoto.longitude),
-            ));
           }
+
+          int nextIndex = i;
+          if (overlappingIndices.length > 1 && overlappingIndices.contains(_selectedIndex)) {
+            int currentOrder = overlappingIndices.indexOf(_selectedIndex);
+            nextIndex = overlappingIndices[(currentOrder + 1) % overlappingIndices.length];
+          } else {
+            nextIndex = i;
+          }
+
+          setState(() {
+            _selectedIndex = nextIndex;
+          });
+
+          await _updateMarkers();
+          final targetPhoto = _filteredPhotos[_selectedIndex];
+          await _moveCameraKeepZoom(targetPhoto.latitude, targetPhoto.longitude);
         });
 
         _mapController!.addOverlay(marker);
