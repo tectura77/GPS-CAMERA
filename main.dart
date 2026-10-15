@@ -27,8 +27,6 @@ Future<void> main() async {
   }
 
   try {
-    // 💡 핵심 수정: 구버전(NaverMapSdk.instance.initialize) 대신
-    // 신규 Maps 콘솔 전용 최신 인증 함수인 FlutterNaverMap().init 사용!
     await FlutterNaverMap().init(
       clientId: 'b3agnvaern',
       onAuthFailed: (ex) {
@@ -248,7 +246,6 @@ class _CameraScreenState extends State<CameraScreen> {
         double acc = _currentPosition!.accuracy;
         double altAcc = acc * 1.5;
         
-        // 💡 이미지 워터마크에서 특수문자/한글이 깨지지 않도록 영문 표준 표기 적용
         String waterMarkText = 'Lat: ${_currentPosition!.latitude.toStringAsFixed(6)} (+-${acc.toStringAsFixed(1)}m)\n'
             'Lng: ${_currentPosition!.longitude.toStringAsFixed(6)} (+-${acc.toStringAsFixed(1)}m)\n'
             'Alt: ${_currentPosition!.altitude.toStringAsFixed(1)}m (+-${altAcc.toStringAsFixed(1)}m)\n'
@@ -468,6 +465,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       
       if (_filteredPhotos.isNotEmpty && _mapController != null) {
         final photo = _filteredPhotos[_selectedIndex];
+        // 날짜 바꿀 때만 최초 위치로 이동하며 줌인 (16레벨 유지)
         _mapController!.updateCamera(NCameraUpdate.fromCameraPosition(
           NCameraPosition(target: NLatLng(photo.latitude, photo.longitude), zoom: 16)
         ));
@@ -586,14 +584,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                     setState(() { _selectedIndex = index; });
                     _updateMarkers(); 
                     if (_mapController != null) {
-                      _mapController!.updateCamera(
-                        NCameraUpdate.fromCameraPosition(
-                          NCameraPosition(
-                            target: NLatLng(_filteredPhotos[index].latitude, _filteredPhotos[index].longitude),
-                            zoom: 16,
-                          ),
-                        ),
+                      // 💡 아래 목록을 터치할 때는 기존 줌 레벨을 유지한 채 위치만 이동
+                      _mapController!.info(
+                        target: NLatLng(_filteredPhotos[index].latitude, _filteredPhotos[index].longitude),
                       );
+                      // 현재 지도 줌을 유지하기 위해 별도 카메라 업데이트 대신 위치만 부드럽게 이동
+                      _mapController!.updateCamera(NCameraUpdate.scrollAndZoomTo(
+                        target: NLatLng(_filteredPhotos[index].latitude, _filteredPhotos[index].longitude),
+                      ));
                     }
                   },
                   child: Container(
@@ -616,10 +614,29 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     if (_mapController == null) return;
     _mapController!.clearOverlays();
 
+    // 💡 겹쳐있는 마커 그룹핑 처리 (위도가 거의 같고 경도가 거의 같은 사진들 찾기)
+    Map<String, List<int>> locationGroups = {};
     for (int i = 0; i < _filteredPhotos.length; i++) {
-      final photo = _filteredPhotos[i];
-      bool isSelected = (i == _selectedIndex);
-      Color markerColor = isSelected ? Colors.blueAccent : Colors.red;
+      final p = _filteredPhotos[i];
+      // 소수점 5자리(약 1미터 단위)로 반올림하여 키값 생성
+      String key = "${p.latitude.toStringAsFixed(5)}_${p.longitude.toStringAsFixed(5)}";
+      locationGroups.putIfAbsent(key, () => []).add(i);
+    }
+
+    for (var entry in locationGroups.entries) {
+      List<int> indices = entry.value;
+      
+      // 해당 위치에 속한 사진들 중 현재 선택된(_selectedIndex) 사진이 포함되어 있는지 확인
+      bool groupContainsSelected = indices.contains(_selectedIndex);
+      // 그룹 내에서 현재 선택된 사진의 인덱스 찾기
+      int currentSelectedInGroupIndex = indices.indexOf(_selectedIndex);
+
+      // 마커 색상 결정: 그룹에 선택된 사진이 포함되어 있으면 파란색, 아니면 빨간색
+      Color markerColor = groupContainsSelected ? Colors.blueAccent : Colors.red;
+      
+      // 대표 사진 (그룹의 첫 번째 사진 또는 현재 선택된 사진)
+      int representativeIndex = groupContainsSelected ? _selectedIndex : indices.first;
+      final photo = _filteredPhotos[representativeIndex];
 
       try {
         final markerIcon = await NOverlayImage.fromWidget(
@@ -639,6 +656,20 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 angle: photo.azimuth * (pi / 180),
                 child: Icon(Icons.navigation, color: markerColor, size: 20),
               ),
+              // 만약 겹쳐진 사진이 2장 이상이라면 우측 상단에 숫자를 표시해 줍니다!
+              if (indices.length > 1)
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: const BoxDecoration(color: Colors.black, shape: BoxShape.circle),
+                    child: Text(
+                      '${indices.length}',
+                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
             ],
           ),
           size: const Size(28, 28),
@@ -646,23 +677,34 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         );
 
         final marker = NMarker(
-          id: 'photo_$i',
+          id: 'group_${entry.key}',
           position: NLatLng(photo.latitude, photo.longitude),
           icon: markerIcon,
         );
         
-        marker.setOnTapListener((overlay) {
-          setState(() { _selectedIndex = i; });
+        marker.setOnTapListener((overlay) async {
+          setState(() {
+            if (groupContainsSelected) {
+              // 💡 이미 선택된 그룹이라면, 터치할 때마다 다음 사진으로 순환(Cycle)합니다!
+              int nextInGroupPos = (currentSelectedInGroupIndex + 1) % indices.length;
+              _selectedIndex = indices[nextInGroupPos];
+            } else {
+              // 처음 선택하는 그룹이라면 첫 번째 사진 선택
+              _selectedIndex = indices.first;
+            }
+          });
+          
           _updateMarkers();
-          _mapController!.updateCamera(
-            NCameraUpdate.fromCameraPosition(
-              NCameraPosition(
-                target: NLatLng(photo.latitude, photo.longitude),
-                zoom: 16,
-              ),
-            ),
-          );
+
+          // 💡 마커를 눌러도 기존 지도 줌 레벨과 위치가 초기화되지 않고 그대로 유지되도록 스크롤만 이동
+          if (_mapController != null) {
+            final targetPhoto = _filteredPhotos[_selectedIndex];
+            _mapController!.updateCamera(NCameraUpdate.scrollAndZoomTo(
+              target: NLatLng(targetPhoto.latitude, targetPhoto.longitude),
+            ));
+          }
         });
+
         _mapController!.addOverlay(marker);
       } catch (e) {
         debugPrint('마커 생성 에러: $e');
