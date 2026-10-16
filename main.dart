@@ -322,7 +322,6 @@ class _CameraScreenState extends State<CameraScreen> {
         final savedFile = File(savedPath);
         await savedFile.writeAsBytes(outBytes);
 
-        // EXIF 표준 분수(Rational) 포맷으로 방위각과 고도를 저장해 누락 방지
         final int azimuthNum = (_azimuth.clamp(0.0, 360.0) * 100).round();
         final int altitudeNum = (_currentPosition!.altitude.abs() * 100).round();
 
@@ -522,7 +521,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   double? _bpCenterLng;
   double _bpRadiusMeters = 150.0;
   double _bpRotation = 0.0;
-  double _bpOpacity = 0.7;
+  double _bpOpacity = 0.5; // 💡 도면 최초 가져오기 시 투명도 50%로 기본 설정
   bool _bpVisible = true;
   bool _isEditingBlueprint = false;
   NOverlayImage? _cachedBlueprintIcon;
@@ -556,7 +555,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
             _bpRadiusMeters =
                 (data['radiusMeters'] as num?)?.toDouble() ?? 150.0;
             _bpRotation = (data['rotation'] as num?)?.toDouble() ?? 0.0;
-            _bpOpacity = (data['opacity'] as num?)?.toDouble() ?? 0.7;
+            _bpOpacity = (data['opacity'] as num?)?.toDouble() ?? 0.5;
             _bpVisible = data['isVisible'] ?? true;
           });
           if (_mapController != null) {
@@ -616,6 +615,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         _bpImagePath = savedPath;
         _bpCenterLat = initLat;
         _bpCenterLng = initLng;
+        _bpRadiusMeters = 150.0; // 💡 지도 화면 크기의 약 60%에 해당하는 기본 반경 설정
+        _bpOpacity = 0.5;       // 💡 투명도 50% 즉시 적용
+        _bpRotation = 0.0;
         _bpVisible = true;
         _isEditingBlueprint = true;
       });
@@ -970,13 +972,22 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
     final currentPhoto = _filteredPhotos[_selectedIndex];
 
+    // 💡 사진을 두 손가락으로 확대/축소(Pinch-to-Zoom)해서 볼 수 있도록 InteractiveViewer 적용
     Widget photoSection = _isEditingBlueprint
         ? _buildBlueprintEditPanel()
         : Container(
             color: Colors.black,
             width: double.infinity,
             height: double.infinity,
-            child: Image.file(File(currentPhoto.path), fit: BoxFit.contain),
+            child: InteractiveViewer(
+              panEnabled: true,
+              boundaryMargin: const EdgeInsets.all(20),
+              minScale: 0.5,
+              maxScale: 4.0,
+              child: Center(
+                child: Image.file(File(currentPhoto.path), fit: BoxFit.contain),
+              ),
+            ),
           );
 
     Widget mapSection = globalNaverAuthError != null
