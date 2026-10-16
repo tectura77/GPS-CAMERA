@@ -13,6 +13,7 @@ import 'package:gal/gal.dart';
 import 'package:native_exif/native_exif.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:image_picker/image_picker.dart';
 
 List<CameraDescription> cameras = [];
 String? globalNaverAuthError;
@@ -63,9 +64,14 @@ class PhotoData {
   });
 
   Map<String, dynamic> toJson() => {
-    'path': path, 'latitude': latitude, 'longitude': longitude,
-    'altitude': altitude, 'accuracy': accuracy, 'azimuth': azimuth,
-    'pitch': pitch, 'time': time
+    'path': path,
+    'latitude': latitude,
+    'longitude': longitude,
+    'altitude': altitude,
+    'accuracy': accuracy,
+    'azimuth': azimuth,
+    'pitch': pitch,
+    'time': time,
   };
 
   factory PhotoData.fromJson(Map<String, dynamic> json) => PhotoData(
@@ -74,8 +80,8 @@ class PhotoData {
     longitude: (json['longitude'] as num).toDouble(),
     altitude: (json['altitude'] as num).toDouble(),
     accuracy: (json['accuracy'] as num).toDouble(),
-    azimuth: (json['azimuth'] as num?)?.toDouble() ?? 0.0,
-    pitch: (json['pitch'] as num?)?.toDouble() ?? 0.0,
+    azimuth: (json['azimuth'] as num).toDouble(),
+    pitch: (json['pitch'] as num).toDouble(),
     time: json['time'],
   );
 }
@@ -94,10 +100,6 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isProcessing = false;
   String _aspectRatioMode = '16:9';
   
-  // 💡 나침반 센서 백업용 가속도/자기장 데이터
-  AccelerometerEvent? _lastAcc;
-  DateTime _lastCompassUpdate = DateTime.fromMillisecondsSinceEpoch(0);
-
   final List<PhotoData> _capturedPhotos = [];
 
   @override
@@ -166,7 +168,6 @@ class _CameraScreenState extends State<CameraScreen> {
 
   void _initSensors() {
     accelerometerEventStream().listen((AccelerometerEvent acc) {
-      _lastAcc = acc;
       if (mounted) {
         setState(() {
           _pitch = (atan2(acc.y, sqrt(acc.x * acc.x + acc.z * acc.z)) * 180 / pi);
@@ -174,10 +175,8 @@ class _CameraScreenState extends State<CameraScreen> {
       }
     });
     
-    // 1차 주 센서: FlutterCompass
     FlutterCompass.events?.listen((CompassEvent event) {
-      if (mounted && event.heading != null && !event.heading!.isNaN) {
-        _lastCompassUpdate = DateTime.now();
+      if (mounted && event.heading != null) {
         setState(() {
           double calcAzimuth = event.heading!;
           calcAzimuth = (calcAzimuth % 360 + 360) % 360;
@@ -185,41 +184,6 @@ class _CameraScreenState extends State<CameraScreen> {
         });
       }
     });
-
-    // 💡 2차 백업 센서: FlutterCompass가 멈추거나 null일 때 자기장 센서로 방위각 자동 계산
-    magnetometerEventStream().listen((MagnetometerEvent mag) {
-      if (DateTime.now().difference(_lastCompassUpdate).inSeconds >= 2 && _lastAcc != null) {
-        final ax = _lastAcc!.x;
-        final ay = _lastAcc!.y;
-        final az = _lastAcc!.z;
-        final normA = sqrt(ax * ax + ay * ay + az * az);
-        if (normA == 0) return;
-        final axn = ax / normA;
-        final ayn = ay / normA;
-
-        final pitchRad = asin(-axn);
-        final rollRad = asin(ayn / cos(pitchRad));
-
-        final mx = mag.x * cos(pitchRad) + mag.z * sin(pitchRad);
-        final my = mag.x * sin(rollRad) * sin(pitchRad) + mag.y * cos(rollRad) - mag.z * sin(rollRad) * cos(pitchRad);
-
-        double heading = atan2(-my, mx) * (180 / pi);
-        heading = (heading % 360 + 360) % 360;
-
-        if (mounted && !heading.isNaN) {
-          setState(() {
-            _azimuth = heading;
-          });
-        }
-      }
-    });
-  }
-
-  // 💡 핵심 함수: 안드로이드 EXIF 표준 URATIONAL(분수) 포맷 변환기 (예: 187.2 -> "18720/100")
-  String _toExifRational(double value) {
-    if (value.isNaN || value.isInfinite) return '0/1';
-    int numerator = (value.abs() * 100).round();
-    return '$numerator/100';
   }
 
   String _getDirection(double azimuth) {
@@ -238,4 +202,5 @@ class _CameraScreenState extends State<CameraScreen> {
     if (azimuth >= 337.5 || azimuth < 22.5) return 'N';
     if (azimuth >= 22.5 && azimuth < 67.5) return 'NE';
     if (azimuth >= 67.5 && azimuth < 112.5) return 'E';
-    if (azimuth >= 112.5 && azimuth < 157.5) return '
+    if (azimuth >= 112.5 && azimuth < 157.5) return 'SE';
+    if (azimuth >= 157.5 && azimuth < 2
