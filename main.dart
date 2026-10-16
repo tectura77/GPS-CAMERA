@@ -292,13 +292,11 @@ class _CameraScreenState extends State<CameraScreen> {
       img.Image? decodedImg = img.decodeImage(rawBytes);
 
       if (decodedImg != null && _pos != null) {
-        // 사진의 EXIF 회전 방향을 먼저 정방향으로 맞춘 뒤 비율 크롭 진행
         decodedImg = img.bakeOrientation(decodedImg);
 
         final int w = decodedImg.width;
         final int h = decodedImg.height;
 
-        // 16:9, 4:3, 1:1 모두 이미지를 늘리거나 줄이지 않고 정중앙에서 비율에 맞게 크롭!
         double targetAspect;
         if (_ratioMode == '1:1') {
           targetAspect = 1.0;
@@ -313,10 +311,8 @@ class _CameraScreenState extends State<CameraScreen> {
         int cropH = h;
 
         if (currentAspect > targetAspect) {
-          // 원본이 목표 비율보다 가로로 넓은 경우 -> 좌우 여백을 잘라냄
           cropW = (h * targetAspect).round().clamp(1, w);
         } else if (currentAspect < targetAspect) {
-          // 원본이 목표 비율보다 세로로 긴 경우 -> 상하 여백을 잘라냄
           cropH = (w / targetAspect).round().clamp(1, h);
         }
 
@@ -436,14 +432,12 @@ class _CameraScreenState extends State<CameraScreen> {
     final bool landscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
 
-    // 선택한 촬영 비율 (창틀 비율)
     final double targetFrameRatio = _ratioMode == '1:1'
         ? 1.0
         : (_ratioMode == '4:3'
             ? (landscape ? 4.0 / 3.0 : 3.0 / 4.0)
             : (landscape ? 16.0 / 9.0 : 9.0 / 16.0));
 
-    // 카메라 센서 자체의 원본 해상도 비율 (늘어나거나 찌그러지지 않도록 원본 비율 유지)
     final Size? rawPreviewSize = _camController!.value.previewSize;
     final double sensorW = rawPreviewSize != null
         ? (landscape ? rawPreviewSize.width : rawPreviewSize.height)
@@ -457,7 +451,6 @@ class _CameraScreenState extends State<CameraScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // 왜곡 없이 원본 비율을 유지하면서 선택한 비율(16:9, 4:3, 1:1)로 깔끔하게 크롭해서 보여주는 뷰파인더
           GestureDetector(
             onScaleStart: (_) {
               _baseScaleZoom = _currentZoom;
@@ -483,8 +476,9 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
+          // 1. [16:9 / 4:3 / 1:1] 버튼: 맨 위 중앙으로 이동
           Positioned(
-            top: 50,
+            top: 45,
             left: 0,
             right: 0,
             child: Row(
@@ -492,12 +486,13 @@ class _CameraScreenState extends State<CameraScreen> {
               children: ['16:9', '4:3', '1:1'].map((m) {
                 final bool active = _ratioMode == m;
                 return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
                   child: ElevatedButton(
                     onPressed: () => setState(() => _ratioMode = m),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: active ? Colors.amber : Colors.black54,
                       foregroundColor: active ? Colors.black : Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
                     ),
                     child: Text(m),
                   ),
@@ -505,22 +500,24 @@ class _CameraScreenState extends State<CameraScreen> {
               }).toList(),
             ),
           ),
+          // 2. [위도·경도 정보 박스]: 좌측 중앙 부근으로 이동
           Positioned(
-            bottom: 145,
-            left: 20,
+            left: 16,
+            top: MediaQuery.of(context).size.height * 0.38,
             child: Container(
               padding: const EdgeInsets.all(8),
-              color: Colors.black45,
+              color: Colors.black54,
               child: Text(
                 '$locInfo\n방위각: ${_heading.toStringAsFixed(1)}° ($dirKr)\n'
                 '피치각: ${_tiltPitch.toStringAsFixed(1)}° | 배율: ${_currentZoom.toStringAsFixed(1)}x\n'
                 '시간: ${DateTime.now().toString().substring(0, 16)}',
-                style: const TextStyle(color: Colors.white, fontSize: 13),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
               ),
             ),
           ),
+          // 3. [0.6x / 1.0x / 2.0x 배율 버튼]: 셔터 바로 위 중앙으로 이동
           Positioned(
-            bottom: 92,
+            bottom: 95,
             left: 0,
             right: 0,
             child: Row(
@@ -555,9 +552,10 @@ class _CameraScreenState extends State<CameraScreen> {
               }).toList(),
             ),
           ),
+          // 4. [파란색 지도 보기 버튼]: 우측 하단 구석으로 이동
           Positioned(
             bottom: 25,
-            right: 30,
+            right: 25,
             child: FloatingActionButton(
               heroTag: 'mapDashboardBtn',
               onPressed: () {
@@ -572,8 +570,9 @@ class _CameraScreenState extends State<CameraScreen> {
               child: const Icon(Icons.map, color: Colors.white),
             ),
           ),
+          // 5. [노란색 셔터 버튼]: 하단 정중앙 고정
           Positioned(
-            bottom: 25,
+            bottom: 20,
             left: 0,
             right: 0,
             child: Center(
@@ -770,6 +769,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
+  // 핵심 수정: 앱과 HTML 뷰어 간 도면 왜곡이 없도록 동일한 Bounds 수학 공식 적용
   Future<void> _renderBlueprintOnMap({bool rebuildBitmap = false}) async {
     if (_mapCtrl == null) return;
 
@@ -919,7 +919,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                   },
                 ),
                 ListTile(
-                  // 소문자 Icons.burst_mode 로 수정 완료!
                   leading: const Icon(Icons.burst_mode,
                       color: Colors.lightGreenAccent),
                   title: const Text(
@@ -944,6 +943,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
+  // HTML 내보내기에서도 앱과 완전히 동일한 도면 바운즈 및 비율 적용
   Future<void> _exportAsHtmlViewer() async {
     if (_visiblePhotos.isEmpty && _bpPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1066,6 +1066,7 @@ if (bp) {
   const el = overlay.getElement();
   if (el) {
     el.style.transformOrigin = 'center center';
+    el.style.transform = `rotate(\${bp.rotation}deg)`;
   }
 }
 
@@ -1590,32 +1591,36 @@ if (photos.length > 0) {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: DropdownButton<String>(
-          value: _dateFilter,
-          dropdownColor: Colors.black87,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 15,
-            fontWeight: FontWeight.bold,
+        // 상단 전체보기 메뉴가 짤리지 않도록 우측 여백 확보 및 패딩 조정
+        title: Padding(
+          padding: const EdgeInsets.only(left: 8.0),
+          child: DropdownButton<String>(
+            value: _dateFilter,
+            dropdownColor: Colors.black87,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 15,
+              fontWeight: FontWeight.bold,
+            ),
+            underline: const SizedBox.shrink(),
+            icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+            items: dateTabs
+                .map((d) => DropdownMenuItem(value: d, child: Text(d)))
+                .toList(),
+            onChanged: (val) {
+              if (val == null) return;
+              setState(() {
+                _dateFilter = val;
+                _selectedIdx =
+                    _visiblePhotos.isNotEmpty ? _visiblePhotos.length - 1 : 0;
+              });
+              _refreshAllOverlays(includeBlueprint: true);
+              if (_visiblePhotos.isNotEmpty) {
+                final p = _visiblePhotos[_selectedIdx];
+                _panMapKeepZoom(p.lat, p.lng);
+              }
+            },
           ),
-          underline: const SizedBox.shrink(),
-          icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
-          items: dateTabs
-              .map((d) => DropdownMenuItem(value: d, child: Text(d)))
-              .toList(),
-          onChanged: (val) {
-            if (val == null) return;
-            setState(() {
-              _dateFilter = val;
-              _selectedIdx =
-                  _visiblePhotos.isNotEmpty ? _visiblePhotos.length - 1 : 0;
-            });
-            _refreshAllOverlays(includeBlueprint: true);
-            if (_visiblePhotos.isNotEmpty) {
-              final p = _visiblePhotos[_selectedIdx];
-              _panMapKeepZoom(p.lat, p.lng);
-            }
-          },
         ),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.white),
