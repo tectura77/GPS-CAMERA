@@ -292,42 +292,42 @@ class _CameraScreenState extends State<CameraScreen> {
       img.Image? decodedImg = img.decodeImage(rawBytes);
 
       if (decodedImg != null && _pos != null) {
+        // 사진의 EXIF 회전 방향을 먼저 정방향으로 맞춘 뒤 비율 크롭 진행
+        decodedImg = img.bakeOrientation(decodedImg);
+
         final int w = decodedImg.width;
         final int h = decodedImg.height;
 
+        // 16:9, 4:3, 1:1 모두 이미지를 늘리거나 줄이지 않고 정중앙에서 비율에 맞게 크롭!
+        double targetAspect;
         if (_ratioMode == '1:1') {
-          final int s = min(w, h);
+          targetAspect = 1.0;
+        } else if (_ratioMode == '4:3') {
+          targetAspect = (w >= h) ? (4.0 / 3.0) : (3.0 / 4.0);
+        } else {
+          targetAspect = (w >= h) ? (16.0 / 9.0) : (9.0 / 16.0);
+        }
+
+        final double currentAspect = w / h;
+        int cropW = w;
+        int cropH = h;
+
+        if (currentAspect > targetAspect) {
+          // 원본이 목표 비율보다 가로로 넓은 경우 -> 좌우 여백을 잘라냄
+          cropW = (h * targetAspect).round().clamp(1, w);
+        } else if (currentAspect < targetAspect) {
+          // 원본이 목표 비율보다 세로로 긴 경우 -> 상하 여백을 잘라냄
+          cropH = (w / targetAspect).round().clamp(1, h);
+        }
+
+        if (cropW != w || cropH != h) {
           decodedImg = img.copyCrop(
             decodedImg,
-            x: (w - s) ~/ 2,
-            y: (h - s) ~/ 2,
-            width: s,
-            height: s,
+            x: (w - cropW) ~/ 2,
+            y: (h - cropH) ~/ 2,
+            width: cropW,
+            height: cropH,
           );
-        } else if (_ratioMode == '4:3') {
-          if (h > w) {
-            final int th = w * 4 ~/ 3;
-            if (h > th) {
-              decodedImg = img.copyCrop(
-                decodedImg,
-                x: 0,
-                y: (h - th) ~/ 2,
-                width: w,
-                height: th,
-              );
-            }
-          } else {
-            final int tw = h * 4 ~/ 3;
-            if (w > tw) {
-              decodedImg = img.copyCrop(
-                decodedImg,
-                x: (w - tw) ~/ 2,
-                y: 0,
-                width: tw,
-                height: h,
-              );
-            }
-          }
         }
 
         final String nowStr = DateTime.now().toString().substring(0, 16);
@@ -349,7 +349,7 @@ class _CameraScreenState extends State<CameraScreen> {
           stamp,
           font: img.arial24,
           x: 20,
-          y: decodedImg.height - 220,
+          y: max(20, decodedImg.height - 220),
           color: img.ColorRgb8(255, 200, 50),
         );
 
@@ -435,17 +435,29 @@ class _CameraScreenState extends State<CameraScreen> {
 
     final bool landscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
-    final double ratio = _ratioMode == '1:1'
+
+    // 선택한 촬영 비율 (창틀 비율)
+    final double targetFrameRatio = _ratioMode == '1:1'
         ? 1.0
         : (_ratioMode == '4:3'
-            ? (landscape ? 4 / 3 : 3 / 4)
-            : (landscape ? 16 / 9 : 9 / 16));
+            ? (landscape ? 4.0 / 3.0 : 3.0 / 4.0)
+            : (landscape ? 16.0 / 9.0 : 9.0 / 16.0));
+
+    // 카메라 센서 자체의 원본 해상도 비율 (늘어나거나 찌그러지지 않도록 원본 비율 유지)
+    final Size? rawPreviewSize = _camController!.value.previewSize;
+    final double sensorW = rawPreviewSize != null
+        ? (landscape ? rawPreviewSize.width : rawPreviewSize.height)
+        : (landscape ? 1920.0 : 1080.0);
+    final double sensorH = rawPreviewSize != null
+        ? (landscape ? rawPreviewSize.height : rawPreviewSize.width)
+        : (landscape ? 1080.0 : 1920.0);
 
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
+          // 왜곡 없이 원본 비율을 유지하면서 선택한 비율(16:9, 4:3, 1:1)로 깔끔하게 크롭해서 보여주는 뷰파인더
           GestureDetector(
             onScaleStart: (_) {
               _baseScaleZoom = _currentZoom;
@@ -457,8 +469,17 @@ class _CameraScreenState extends State<CameraScreen> {
             },
             child: Center(
               child: AspectRatio(
-                aspectRatio: ratio,
-                child: CameraPreview(_camController!),
+                aspectRatio: targetFrameRatio,
+                child: ClipRect(
+                  child: FittedBox(
+                    fit: BoxFit.cover,
+                    child: SizedBox(
+                      width: sensorW,
+                      height: sensorH,
+                      child: CameraPreview(_camController!),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -836,7 +857,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // 📤 내보내기 메뉴 팝업 (3가지 방식 중 선택)
   void _showExportOptionsSheet() {
     showModalBottomSheet(
       context: context,
@@ -899,7 +919,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                   },
                 ),
                 ListTile(
-                  leading: const Icon(Icons.Burst_mode,
+                  // 소문자 Icons.burst_mode 로 수정 완료!
+                  leading: const Icon(Icons.burst_mode,
                       color: Colors.lightGreenAccent),
                   title: const Text(
                     '③ [사진 + 도면 지도] 합본 이미지(.jpg) 공유',
@@ -923,7 +944,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // 방식 1: 단독 실행 가능한 대화형 웹 뷰어(.html) 생성 및 공유
   Future<void> _exportAsHtmlViewer() async {
     if (_visiblePhotos.isEmpty && _bpPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1126,7 +1146,6 @@ if (photos.length > 0) {
     }
   }
 
-  // 방식 2: 원본 사진 + 도면 + 설정 데이터를 ZIP 압축파일로 묶어 내보내기
   Future<void> _exportAsZipArchive() async {
     if (_visiblePhotos.isEmpty && _bpPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1160,7 +1179,8 @@ if (photos.length > 0) {
       if (_bpPath != null && File(_bpPath!).existsSync()) {
         final String bpName = _bpPath!.split('/').last;
         final Uint8List bpBytes = await File(_bpPath!).readAsBytes();
-        archive.addFile(ArchiveFile('blueprint/$bpName', bpBytes.length, bpBytes));
+        archive.addFile(
+            ArchiveFile('blueprint/$bpName', bpBytes.length, bpBytes));
 
         final Map<String, dynamic> bpCfg = {
           'fileName': bpName,
@@ -1204,7 +1224,6 @@ if (photos.length > 0) {
     }
   }
 
-  // 방식 3: [왼쪽 촬영 사진 + 오른쪽 도면 지도] 반반 합본 이미지(.jpg) 생성 및 공유
   Future<void> _exportAsCombinedImage() async {
     if (_visiblePhotos.isEmpty || _mapCtrl == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1603,7 +1622,6 @@ if (photos.length > 0) {
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
-          // 📤 내보내기 버튼 (클릭 시 3가지 방식 선택 창 오픈)
           TextButton.icon(
             onPressed: _isExporting ? null : _showExportOptionsSheet,
             icon: const Icon(Icons.ios_share,
