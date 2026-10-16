@@ -15,28 +15,27 @@ import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:image_picker/image_picker.dart';
 
-List<CameraDescription> cameras = [];
-String? globalNaverAuthError;
+List<CameraDescription> appCameras = [];
+String? naverAuthErrorMsg;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    cameras = await availableCameras();
+    appCameras = await availableCameras();
   } catch (e) {
-    debugPrint(e.toString());
+    debugPrint('Camera init error: $e');
   }
 
   try {
     await FlutterNaverMap().init(
       clientId: 'b3agnvaern',
       onAuthFailed: (ex) {
-        globalNaverAuthError = "인증 실패 에러:\n$ex";
-        debugPrint("네이버 지도 인증 실패: $ex");
+        naverAuthErrorMsg = '인증 실패 에러:\n$ex';
       },
     );
   } catch (e) {
-    globalNaverAuthError = "초기화 에러: $e";
+    naverAuthErrorMsg = '초기화 에러: $e';
   }
 
   runApp(const MaterialApp(
@@ -45,47 +44,47 @@ Future<void> main() async {
   ));
 }
 
-class PhotoData {
+class PhotoItem {
   final String path;
-  final double latitude;
-  final double longitude;
-  final double altitude;
-  final double accuracy;
+  final double lat;
+  final double lng;
+  final double alt;
+  final double acc;
   final double azimuth;
   final double pitch;
-  final String time;
+  final String timestamp;
 
-  PhotoData({
+  PhotoItem({
     required this.path,
-    required this.latitude,
-    required this.longitude,
-    required this.altitude,
-    required this.accuracy,
+    required this.lat,
+    required this.lng,
+    required this.alt,
+    required this.acc,
     required this.azimuth,
     required this.pitch,
-    required this.time,
+    required this.timestamp,
   });
 
-  Map<String, dynamic> toJson() => {
+  Map<String, dynamic> toMap() => {
         'path': path,
-        'latitude': latitude,
-        'longitude': longitude,
-        'altitude': altitude,
-        'accuracy': accuracy,
+        'latitude': lat,
+        'longitude': lng,
+        'altitude': alt,
+        'accuracy': acc,
         'azimuth': azimuth,
         'pitch': pitch,
-        'time': time,
+        'time': timestamp,
       };
 
-  factory PhotoData.fromJson(Map<String, dynamic> json) => PhotoData(
-        path: json['path'],
-        latitude: (json['latitude'] as num).toDouble(),
-        longitude: (json['longitude'] as num).toDouble(),
-        altitude: (json['altitude'] as num).toDouble(),
-        accuracy: (json['accuracy'] as num).toDouble(),
-        azimuth: (json['azimuth'] as num).toDouble(),
-        pitch: (json['pitch'] as num).toDouble(),
-        time: json['time'],
+  factory PhotoItem.fromMap(Map<String, dynamic> m) => PhotoItem(
+        path: m['path'] as String,
+        lat: (m['latitude'] as num).toDouble(),
+        lng: (m['longitude'] as num).toDouble(),
+        alt: (m['altitude'] as num).toDouble(),
+        acc: (m['accuracy'] as num).toDouble(),
+        azimuth: (m['azimuth'] as num).toDouble(),
+        pitch: (m['pitch'] as num).toDouble(),
+        timestamp: m['time'] as String,
       );
 }
 
@@ -96,141 +95,122 @@ class CameraScreen extends StatefulWidget {
 }
 
 class _CameraScreenState extends State<CameraScreen> {
-  CameraController? _controller;
-  Position? _currentPosition;
-  double _azimuth = 0;
-  double _pitch = 0;
-  bool _isProcessing = false;
-  String _aspectRatioMode = '16:9';
-
-  final List<PhotoData> _capturedPhotos = [];
+  CameraController? _camController;
+  Position? _pos;
+  double _heading = 0;
+  double _tiltPitch = 0;
+  bool _busy = false;
+  String _ratioMode = '16:9';
+  final List<PhotoItem> _photoList = [];
 
   @override
   void initState() {
     super.initState();
-    _requestPermissions();
+    _setupApp();
   }
 
-  Future<void> _requestPermissions() async {
+  Future<void> _setupApp() async {
     await [
       Permission.camera,
       Permission.location,
       Permission.storage,
       Permission.photos,
     ].request();
-    await _loadSavedPhotos();
-    _initCamera(ResolutionPreset.high);
-    _initLocation();
-    _initSensors();
+    await _restorePhotos();
+    _startCamera();
+    _startLocationStream();
+    _startSensorStreams();
   }
 
-  Future<void> _savePhotosData() async {
+  Future<void> _persistPhotos() async {
     try {
-      final directory = await getApplicationDocumentsDirectory();
-      final file = File('${directory.path}/photos_meta.json');
-      final String contents =
-          jsonEncode(_capturedPhotos.map((e) => e.toJson()).toList());
-      await file.writeAsString(contents);
+      final dir = await getApplicationDocumentsDirectory();
+      final metaFile = File('${dir.path}/photos_meta.json');
+      final raw = jsonEncode(_photoList.map((e) => e.toMap()).toList());
+      await metaFile.writeAsString(raw);
     } catch (e) {
-      debugPrint("데이터 저장 에러: $e");
+      debugPrint('Save photo meta error: $e');
     }
   }
 
-  Future<void> _loadSavedPhotos() async {
+  Future<void> _restorePhotos() async {
     try {
-      final directory = await getApplicationDocumentsDirectory();
-      final file = File('${directory.path}/photos_meta.json');
-      if (await file.exists()) {
-        final String contents = await file.readAsString();
-        final List<dynamic> jsonList = jsonDecode(contents);
-
-        setState(() {
-          _capturedPhotos.clear();
-          for (var item in jsonList) {
-            final photo = PhotoData.fromJson(item);
-            if (File(photo.path).existsSync()) {
-              _capturedPhotos.add(photo);
-            }
+      final dir = await getApplicationDocumentsDirectory();
+      final metaFile = File('${dir.path}/photos_meta.json');
+      if (!await metaFile.exists()) return;
+      final List<dynamic> decoded = jsonDecode(await metaFile.readAsString());
+      setState(() {
+        _photoList.clear();
+        for (final item in decoded) {
+          final p = PhotoItem.fromMap(item as Map<String, dynamic>);
+          if (File(p.path).existsSync()) {
+            _photoList.add(p);
           }
-        });
-      }
+        }
+      });
     } catch (e) {
-      debugPrint("데이터 로드 에러: $e");
+      debugPrint('Load photo meta error: $e');
     }
   }
 
-  void _initCamera(ResolutionPreset preset) async {
-    if (cameras.isEmpty) return;
-    _controller = CameraController(cameras[0], preset, enableAudio: false);
-    await _controller!.initialize();
-    if (!mounted) return;
-    setState(() {});
+  Future<void> _startCamera() async {
+    if (appCameras.isEmpty) return;
+    _camController = CameraController(
+      appCameras.first,
+      ResolutionPreset.high,
+      enableAudio: false,
+    );
+    await _camController!.initialize();
+    if (mounted) setState(() {});
   }
 
-  void _initLocation() {
+  void _startLocationStream() {
     Geolocator.getPositionStream(
       locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-    ).listen((Position position) {
-      if (mounted) {
-        setState(() {
-          _currentPosition = position;
-        });
-      }
+    ).listen((Position p) {
+      if (mounted) setState(() => _pos = p);
     });
   }
 
-  void _initSensors() {
-    accelerometerEventStream().listen((AccelerometerEvent acc) {
-      if (mounted) {
-        setState(() {
-          _pitch =
-              (atan2(acc.y, sqrt(acc.x * acc.x + acc.z * acc.z)) * 180 / pi);
-        });
-      }
+  void _startSensorStreams() {
+    accelerometerEventStream().listen((AccelerometerEvent a) {
+      if (!mounted) return;
+      setState(() {
+        _tiltPitch = atan2(a.y, sqrt(a.x * a.x + a.z * a.z)) * 180 / pi;
+      });
     });
 
-    FlutterCompass.events?.listen((CompassEvent event) {
-      if (mounted && event.heading != null) {
-        setState(() {
-          double calcAzimuth = event.heading!;
-          calcAzimuth = (calcAzimuth % 360 + 360) % 360;
-          _azimuth = calcAzimuth;
-        });
-      }
+    FlutterCompass.events?.listen((CompassEvent c) {
+      if (!mounted || c.heading == null) return;
+      setState(() {
+        _heading = (c.heading! % 360 + 360) % 360;
+      });
     });
   }
 
-  String _getDirection(double azimuth) {
-    if (azimuth >= 337.5 || azimuth < 22.5) return 'N (북)';
-    if (azimuth >= 22.5 && azimuth < 67.5) return 'NE (북동)';
-    if (azimuth >= 67.5 && azimuth < 112.5) return 'E (동)';
-    if (azimuth >= 112.5 && azimuth < 157.5) return 'SE (남동)';
-    if (azimuth >= 157.5 && azimuth < 202.5) return 'S (남)';
-    if (azimuth >= 202.5 && azimuth < 247.5) return 'SW (남서)';
-    if (azimuth >= 247.5 && azimuth < 292.5) return 'W (서)';
-    if (azimuth >= 292.5 && azimuth < 337.5) return 'NW (북서)';
-    return 'N (북)';
+  String _compassLabel(double deg, {bool korean = true}) {
+    const enDirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    const krDirs = [
+      'N (북)',
+      'NE (북동)',
+      'E (동)',
+      'SE (남동)',
+      'S (남)',
+      'SW (남서)',
+      'W (서)',
+      'NW (북서)'
+    ];
+    final idx = (((deg + 22.5) % 360) ~/ 45).clamp(0, 7);
+    return korean ? krDirs[idx] : enDirs[idx];
   }
 
-  String _getDirectionEn(double azimuth) {
-    if (azimuth >= 337.5 || azimuth < 22.5) return 'N';
-    if (azimuth >= 22.5 && azimuth < 67.5) return 'NE';
-    if (azimuth >= 67.5 && azimuth < 112.5) return 'E';
-    if (azimuth >= 112.5 && azimuth < 157.5) return 'SE';
-    if (azimuth >= 157.5 && azimuth < 202.5) return 'S';
-    if (azimuth >= 202.5 && azimuth < 247.5) return 'SW';
-    if (azimuth >= 247.5 && azimuth < 292.5) return 'W';
-    if (azimuth >= 292.5 && azimuth < 337.5) return 'NW';
-    return 'N';
-  }
-
-  Future<void> _takePicture() async {
-    if (_controller == null ||
-        !_controller!.value.isInitialized ||
-        _isProcessing) return;
-    setState(() {
-      _isProcessing = true;
-    });
+  Future<void> _capturePhoto() async {
+    if (_camController == null ||
+        !_camController!.value.isInitialized ||
+        _busy) {
+      return;
+    }
+    setState(() => _busy = true);
 
     try {
       SystemSound.play(SystemSoundType.alert);
@@ -239,121 +219,115 @@ class _CameraScreenState extends State<CameraScreen> {
         HapticFeedback.heavyImpact();
       });
 
-      final XFile file = await _controller!.takePicture();
-      final bytes = await file.readAsBytes();
-      img.Image? capturedImage = img.decodeImage(bytes);
+      final XFile rawFile = await _camController!.takePicture();
+      final Uint8List rawBytes = await rawFile.readAsBytes();
+      img.Image? decodedImg = img.decodeImage(rawBytes);
 
-      if (capturedImage != null && _currentPosition != null) {
-        int origW = capturedImage.width;
-        int origH = capturedImage.height;
+      if (decodedImg != null && _pos != null) {
+        final int w = decodedImg.width;
+        final int h = decodedImg.height;
 
-        if (_aspectRatioMode == '1:1') {
-          int size = origW < origH ? origW : origH;
-          int offsetX = (origW - size) ~/ 2;
-          int offsetY = (origH - size) ~/ 2;
-          capturedImage = img.copyCrop(
-            capturedImage,
-            x: offsetX,
-            y: offsetY,
-            width: size,
-            height: size,
+        if (_ratioMode == '1:1') {
+          final int s = min(w, h);
+          decodedImg = img.copyCrop(
+            decodedImg,
+            x: (w - s) ~/ 2,
+            y: (h - s) ~/ 2,
+            width: s,
+            height: s,
           );
-        } else if (_aspectRatioMode == '4:3') {
-          if (origH > origW) {
-            int targetH = (origW * 4 ~/ 3);
-            if (origH > targetH) {
-              int offsetY = (origH - targetH) ~/ 2;
-              capturedImage = img.copyCrop(
-                capturedImage,
+        } else if (_ratioMode == '4:3') {
+          if (h > w) {
+            final int th = w * 4 ~/ 3;
+            if (h > th) {
+              decodedImg = img.copyCrop(
+                decodedImg,
                 x: 0,
-                y: offsetY,
-                width: origW,
-                height: targetH,
+                y: (h - th) ~/ 2,
+                width: w,
+                height: th,
               );
             }
           } else {
-            int targetW = (origH * 4 ~/ 3);
-            if (origW > targetW) {
-              int offsetX = (origW - targetW) ~/ 2;
-              capturedImage = img.copyCrop(
-                capturedImage,
-                x: offsetX,
+            final int tw = h * 4 ~/ 3;
+            if (w > tw) {
+              decodedImg = img.copyCrop(
+                decodedImg,
+                x: (w - tw) ~/ 2,
                 y: 0,
-                width: targetW,
-                height: origH,
+                width: tw,
+                height: h,
               );
             }
           }
         }
 
-        String dateTime = DateTime.now().toString().substring(0, 16);
-        String dateOnly = dateTime.substring(0, 10);
-        String directionEn = _getDirectionEn(_azimuth);
+        final String nowStr = DateTime.now().toString().substring(0, 16);
+        final String folderDate = nowStr.substring(0, 10);
+        final String dirEn = _compassLabel(_heading, korean: false);
+        final double hAcc = _pos!.accuracy;
+        final double vAcc = hAcc * 1.5;
 
-        double acc = _currentPosition!.accuracy;
-        double altAcc = acc * 1.5;
-
-        String waterMarkText =
-            'Lat: ${_currentPosition!.latitude.toStringAsFixed(6)} (+-${acc.toStringAsFixed(1)}m)\n'
-            'Lng: ${_currentPosition!.longitude.toStringAsFixed(6)} (+-${acc.toStringAsFixed(1)}m)\n'
-            'Alt: ${_currentPosition!.altitude.toStringAsFixed(1)}m (+-${altAcc.toStringAsFixed(1)}m)\n'
-            'Azimuth: ${_azimuth.toStringAsFixed(1)} deg ($directionEn)\n'
-            'Pitch: ${_pitch.toStringAsFixed(1)} deg\n'
-            'Time: $dateTime';
+        final String stamp =
+            'Lat: ${_pos!.latitude.toStringAsFixed(6)} (+-${hAcc.toStringAsFixed(1)}m)\n'
+            'Lng: ${_pos!.longitude.toStringAsFixed(6)} (+-${hAcc.toStringAsFixed(1)}m)\n'
+            'Alt: ${_pos!.altitude.toStringAsFixed(1)}m (+-${vAcc.toStringAsFixed(1)}m)\n'
+            'Azimuth: ${_heading.toStringAsFixed(1)} deg ($dirEn)\n'
+            'Pitch: ${_tiltPitch.toStringAsFixed(1)} deg\n'
+            'Time: $nowStr';
 
         img.drawString(
-          capturedImage,
-          waterMarkText,
+          decodedImg,
+          stamp,
           font: img.arial24,
           x: 20,
-          y: capturedImage.height - 220,
+          y: decodedImg.height - 220,
           color: img.ColorRgb8(255, 200, 50),
         );
 
-        final outBytes = img.encodeJpg(capturedImage, quality: 90);
-        final appDir = await getApplicationDocumentsDirectory();
+        final List<int> jpgBytes = img.encodeJpg(decodedImg, quality: 90);
+        final Directory docDir = await getApplicationDocumentsDirectory();
+        final Directory dayDir = Directory('${docDir.path}/$folderDate');
+        if (!await dayDir.exists()) {
+          await dayDir.create(recursive: true);
+        }
 
-        final folderPath = '${appDir.path}/$dateOnly';
-        final folder = Directory(folderPath);
-        if (!await folder.exists()) await folder.create(recursive: true);
+        final String targetPath =
+            '${dayDir.path}/photo_${DateTime.now().millisecondsSinceEpoch}.jpg';
+        await File(targetPath).writeAsBytes(jpgBytes);
 
-        final savedPath =
-            '$folderPath/photo_${DateTime.now().millisecondsSinceEpoch}.jpg';
-        final savedFile = File(savedPath);
-        await savedFile.writeAsBytes(outBytes);
+        final int azRational = (_heading.clamp(0.0, 360.0) * 100).round();
+        final int altRational = (_pos!.altitude.abs() * 100).round();
 
-        final int azimuthNum = (_azimuth.clamp(0.0, 360.0) * 100).round();
-        final int altitudeNum = (_currentPosition!.altitude.abs() * 100).round();
-
-        final exif = await Exif.fromPath(savedPath);
+        final exif = await Exif.fromPath(targetPath);
         await exif.writeAttributes({
-          'GPSLatitude': _currentPosition!.latitude.abs().toString(),
-          'GPSLatitudeRef': _currentPosition!.latitude >= 0 ? 'N' : 'S',
-          'GPSLongitude': _currentPosition!.longitude.abs().toString(),
-          'GPSLongitudeRef': _currentPosition!.longitude >= 0 ? 'E' : 'W',
-          'GPSAltitude': '$altitudeNum/100',
-          'GPSAltitudeRef': _currentPosition!.altitude >= 0 ? '0' : '1',
-          'GPSImgDirection': '$azimuthNum/100',
+          'GPSLatitude': _pos!.latitude.abs().toString(),
+          'GPSLatitudeRef': _pos!.latitude >= 0 ? 'N' : 'S',
+          'GPSLongitude': _pos!.longitude.abs().toString(),
+          'GPSLongitudeRef': _pos!.longitude >= 0 ? 'E' : 'W',
+          'GPSAltitude': '$altRational/100',
+          'GPSAltitudeRef': _pos!.altitude >= 0 ? '0' : '1',
+          'GPSImgDirection': '$azRational/100',
           'GPSImgDirectionRef': 'T',
         });
         await exif.close();
 
-        await Gal.putImage(savedPath);
+        await Gal.putImage(targetPath);
 
         setState(() {
-          _capturedPhotos.add(PhotoData(
-            path: savedPath,
-            latitude: _currentPosition!.latitude,
-            longitude: _currentPosition!.longitude,
-            altitude: _currentPosition!.altitude,
-            accuracy: acc,
-            azimuth: _azimuth,
-            pitch: _pitch,
-            time: dateTime,
+          _photoList.add(PhotoItem(
+            path: targetPath,
+            lat: _pos!.latitude,
+            lng: _pos!.longitude,
+            alt: _pos!.altitude,
+            acc: hAcc,
+            azimuth: _heading,
+            pitch: _tiltPitch,
+            timestamp: nowStr,
           ));
         });
 
-        await _savePhotosData();
+        await _persistPhotos();
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -364,60 +338,39 @@ class _CameraScreenState extends State<CameraScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('에러 발생: $e')),
+          SnackBar(content: Text('촬영 오류: $e')),
         );
       }
     } finally {
-      if (mounted) {
-        setState(() {
-          _isProcessing = false;
-        });
-      }
+      if (mounted) setState(() => _busy = false);
     }
-  }
-
-  void _openGalleryMapDashboard() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => GalleryMapDashboard(photos: _capturedPhotos),
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_controller == null || !_controller!.value.isInitialized) {
+    if (_camController == null || !_camController!.value.isInitialized) {
       return const Scaffold(
         backgroundColor: Colors.black,
         body: Center(child: CircularProgressIndicator(color: Colors.white)),
       );
     }
 
-    String directionStr = _getDirection(_azimuth);
-    String displayLocation = "위치 정보 찾는 중...";
-    if (_currentPosition != null) {
-      double acc = _currentPosition!.accuracy;
-      double altAcc = acc * 1.5;
-      displayLocation =
-          "위도: ${_currentPosition!.latitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n"
-          "경도: ${_currentPosition!.longitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n"
-          "표고: ${_currentPosition!.altitude.toStringAsFixed(1)}m (±${altAcc.toStringAsFixed(1)}m)";
+    final String dirKr = _compassLabel(_heading, korean: true);
+    String locInfo = '위치 정보 수신 중...';
+    if (_pos != null) {
+      final double acc = _pos!.accuracy;
+      locInfo = '위도: ${_pos!.latitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n'
+          '경도: ${_pos!.longitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n'
+          '표고: ${_pos!.altitude.toStringAsFixed(1)}m (±${(acc * 1.5).toStringAsFixed(1)}m)';
     }
 
-    String displaySensor =
-        "방위각: ${_azimuth.toStringAsFixed(1)}° ($directionStr)\n피치각: ${_pitch.toStringAsFixed(1)}°";
-
-    bool isLandscape =
+    final bool landscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
-    double previewRatio;
-    if (_aspectRatioMode == '1:1') {
-      previewRatio = 1.0;
-    } else if (_aspectRatioMode == '4:3') {
-      previewRatio = isLandscape ? 4.0 / 3.0 : 3.0 / 4.0;
-    } else {
-      previewRatio = isLandscape ? 16.0 / 9.0 : 9.0 / 16.0;
-    }
+    final double ratio = _ratioMode == '1:1'
+        ? 1.0
+        : (_ratioMode == '4:3'
+            ? (landscape ? 4 / 3 : 3 / 4)
+            : (landscape ? 16 / 9 : 9 / 16));
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -426,8 +379,8 @@ class _CameraScreenState extends State<CameraScreen> {
         children: [
           Center(
             child: AspectRatio(
-              aspectRatio: previewRatio,
-              child: CameraPreview(_controller!),
+              aspectRatio: ratio,
+              child: CameraPreview(_camController!),
             ),
           ),
           Positioned(
@@ -436,19 +389,17 @@ class _CameraScreenState extends State<CameraScreen> {
             right: 0,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
-              children: ['16:9', '4:3', '1:1'].map((mode) {
-                bool isSelected = _aspectRatioMode == mode;
+              children: ['16:9', '4:3', '1:1'].map((m) {
+                final bool active = _ratioMode == m;
                 return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
                   child: ElevatedButton(
-                    onPressed: () => setState(() => _aspectRatioMode = mode),
+                    onPressed: () => setState(() => _ratioMode = m),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor:
-                          isSelected ? Colors.amber : Colors.black54,
-                      foregroundColor:
-                          isSelected ? Colors.black : Colors.white,
+                      backgroundColor: active ? Colors.amber : Colors.black54,
+                      foregroundColor: active ? Colors.black : Colors.white,
                     ),
-                    child: Text(mode),
+                    child: Text(m),
                   ),
                 );
               }).toList(),
@@ -461,7 +412,9 @@ class _CameraScreenState extends State<CameraScreen> {
               padding: const EdgeInsets.all(8),
               color: Colors.black45,
               child: Text(
-                '$displayLocation\n$displaySensor\n시간: ${DateTime.now().toString().substring(0, 16)}',
+                '$locInfo\n방위각: ${_heading.toStringAsFixed(1)}° ($dirKr)\n'
+                '피치각: ${_tiltPitch.toStringAsFixed(1)}°\n'
+                '시간: ${DateTime.now().toString().substring(0, 16)}',
                 style: const TextStyle(color: Colors.white, fontSize: 13),
               ),
             ),
@@ -470,11 +423,16 @@ class _CameraScreenState extends State<CameraScreen> {
             bottom: 35,
             right: 30,
             child: FloatingActionButton(
-              heroTag: 'galleryBtn',
-              onPressed:
-                  _capturedPhotos.isEmpty ? null : _openGalleryMapDashboard,
-              backgroundColor:
-                  _capturedPhotos.isEmpty ? Colors.grey : Colors.blueAccent,
+              heroTag: 'mapDashboardBtn',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => GalleryMapDashboard(photos: _photoList),
+                  ),
+                );
+              },
+              backgroundColor: Colors.blueAccent,
               child: const Icon(Icons.map, color: Colors.white),
             ),
           ),
@@ -484,18 +442,14 @@ class _CameraScreenState extends State<CameraScreen> {
             right: 0,
             child: Center(
               child: FloatingActionButton(
-                heroTag: 'captureBtn',
-                onPressed: _takePicture,
+                heroTag: 'shutterBtn',
+                onPressed: _capturePhoto,
                 backgroundColor: Colors.amber,
-                child: const Icon(
-                  Icons.camera_alt,
-                  color: Colors.black,
-                  size: 30,
-                ),
+                child: const Icon(Icons.camera_alt, color: Colors.black, size: 30),
               ),
             ),
           ),
-          if (_isProcessing)
+          if (_busy)
             const Center(child: CircularProgressIndicator(color: Colors.white)),
         ],
       ),
@@ -504,7 +458,7 @@ class _CameraScreenState extends State<CameraScreen> {
 }
 
 class GalleryMapDashboard extends StatefulWidget {
-  final List<PhotoData> photos;
+  final List<PhotoItem> photos;
   const GalleryMapDashboard({super.key, required this.photos});
 
   @override
@@ -512,82 +466,128 @@ class GalleryMapDashboard extends StatefulWidget {
 }
 
 class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
-  int _selectedIndex = 0;
-  NaverMapController? _mapController;
-  String _selectedDate = '전체 보기';
+  int _selectedIdx = 0;
+  NaverMapController? _mapCtrl;
+  String _dateFilter = '전체 보기';
 
-  String? _bpImagePath;
-  double? _bpCenterLat;
-  double? _bpCenterLng;
-  double _bpRadiusMeters = 150.0;
-  double _bpRotation = 0.0;
-  double _bpOpacity = 0.5; // 💡 도면 최초 가져오기 시 투명도 50%로 기본 설정
-  bool _bpVisible = true;
-  bool _isEditingBlueprint = false;
-  NOverlayImage? _cachedBlueprintIcon;
+  // 도면(Blueprint) 상태 변수
+  String? _bpPath;
+  double? _bpLat;
+  double? _bpLng;
+  double _bpBaseRadius = 100.0; // 지도 절반 크기에 해당하는 기준 반경(m)
+  double _bpSizeSlider = 0.5;   // 크기 슬라이더 위치 (0.0 ~ 1.0, 기본값 0.5 = 정중앙!)
+  double _bpRotation = 0.0;     // 회전 각도 (-180 ~ 180, 기본값 0.0 = 정중앙!)
+  double _bpOpacity = 0.5;      // 투명도 (0.1 ~ 1.0, 기본값 0.5 = 50%!)
+  bool _bpShow = true;
+  bool _bpEditMode = false;
 
-  List<PhotoData> get _filteredPhotos {
-    if (_selectedDate == '전체 보기') return widget.photos;
-    return widget.photos.where((p) => p.time.startsWith(_selectedDate)).toList();
+  NOverlayImage? _bpCachedOverlayImg;
+  bool _isRenderingBp = false;
+  bool _pendingBpRender = false;
+
+  // 슬라이더 값(0.0~1.0)을 실제 반경(m)으로 변환 (0.5일 때 정확히 기준 크기 1.0배)
+  double get _currentBpRadius =>
+      _bpBaseRadius * pow(9.0, _bpSizeSlider - 0.5).toDouble();
+
+  List<PhotoItem> get _visiblePhotos {
+    if (_dateFilter == '전체 보기') return widget.photos;
+    return widget.photos
+        .where((p) => p.timestamp.startsWith(_dateFilter))
+        .toList();
   }
 
   @override
   void initState() {
     super.initState();
-    if (widget.photos.isNotEmpty) {
-      _selectedIndex = _filteredPhotos.length - 1;
+    if (_visiblePhotos.isNotEmpty) {
+      _selectedIdx = _visiblePhotos.length - 1;
     }
-    _loadBlueprintData();
   }
 
-  Future<void> _loadBlueprintData() async {
+  // 저장된 도면 정보를 디스크에서 읽어오고 이미지 프리캐시 수행
+  Future<void> _restoreBlueprintConfig() async {
     try {
       final dir = await getApplicationDocumentsDirectory();
-      final file = File('${dir.path}/blueprint_meta.json');
-      if (await file.exists()) {
-        final data = jsonDecode(await file.readAsString());
-        final String? path = data['imagePath'];
-        if (path != null && File(path).existsSync()) {
-          setState(() {
-            _bpImagePath = path;
-            _bpCenterLat = (data['centerLat'] as num?)?.toDouble();
-            _bpCenterLng = (data['centerLng'] as num?)?.toDouble();
-            _bpRadiusMeters =
-                (data['radiusMeters'] as num?)?.toDouble() ?? 150.0;
-            _bpRotation = (data['rotation'] as num?)?.toDouble() ?? 0.0;
-            _bpOpacity = (data['opacity'] as num?)?.toDouble() ?? 0.5;
-            _bpVisible = data['isVisible'] ?? true;
-          });
-          if (_mapController != null) {
-            await _updateBlueprintOverlay(rebuildImage: true);
-          }
+      final cfgFile = File('${dir.path}/blueprint_config.json');
+      if (!await cfgFile.exists()) return;
+
+      final Map<String, dynamic> data =
+          jsonDecode(await cfgFile.readAsString());
+      final String? savedPath = data['imagePath'] as String?;
+
+      if (savedPath != null && File(savedPath).existsSync()) {
+        // 이미지를 미리 메모리에 로드해 두어야 첫 화면에서 투명도 조작 없이 즉시 보임!
+        if (mounted) {
+          await precacheImage(FileImage(File(savedPath)), context);
         }
+        setState(() {
+          _bpPath = savedPath;
+          _bpLat = (data['centerLat'] as num?)?.toDouble();
+          _bpLng = (data['centerLng'] as num?)?.toDouble();
+          _bpBaseRadius = (data['baseRadius'] as num?)?.toDouble() ?? 100.0;
+          _bpSizeSlider =
+              ((data['sizeSlider'] as num?)?.toDouble() ?? 0.5).clamp(0.0, 1.0);
+          _bpRotation =
+              ((data['rotation'] as num?)?.toDouble() ?? 0.0).clamp(-180.0, 180.0);
+          _bpOpacity =
+              ((data['opacity'] as num?)?.toDouble() ?? 0.5).clamp(0.1, 1.0);
+          _bpShow = data['isVisible'] as bool? ?? true;
+        });
       }
     } catch (e) {
-      debugPrint("도면 데이터 로드 에러: $e");
+      debugPrint('Blueprint restore error: $e');
     }
   }
 
-  Future<void> _saveBlueprintData() async {
+  // 도면 설정 변경 시마다 즉시 영구 저장
+  Future<void> _persistBlueprintConfig() async {
+    if (_bpPath == null) return;
     try {
       final dir = await getApplicationDocumentsDirectory();
-      final file = File('${dir.path}/blueprint_meta.json');
-      final data = {
-        'imagePath': _bpImagePath,
-        'centerLat': _bpCenterLat,
-        'centerLng': _bpCenterLng,
-        'radiusMeters': _bpRadiusMeters,
+      final cfgFile = File('${dir.path}/blueprint_config.json');
+      final Map<String, dynamic> data = {
+        'imagePath': _bpPath,
+        'centerLat': _bpLat,
+        'centerLng': _bpLng,
+        'baseRadius': _bpBaseRadius,
+        'sizeSlider': _bpSizeSlider,
         'rotation': _bpRotation,
         'opacity': _bpOpacity,
-        'isVisible': _bpVisible,
+        'isVisible': _bpShow,
       };
-      await file.writeAsString(jsonEncode(data));
+      await cfgFile.writeAsString(jsonEncode(data));
     } catch (e) {
-      debugPrint("도면 데이터 저장 에러: $e");
+      debugPrint('Blueprint save error: $e');
     }
   }
 
-  Future<void> _pickBlueprintImage() async {
+  // 현재 지도 화면 크기의 절반(50%)에 해당하는 반경(m) 계산
+  Future<double> _calcHalfScreenRadius() async {
+    if (_mapCtrl == null) return 100.0;
+    try {
+      final bounds = await _mapCtrl!.getContentBounds();
+      final double widthMeters = Geolocator.distanceBetween(
+        bounds.southWest.latitude,
+        bounds.southWest.longitude,
+        bounds.southWest.latitude,
+        bounds.northEast.longitude,
+      );
+      final double heightMeters = Geolocator.distanceBetween(
+        bounds.southWest.latitude,
+        bounds.southWest.longitude,
+        bounds.northEast.latitude,
+        bounds.southWest.longitude,
+      );
+      final double minSpan = min(widthMeters, heightMeters);
+      // 지도 화면 절반 크기가 되도록 전체 폭의 1/4(반경 기준)로 설정
+      return (minSpan * 0.28).clamp(15.0, 1000.0);
+    } catch (_) {
+      return 100.0;
+    }
+  }
+
+  // 갤러리에서 도면 가져온 직후 투명도 50%, 지도 절반 크기, 조절바 중간값으로 즉시 표시
+  Future<void> _importBlueprintFromGallery() async {
     try {
       final picker = ImagePicker();
       final XFile? picked = await picker.pickImage(source: ImageSource.gallery);
@@ -595,138 +595,145 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
       final dir = await getApplicationDocumentsDirectory();
       final String ext = picked.path.split('.').last;
-      final String savedPath =
-          '${dir.path}/blueprint_${DateTime.now().millisecondsSinceEpoch}.$ext';
-      await File(picked.path).copy(savedPath);
+      final String destPath =
+          '${dir.path}/bp_saved_${DateTime.now().millisecondsSinceEpoch}.$ext';
+      await File(picked.path).copy(destPath);
 
-      double initLat = _filteredPhotos.isNotEmpty
-          ? _filteredPhotos[_selectedIndex].latitude
-          : 37.5665;
-      double initLng = _filteredPhotos.isNotEmpty
-          ? _filteredPhotos[_selectedIndex].longitude
-          : 126.9780;
-      if (_mapController != null) {
-        final pos = await _mapController!.getCameraPosition();
-        initLat = pos.target.latitude;
-        initLng = pos.target.longitude;
+      // 핵심: 파일 이미지를 메모리에 완전히 디코딩될 때까지 대기 후 지도에 렌더링
+      if (!mounted) return;
+      final fileProvider = FileImage(File(destPath));
+      await fileProvider.evict();
+      if (!mounted) return;
+      await precacheImage(fileProvider, context);
+
+      double centerLat = _visiblePhotos.isNotEmpty
+          ? _visiblePhotos[_selectedIdx].lat
+          : 37.4984;
+      double centerLng = _visiblePhotos.isNotEmpty
+          ? _visiblePhotos[_selectedIdx].lng
+          : 127.1324;
+
+      if (_mapCtrl != null) {
+        final camPos = await _mapCtrl!.getCameraPosition();
+        centerLat = camPos.target.latitude;
+        centerLng = camPos.target.longitude;
       }
 
+      final double halfScreenRad = await _calcHalfScreenRadius();
+
       setState(() {
-        _bpImagePath = savedPath;
-        _bpCenterLat = initLat;
-        _bpCenterLng = initLng;
-        _bpRadiusMeters = 150.0; // 💡 지도 화면 크기의 약 60%에 해당하는 기본 반경 설정
-        _bpOpacity = 0.5;       // 💡 투명도 50% 즉시 적용
-        _bpRotation = 0.0;
-        _bpVisible = true;
-        _isEditingBlueprint = true;
+        _bpPath = destPath;
+        _bpLat = centerLat;
+        _bpLng = centerLng;
+        _bpBaseRadius = halfScreenRad;
+        _bpSizeSlider = 0.5; // 크기 조절바 정중앙!
+        _bpOpacity = 0.5;    // 투명도 50%!
+        _bpRotation = 0.0;   // 회전 조절바 정중앙!
+        _bpShow = true;
+        _bpEditMode = true;
+        _bpCachedOverlayImg = null;
       });
 
-      await _saveBlueprintData();
-      await _updateBlueprintOverlay(rebuildImage: true);
+      await _persistBlueprintConfig();
+      await _renderBlueprintOnMap(rebuildBitmap: true);
     } catch (e) {
-      debugPrint("도면 가져오기 에러: $e");
+      debugPrint('Import blueprint error: $e');
     }
   }
 
-  Future<void> _updateBlueprintOverlay({bool rebuildImage = false}) async {
-    if (_mapController == null) return;
+  // 회전이나 투명도 조절 시 프레임이 밀리지 않고 실시간으로 빠르게 돌아가도록 처리
+  Future<void> _renderBlueprintOnMap({bool rebuildBitmap = false}) async {
+    if (_mapCtrl == null) return;
 
-    if (_bpImagePath == null ||
-        !_bpVisible ||
-        _bpCenterLat == null ||
-        _bpCenterLng == null) {
-      await _updateMarkers(skipBlueprint: true);
+    if (_bpPath == null || !_bpShow || _bpLat == null || _bpLng == null) {
+      await _refreshAllOverlays(includeBlueprint: false);
       return;
     }
 
+    if (rebuildBitmap) {
+      if (_isRenderingBp) {
+        _pendingBpRender = true;
+        return;
+      }
+      _isRenderingBp = true;
+    }
+
     try {
-      if (rebuildImage || _cachedBlueprintIcon == null) {
-        if (!mounted) return;
-        _cachedBlueprintIcon = await NOverlayImage.fromWidget(
-          widget: Opacity(
-            opacity: _bpOpacity.clamp(0.1, 1.0),
-            child: Transform.rotate(
-              angle: _bpRotation * (pi / 180),
-              child: Padding(
-                padding: const EdgeInsets.all(60),
-                child: Image.file(
-                  File(_bpImagePath!),
-                  fit: BoxFit.contain,
+      do {
+        _pendingBpRender = false;
+        if (rebuildBitmap || _bpCachedOverlayImg == null) {
+          if (!mounted) return;
+          _bpCachedOverlayImg = await NOverlayImage.fromWidget(
+            widget: Opacity(
+              opacity: _bpOpacity.clamp(0.1, 1.0),
+              child: Transform.rotate(
+                angle: _bpRotation * (pi / 180.0),
+                child: Padding(
+                  padding: const EdgeInsets.all(36),
+                  child: Image.file(
+                    File(_bpPath!),
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                  ),
                 ),
               ),
             ),
-          ),
-          size: const Size(500, 500),
-          context: context,
+            // 320x320 사이즈로 최적화하여 회전 슬라이더 드래그 시에도 크기 조절처럼 즉각 회전!
+            size: const Size(320, 320),
+            context: context,
+          );
+        }
+
+        final double rad = _currentBpRadius;
+        final double dLat = rad / 111320.0;
+        final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
+        final double dLng = rad / (111320.0 * cosLat);
+
+        final bounds = NLatLngBounds(
+          southWest: NLatLng(_bpLat! - dLat, _bpLng! - dLng),
+          northEast: NLatLng(_bpLat! + dLat, _bpLng! + dLng),
         );
-      }
 
-      final double dLat = _bpRadiusMeters / 111320.0;
-      final double cosLat =
-          cos(_bpCenterLat! * pi / 180.0).abs().clamp(0.1, 1.0);
-      final double dLng = _bpRadiusMeters / (111320.0 * cosLat);
+        final groundOverlay = NGroundOverlay(
+          id: 'blueprint_ground_overlay',
+          bounds: bounds,
+          image: _bpCachedOverlayImg!,
+        );
 
-      final bounds = NLatLngBounds(
-        southWest: NLatLng(_bpCenterLat! - dLat, _bpCenterLng! - dLng),
-        northEast: NLatLng(_bpCenterLat! + dLat, _bpCenterLng! + dLng),
-      );
-
-      final groundOverlay = NGroundOverlay(
-        id: 'blueprint_ground_overlay',
-        bounds: bounds,
-        image: _cachedBlueprintIcon!,
-      );
-
-      _mapController!.addOverlay(groundOverlay);
+        await _mapCtrl!.addOverlay(groundOverlay);
+      } while (_pendingBpRender && mounted);
     } catch (e) {
-      debugPrint("도면 오버레이 업데이트 에러: $e");
+      debugPrint('Render blueprint error: $e');
+    } finally {
+      _isRenderingBp = false;
     }
   }
 
-  void _nudgeBlueprint(double dNorthMeters, double dEastMeters) {
-    if (_bpCenterLat == null || _bpCenterLng == null) return;
-    final double dLat = dNorthMeters / 111320.0;
-    final double cosLat =
-        cos(_bpCenterLat! * pi / 180.0).abs().clamp(0.1, 1.0);
-    final double dLng = dEastMeters / (111320.0 * cosLat);
+  void _shiftBlueprintMeters(double northM, double eastM) {
+    if (_bpLat == null || _bpLng == null) return;
+    final double dLat = northM / 111320.0;
+    final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
+    final double dLng = eastM / (111320.0 * cosLat);
 
     setState(() {
-      _bpCenterLat = _bpCenterLat! + dLat;
-      _bpCenterLng = _bpCenterLng! + dLng;
+      _bpLat = _bpLat! + dLat;
+      _bpLng = _bpLng! + dLng;
     });
-    _updateBlueprintOverlay(rebuildImage: false);
+    _renderBlueprintOnMap(rebuildBitmap: false);
+    _persistBlueprintConfig();
   }
 
-  void _moveCameraKeepZoom(double lat, double lng) {
-    if (_mapController == null) return;
-    _mapController!.updateCamera(
-      NCameraUpdate.scrollAndZoomTo(
-        target: NLatLng(lat, lng),
-      ),
+  void _panMapKeepZoom(double lat, double lng) {
+    if (_mapCtrl == null) return;
+    _mapCtrl!.updateCamera(
+      NCameraUpdate.scrollAndZoomTo(target: NLatLng(lat, lng)),
     );
   }
 
-  void _onDateChanged(String? newDate) {
-    if (newDate != null) {
-      setState(() {
-        _selectedDate = newDate;
-        _selectedIndex =
-            _filteredPhotos.isNotEmpty ? _filteredPhotos.length - 1 : 0;
-      });
-      _updateMarkers();
-
-      if (_filteredPhotos.isNotEmpty) {
-        final photo = _filteredPhotos[_selectedIndex];
-        _moveCameraKeepZoom(photo.latitude, photo.longitude);
-      }
-    }
-  }
-
-  Widget _buildBlueprintEditPanel() {
+  Widget _buildBlueprintControlBox() {
     return Container(
       color: Colors.grey[900],
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -735,55 +742,56 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
-                  '📐 도면 정렬 모드 (지도 터치 시 이동)',
+                  '📐 도면 정렬 (지도 터치 시 즉시 이동)',
                   style: TextStyle(
                     color: Colors.amber,
-                    fontSize: 14,
+                    fontSize: 13,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
                 ElevatedButton.icon(
                   onPressed: () async {
-                    await _saveBlueprintData();
-                    setState(() {
-                      _isEditingBlueprint = false;
-                    });
+                    await _persistBlueprintConfig();
+                    setState(() => _bpEditMode = false);
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('도면 위치와 설정이 지도에 영구 고정되었습니다!'),
+                          content: Text('도면이 영구 저장되었습니다! (앱 재실행 시 유지)'),
                         ),
                       );
                     }
                   },
-                  icon: const Icon(Icons.check, size: 16),
-                  label: const Text('고정 및 저장'),
+                  icon: const Icon(Icons.check, size: 15),
+                  label: const Text('고정 및 저장', style: TextStyle(fontSize: 12)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.amber,
                     foregroundColor: Colors.black,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
                   ),
                 ),
               ],
             ),
-            const Divider(color: Colors.white24, height: 12),
+            const Divider(color: Colors.white24, height: 8),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 ElevatedButton.icon(
                   onPressed: () async {
-                    if (_mapController != null) {
-                      final pos = await _mapController!.getCameraPosition();
-                      setState(() {
-                        _bpCenterLat = pos.target.latitude;
-                        _bpCenterLng = pos.target.longitude;
-                      });
-                      _updateBlueprintOverlay(rebuildImage: false);
-                    }
+                    if (_mapCtrl == null) return;
+                    final pos = await _mapCtrl!.getCameraPosition();
+                    final halfRad = await _calcHalfScreenRadius();
+                    setState(() {
+                      _bpLat = pos.target.latitude;
+                      _bpLng = pos.target.longitude;
+                      _bpBaseRadius = halfRad;
+                      _bpSizeSlider = 0.5;
+                    });
+                    await _renderBlueprintOnMap(rebuildBitmap: false);
+                    await _persistBlueprintConfig();
                   },
-                  icon: const Icon(Icons.my_location, size: 15),
-                  label: const Text('화면 중앙으로', style: TextStyle(fontSize: 12)),
+                  icon: const Icon(Icons.center_focus_strong, size: 15),
+                  label: const Text('화면 중앙·절반크기 초기화',
+                      style: TextStyle(fontSize: 11)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.blueGrey,
                     foregroundColor: Colors.white,
@@ -794,33 +802,34 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                     IconButton(
                       icon: const Icon(Icons.arrow_back,
                           color: Colors.white, size: 20),
-                      onPressed: () => _nudgeBlueprint(0, -3),
+                      onPressed: () => _shiftBlueprintMeters(0, -3),
                     ),
                     IconButton(
                       icon: const Icon(Icons.arrow_upward,
                           color: Colors.white, size: 20),
-                      onPressed: () => _nudgeBlueprint(3, 0),
+                      onPressed: () => _shiftBlueprintMeters(3, 0),
                     ),
                     IconButton(
                       icon: const Icon(Icons.arrow_downward,
                           color: Colors.white, size: 20),
-                      onPressed: () => _nudgeBlueprint(-3, 0),
+                      onPressed: () => _shiftBlueprintMeters(-3, 0),
                     ),
                     IconButton(
                       icon: const Icon(Icons.arrow_forward,
                           color: Colors.white, size: 20),
-                      onPressed: () => _nudgeBlueprint(0, 3),
+                      onPressed: () => _shiftBlueprintMeters(0, 3),
                     ),
                   ],
                 ),
               ],
             ),
+            // 1. 크기 슬라이더 (0.5가 정중앙 기본값)
             Row(
               children: [
                 SizedBox(
-                  width: 85,
+                  width: 82,
                   child: Text(
-                    '크기: ${_bpRadiusMeters.toInt()}m',
+                    '크기: ${_currentBpRadius.toInt()}m',
                     style: const TextStyle(color: Colors.white, fontSize: 12),
                   ),
                 ),
@@ -829,24 +838,23 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                       color: Colors.white70, size: 20),
                   onPressed: () {
                     setState(() {
-                      _bpRadiusMeters =
-                          (_bpRadiusMeters - 5).clamp(10.0, 2000.0);
+                      _bpSizeSlider = (_bpSizeSlider - 0.05).clamp(0.0, 1.0);
                     });
-                    _updateBlueprintOverlay(rebuildImage: false);
+                    _renderBlueprintOnMap(rebuildBitmap: false);
+                    _persistBlueprintConfig();
                   },
                 ),
                 Expanded(
                   child: Slider(
-                    value: _bpRadiusMeters.clamp(10.0, 2000.0),
-                    min: 10.0,
-                    max: 2000.0,
+                    value: _bpSizeSlider,
+                    min: 0.0,
+                    max: 1.0,
                     activeColor: Colors.amber,
                     onChanged: (val) {
-                      setState(() {
-                        _bpRadiusMeters = val;
-                      });
-                      _updateBlueprintOverlay(rebuildImage: false);
+                      setState(() => _bpSizeSlider = val);
+                      _renderBlueprintOnMap(rebuildBitmap: false);
                     },
+                    onChangeEnd: (_) => _persistBlueprintConfig(),
                   ),
                 ),
                 IconButton(
@@ -854,20 +862,21 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                       color: Colors.white70, size: 20),
                   onPressed: () {
                     setState(() {
-                      _bpRadiusMeters =
-                          (_bpRadiusMeters + 5).clamp(10.0, 2000.0);
+                      _bpSizeSlider = (_bpSizeSlider + 0.05).clamp(0.0, 1.0);
                     });
-                    _updateBlueprintOverlay(rebuildImage: false);
+                    _renderBlueprintOnMap(rebuildBitmap: false);
+                    _persistBlueprintConfig();
                   },
                 ),
               ],
             ),
+            // 2. 회전 슬라이더 (드래그하는 즉시 빠르게 실시간 회전!)
             Row(
               children: [
                 SizedBox(
-                  width: 85,
+                  width: 82,
                   child: Text(
-                    '회전: ${_bpRotation.toStringAsFixed(1)}°',
+                    '회전: ${_bpRotation.toStringAsFixed(0)}°',
                     style: const TextStyle(color: Colors.white, fontSize: 12),
                   ),
                 ),
@@ -876,9 +885,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                       color: Colors.white70, size: 20),
                   onPressed: () {
                     setState(() {
-                      _bpRotation = (_bpRotation - 1.0).clamp(-180.0, 180.0);
+                      _bpRotation = (_bpRotation - 5.0).clamp(-180.0, 180.0);
                     });
-                    _updateBlueprintOverlay(rebuildImage: true);
+                    _renderBlueprintOnMap(rebuildBitmap: true);
+                    _persistBlueprintConfig();
                   },
                 ),
                 Expanded(
@@ -888,13 +898,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                     max: 180.0,
                     activeColor: Colors.amber,
                     onChanged: (val) {
-                      setState(() {
-                        _bpRotation = val;
-                      });
+                      setState(() => _bpRotation = val);
+                      _renderBlueprintOnMap(rebuildBitmap: true);
                     },
-                    onChangeEnd: (val) {
-                      _updateBlueprintOverlay(rebuildImage: true);
-                    },
+                    onChangeEnd: (_) => _persistBlueprintConfig(),
                   ),
                 ),
                 IconButton(
@@ -902,17 +909,19 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                       color: Colors.white70, size: 20),
                   onPressed: () {
                     setState(() {
-                      _bpRotation = (_bpRotation + 1.0).clamp(-180.0, 180.0);
+                      _bpRotation = (_bpRotation + 5.0).clamp(-180.0, 180.0);
                     });
-                    _updateBlueprintOverlay(rebuildImage: true);
+                    _renderBlueprintOnMap(rebuildBitmap: true);
+                    _persistBlueprintConfig();
                   },
                 ),
               ],
             ),
+            // 3. 투명도 슬라이더 (기본값 50%에서 시작, 드래그 즉시 반영)
             Row(
               children: [
                 SizedBox(
-                  width: 85,
+                  width: 82,
                   child: Text(
                     '투명도: ${(_bpOpacity * 100).toInt()}%',
                     style: const TextStyle(color: Colors.white, fontSize: 12),
@@ -925,13 +934,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                     max: 1.0,
                     activeColor: Colors.amber,
                     onChanged: (val) {
-                      setState(() {
-                        _bpOpacity = val;
-                      });
+                      setState(() => _bpOpacity = val);
+                      _renderBlueprintOnMap(rebuildBitmap: true);
                     },
-                    onChangeEnd: (val) {
-                      _updateBlueprintOverlay(rebuildImage: true);
-                    },
+                    onChangeEnd: (_) => _persistBlueprintConfig(),
                   ),
                 ),
               ],
@@ -944,59 +950,53 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    List<String> dateOptions = ['전체 보기'];
-    Set<String> uniqueDates =
-        widget.photos.map((p) => p.time.substring(0, 10)).toSet();
-    List<String> sortedDates = uniqueDates.toList()
-      ..sort((a, b) => b.compareTo(a));
-    dateOptions.addAll(sortedDates);
+    final List<String> dateTabs = ['전체 보기'];
+    final Set<String> days =
+        widget.photos.map((p) => p.timestamp.substring(0, 10)).toSet();
+    final List<String> sortedDays = days.toList()..sort((a, b) => b.compareTo(a));
+    dateTabs.addAll(sortedDays);
 
-    bool isPortrait =
+    final bool portrait =
         MediaQuery.of(context).orientation == Orientation.portrait;
 
-    if (_filteredPhotos.isEmpty) {
-      return Scaffold(
-        backgroundColor: Colors.black,
-        appBar: AppBar(
-          backgroundColor: Colors.black,
-          title: const Text('지도 대시보드'),
-        ),
-        body: const Center(
-          child: Text(
-            "해당 날짜에 찍은 사진이 없습니다.",
-            style: TextStyle(color: Colors.white),
-          ),
-        ),
-      );
-    }
+    final PhotoItem? activePhoto = _visiblePhotos.isNotEmpty
+        ? _visiblePhotos[_selectedIdx.clamp(0, _visiblePhotos.length - 1)]
+        : null;
 
-    final currentPhoto = _filteredPhotos[_selectedIndex];
+    final Widget leftOrTopPane = _bpEditMode
+        ? _buildBlueprintControlBox()
+        : (activePhoto != null
+            ? Container(
+                color: Colors.black,
+                width: double.infinity,
+                height: double.infinity,
+                child: InteractiveViewer(
+                  panEnabled: true,
+                  boundaryMargin: const EdgeInsets.all(20),
+                  minScale: 0.5,
+                  maxScale: 4.0,
+                  child: Center(
+                    child: Image.file(File(activePhoto.path), fit: BoxFit.contain),
+                  ),
+                ),
+              )
+            : const Center(
+                child: Text(
+                  '저장된 사진이 없습니다.',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ));
 
-    // 💡 사진을 두 손가락으로 확대/축소(Pinch-to-Zoom)해서 볼 수 있도록 InteractiveViewer 적용
-    Widget photoSection = _isEditingBlueprint
-        ? _buildBlueprintEditPanel()
-        : Container(
-            color: Colors.black,
-            width: double.infinity,
-            height: double.infinity,
-            child: InteractiveViewer(
-              panEnabled: true,
-              boundaryMargin: const EdgeInsets.all(20),
-              minScale: 0.5,
-              maxScale: 4.0,
-              child: Center(
-                child: Image.file(File(currentPhoto.path), fit: BoxFit.contain),
-              ),
-            ),
-          );
+    final double initLat = activePhoto?.lat ?? _bpLat ?? 37.4984;
+    final double initLng = activePhoto?.lng ?? _bpLng ?? 127.1324;
 
-    Widget mapSection = globalNaverAuthError != null
+    final Widget mapPane = naverAuthErrorMsg != null
         ? Container(
             color: Colors.white,
             padding: const EdgeInsets.all(20),
             child: Center(
               child: Text(
-                '🚨 네이버 지도 차단됨!\n\n$globalNaverAuthError',
+                '🚨 네이버 지도 차단됨!\n\n$naverAuthErrorMsg',
                 style: const TextStyle(
                   color: Colors.red,
                   fontSize: 15,
@@ -1009,21 +1009,23 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         : NaverMap(
             options: NaverMapViewOptions(
               initialCameraPosition: NCameraPosition(
-                target: NLatLng(currentPhoto.latitude, currentPhoto.longitude),
+                target: NLatLng(initLat, initLng),
                 zoom: 16,
               ),
             ),
-            onMapReady: (controller) async {
-              _mapController = controller;
-              await _updateMarkers();
+            onMapReady: (ctrl) async {
+              _mapCtrl = ctrl;
+              await _restoreBlueprintConfig();
+              await _refreshAllOverlays(includeBlueprint: true);
             },
             onMapTapped: (point, latLng) {
-              if (_isEditingBlueprint && _bpImagePath != null) {
+              if (_bpEditMode && _bpPath != null) {
                 setState(() {
-                  _bpCenterLat = latLng.latitude;
-                  _bpCenterLng = latLng.longitude;
+                  _bpLat = latLng.latitude;
+                  _bpLng = latLng.longitude;
                 });
-                _updateBlueprintOverlay(rebuildImage: false);
+                _renderBlueprintOnMap(rebuildBitmap: false);
+                _persistBlueprintConfig();
               }
             },
           );
@@ -1033,19 +1035,31 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         title: DropdownButton<String>(
-          value: _selectedDate,
+          value: _dateFilter,
           dropdownColor: Colors.black87,
           style: const TextStyle(
             color: Colors.white,
             fontSize: 16,
             fontWeight: FontWeight.bold,
           ),
-          underline: Container(),
+          underline: const SizedBox.shrink(),
           icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
-          items: dateOptions
-              .map((date) => DropdownMenuItem(value: date, child: Text(date)))
+          items: dateTabs
+              .map((d) => DropdownMenuItem(value: d, child: Text(d)))
               .toList(),
-          onChanged: _onDateChanged,
+          onChanged: (val) {
+            if (val == null) return;
+            setState(() {
+              _dateFilter = val;
+              _selectedIdx =
+                  _visiblePhotos.isNotEmpty ? _visiblePhotos.length - 1 : 0;
+            });
+            _refreshAllOverlays(includeBlueprint: true);
+            if (_visiblePhotos.isNotEmpty) {
+              final p = _visiblePhotos[_selectedIdx];
+              _panMapKeepZoom(p.lat, p.lng);
+            }
+          },
         ),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.white),
@@ -1053,7 +1067,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         ),
         actions: [
           TextButton.icon(
-            onPressed: _pickBlueprintImage,
+            onPressed: _importBlueprintFromGallery,
             icon: const Icon(Icons.add_photo_alternate,
                 color: Colors.amber, size: 18),
             label: const Text(
@@ -1061,41 +1075,36 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
               style: TextStyle(color: Colors.amber, fontSize: 12),
             ),
           ),
-          if (_bpImagePath != null) ...[
+          if (_bpPath != null) ...[
             IconButton(
               icon: Icon(
-                _bpVisible ? Icons.layers : Icons.layers_clear,
-                color: _bpVisible ? Colors.lightGreenAccent : Colors.grey,
+                _bpShow ? Icons.layers : Icons.layers_clear,
+                color: _bpShow ? Colors.lightGreenAccent : Colors.grey,
               ),
               onPressed: () async {
                 setState(() {
-                  _bpVisible = !_bpVisible;
-                  if (!_bpVisible) _isEditingBlueprint = false;
+                  _bpShow = !_bpShow;
+                  if (!_bpShow) _bpEditMode = false;
                 });
-                await _saveBlueprintData();
-                await _updateMarkers();
+                await _persistBlueprintConfig();
+                await _refreshAllOverlays(includeBlueprint: true);
               },
             ),
             Padding(
-              padding: const EdgeInsets.only(right: 8.0),
+              padding: const EdgeInsets.only(right: 8),
               child: ElevatedButton(
                 onPressed: () async {
-                  if (_isEditingBlueprint) {
-                    await _saveBlueprintData();
-                  }
-                  setState(() {
-                    _isEditingBlueprint = !_isEditingBlueprint;
-                  });
+                  await _persistBlueprintConfig();
+                  setState(() => _bpEditMode = !_bpEditMode);
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor:
-                      _isEditingBlueprint ? Colors.amber : Colors.blueAccent,
-                  foregroundColor:
-                      _isEditingBlueprint ? Colors.black : Colors.white,
+                      _bpEditMode ? Colors.amber : Colors.blueAccent,
+                  foregroundColor: _bpEditMode ? Colors.black : Colors.white,
                   padding: const EdgeInsets.symmetric(horizontal: 10),
                 ),
                 child: Text(
-                  _isEditingBlueprint ? '고정저장' : '도면정렬',
+                  _bpEditMode ? '고정저장' : '도면정렬',
                   style: const TextStyle(fontSize: 12),
                 ),
               ),
@@ -1106,88 +1115,86 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       body: Column(
         children: [
           Expanded(
-            child: isPortrait
+            child: portrait
                 ? Column(
                     children: [
-                      Expanded(flex: 5, child: photoSection),
+                      Expanded(flex: 5, child: leftOrTopPane),
                       const SizedBox(height: 4),
-                      Expanded(flex: 5, child: mapSection),
+                      Expanded(flex: 5, child: mapPane),
                     ],
                   )
                 : Row(
                     children: [
-                      Expanded(flex: 5, child: photoSection),
+                      Expanded(flex: 5, child: leftOrTopPane),
                       const SizedBox(width: 4),
-                      Expanded(flex: 5, child: mapSection),
+                      Expanded(flex: 5, child: mapPane),
                     ],
                   ),
           ),
-          SizedBox(
-            height: 80,
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
-              itemCount: _filteredPhotos.length,
-              itemBuilder: (context, index) {
-                bool isSelected = _selectedIndex == index;
-                return GestureDetector(
-                  onTap: () {
-                    setState(() {
-                      _selectedIndex = index;
-                    });
-                    _updateMarkers();
-                    _moveCameraKeepZoom(
-                      _filteredPhotos[index].latitude,
-                      _filteredPhotos[index].longitude,
-                    );
-                  },
-                  child: Container(
-                    margin:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                    decoration: BoxDecoration(
-                      border: Border.all(
-                        color: isSelected ? Colors.amber : Colors.transparent,
-                        width: 3,
+          if (_visiblePhotos.isNotEmpty)
+            SizedBox(
+              height: 80,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: _visiblePhotos.length,
+                itemBuilder: (context, idx) {
+                  final bool selected = _selectedIdx == idx;
+                  return GestureDetector(
+                    onTap: () {
+                      setState(() => _selectedIdx = idx);
+                      _refreshAllOverlays(includeBlueprint: true);
+                      _panMapKeepZoom(
+                        _visiblePhotos[idx].lat,
+                        _visiblePhotos[idx].lng,
+                      );
+                    },
+                    child: Container(
+                      margin: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                          color: selected ? Colors.amber : Colors.transparent,
+                          width: 3,
+                        ),
+                      ),
+                      child: Image.file(
+                        File(_visiblePhotos[idx].path),
+                        width: 70,
+                        height: 70,
+                        fit: BoxFit.cover,
                       ),
                     ),
-                    child: Image.file(
-                      File(_filteredPhotos[index].path),
-                      width: 70,
-                      height: 70,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  Future<void> _updateMarkers({bool skipBlueprint = false}) async {
-    if (_mapController == null) return;
-    _mapController!.clearOverlays();
+  Future<void> _refreshAllOverlays({bool includeBlueprint = true}) async {
+    if (_mapCtrl == null) return;
+    await _mapCtrl!.clearOverlays();
 
-    if (!skipBlueprint && _bpImagePath != null && _bpVisible) {
-      await _updateBlueprintOverlay(rebuildImage: false);
+    if (includeBlueprint && _bpPath != null && _bpShow) {
+      await _renderBlueprintOnMap(rebuildBitmap: false);
     }
 
-    List<int> drawOrder = [];
-    for (int i = 0; i < _filteredPhotos.length; i++) {
-      if (i != _selectedIndex) drawOrder.add(i);
+    final List<int> order = [];
+    for (int i = 0; i < _visiblePhotos.length; i++) {
+      if (i != _selectedIdx) order.add(i);
     }
-    if (_selectedIndex >= 0 && _selectedIndex < _filteredPhotos.length) {
-      drawOrder.add(_selectedIndex);
+    if (_selectedIdx >= 0 && _selectedIdx < _visiblePhotos.length) {
+      order.add(_selectedIdx);
     }
 
-    for (int i in drawOrder) {
-      final photo = _filteredPhotos[i];
-      bool isSelected = (i == _selectedIndex);
-      Color markerColor = isSelected ? Colors.blueAccent : Colors.red;
+    for (final int i in order) {
+      final PhotoItem item = _visiblePhotos[i];
+      final bool selected = i == _selectedIdx;
+      final Color c = selected ? Colors.blueAccent : Colors.red;
 
       try {
-        final markerIcon = await NOverlayImage.fromWidget(
+        final icon = await NOverlayImage.fromWidget(
           widget: Stack(
             alignment: Alignment.center,
             children: [
@@ -1195,14 +1202,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 width: 28,
                 height: 28,
                 decoration: BoxDecoration(
-                  color: markerColor.withOpacity(0.3),
+                  color: c.withOpacity(0.3),
                   shape: BoxShape.circle,
-                  border: Border.all(color: markerColor, width: 2),
+                  border: Border.all(color: c, width: 2),
                 ),
               ),
               Transform.rotate(
-                angle: photo.azimuth * (pi / 180),
-                child: Icon(Icons.navigation, color: markerColor, size: 20),
+                angle: item.azimuth * (pi / 180.0),
+                child: Icon(Icons.navigation, color: c, size: 20),
               ),
             ],
           ),
@@ -1211,47 +1218,38 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         );
 
         final marker = NMarker(
-          id: 'photo_$i',
-          position: NLatLng(photo.latitude, photo.longitude),
-          icon: markerIcon,
+          id: 'photo_marker_$i',
+          position: NLatLng(item.lat, item.lng),
+          icon: icon,
         );
 
-        marker.setOnTapListener((overlay) async {
-          List<int> overlappingIndices = [];
-          for (int j = 0; j < _filteredPhotos.length; j++) {
-            double dist = Geolocator.distanceBetween(
-              photo.latitude,
-              photo.longitude,
-              _filteredPhotos[j].latitude,
-              _filteredPhotos[j].longitude,
+        marker.setOnTapListener((_) async {
+          final List<int> nearby = [];
+          for (int j = 0; j < _visiblePhotos.length; j++) {
+            final double dist = Geolocator.distanceBetween(
+              item.lat,
+              item.lng,
+              _visiblePhotos[j].lat,
+              _visiblePhotos[j].lng,
             );
-            if (dist <= 20.0) {
-              overlappingIndices.add(j);
-            }
+            if (dist <= 20.0) nearby.add(j);
           }
 
-          int nextIndex = i;
-          if (overlappingIndices.length > 1 &&
-              overlappingIndices.contains(_selectedIndex)) {
-            int currentOrder = overlappingIndices.indexOf(_selectedIndex);
-            nextIndex =
-                overlappingIndices[(currentOrder + 1) % overlappingIndices.length];
-          } else {
-            nextIndex = i;
+          int nextIdx = i;
+          if (nearby.length > 1 && nearby.contains(_selectedIdx)) {
+            final int pos = nearby.indexOf(_selectedIdx);
+            nextIdx = nearby[(pos + 1) % nearby.length];
           }
 
-          setState(() {
-            _selectedIndex = nextIndex;
-          });
-
-          await _updateMarkers();
-          final targetPhoto = _filteredPhotos[_selectedIndex];
-          _moveCameraKeepZoom(targetPhoto.latitude, targetPhoto.longitude);
+          setState(() => _selectedIdx = nextIdx);
+          await _refreshAllOverlays(includeBlueprint: true);
+          final target = _visiblePhotos[_selectedIdx];
+          _panMapKeepZoom(target.lat, target.lng);
         });
 
-        _mapController!.addOverlay(marker);
+        await _mapCtrl!.addOverlay(marker);
       } catch (e) {
-        debugPrint('마커 생성 에러: $e');
+        debugPrint('Marker error: $e');
       }
     }
   }
