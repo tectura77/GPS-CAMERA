@@ -103,6 +103,14 @@ class _CameraScreenState extends State<CameraScreen> {
   String _ratioMode = '16:9';
   final List<PhotoItem> _photoList = [];
 
+  // 카메라 줌(화각) 관련 변수 (0.6x ~ 2.0x)
+  double _currentZoom = 1.0;
+  double _baseScaleZoom = 1.0;
+  double _hwMinZoom = 1.0;
+  double _hwMaxZoom = 2.0;
+  int _activeCamIdx = 0;
+  List<int> _backCameraIndices = [];
+
   @override
   void initState() {
     super.initState();
@@ -117,7 +125,15 @@ class _CameraScreenState extends State<CameraScreen> {
       Permission.photos,
     ].request();
     await _restorePhotos();
-    _startCamera();
+
+    _backCameraIndices = [];
+    for (int i = 0; i < appCameras.length; i++) {
+      if (appCameras[i].lensDirection == CameraLensDirection.back) {
+        _backCameraIndices.add(i);
+      }
+    }
+
+    await _startCamera(_backCameraIndices.isNotEmpty ? _backCameraIndices.first : 0);
     _startLocationStream();
     _startSensorStreams();
   }
@@ -153,15 +169,67 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  Future<void> _startCamera() async {
+  Future<void> _startCamera(int camIndex, {double targetUiZoom = 1.0}) async {
     if (appCameras.isEmpty) return;
-    _camController = CameraController(
-      appCameras.first,
+    final prevCtrl = _camController;
+    final newCtrl = CameraController(
+      appCameras[camIndex],
       ResolutionPreset.high,
       enableAudio: false,
     );
-    await _camController!.initialize();
+    _camController = newCtrl;
+    _activeCamIdx = camIndex;
+
+    if (prevCtrl != null) {
+      await prevCtrl.dispose();
+    }
+
+    try {
+      await newCtrl.initialize();
+      _hwMinZoom = await newCtrl.getMinZoomLevel();
+      _hwMaxZoom = await newCtrl.getMaxZoomLevel();
+
+      final double clampedHw = targetUiZoom.clamp(_hwMinZoom, min(_hwMaxZoom, 2.0));
+      await newCtrl.setZoomLevel(clampedHw);
+      _currentZoom = targetUiZoom;
+    } catch (e) {
+      debugPrint('Camera start error: $e');
+    }
     if (mounted) setState(() {});
+  }
+
+  // 0.6x ~ 2.0x 화각 조절 함수 (두 손가락 핀치 줌 & 버튼 공용)
+  Future<void> _applyCameraZoom(double desiredZoom) async {
+    if (_camController == null || !_camController!.value.isInitialized) return;
+    final double target = desiredZoom.clamp(0.6, 2.0);
+
+    // 기기 기본 카메라가 0.6배 줌을 직접 지원하는 경우
+    if (_hwMinZoom <= 0.7) {
+      final double actual = target.clamp(_hwMinZoom, min(_hwMaxZoom, 2.0));
+      setState(() => _currentZoom = actual);
+      await _camController!.setZoomLevel(actual);
+      return;
+    }
+
+    // 초광각 렌즈가 별도 카메라 번호로 분리된 기기 대응
+    if (target < 0.85 && _backCameraIndices.length > 1) {
+      final int ultraWideIdx = _backCameraIndices.last;
+      if (_activeCamIdx != ultraWideIdx) {
+        await _startCamera(ultraWideIdx, targetUiZoom: 0.6);
+        return;
+      }
+      setState(() => _currentZoom = 0.6);
+      return;
+    } else if (target >= 0.85 &&
+        _backCameraIndices.isNotEmpty &&
+        _activeCamIdx != _backCameraIndices.first) {
+      await _startCamera(_backCameraIndices.first, targetUiZoom: target);
+      return;
+    }
+
+    final double actual = target.clamp(_hwMinZoom, min(_hwMaxZoom, 2.0));
+    setState(() => _currentZoom = actual);
+    await _camController!.setZoomLevel(actual);
   }
 
   void _startLocationStream() {
@@ -377,10 +445,21 @@ class _CameraScreenState extends State<CameraScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          Center(
-            child: AspectRatio(
-              aspectRatio: ratio,
-              child: CameraPreview(_camController!),
+          // 두 손가락으로 벌리고 좁혀서 0.6x ~ 2.0x 화각 조절
+          GestureDetector(
+            onScaleStart: (_) {
+              _baseScaleZoom = _currentZoom;
+            },
+            onScaleUpdate: (details) {
+              if ((details.scale - 1.0).abs() > 0.01) {
+                _applyCameraZoom(_baseScaleZoom * details.scale);
+              }
+            },
+            child: Center(
+              child: AspectRatio(
+                aspectRatio: ratio,
+                child: CameraPreview(_camController!),
+              ),
             ),
           ),
           Positioned(
@@ -406,21 +485,58 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
           Positioned(
-            bottom: 110,
+            bottom: 145,
             left: 20,
             child: Container(
               padding: const EdgeInsets.all(8),
               color: Colors.black45,
               child: Text(
                 '$locInfo\n방위각: ${_heading.toStringAsFixed(1)}° ($dirKr)\n'
-                '피치각: ${_tiltPitch.toStringAsFixed(1)}°\n'
+                '피치각: ${_tiltPitch.toStringAsFixed(1)}° | 배율: ${_currentZoom.toStringAsFixed(1)}x\n'
                 '시간: ${DateTime.now().toString().substring(0, 16)}',
                 style: const TextStyle(color: Colors.white, fontSize: 13),
               ),
             ),
           ),
+          // 0.6x / 1.0x / 2.0x 빠른 배율 전환 버튼
           Positioned(
-            bottom: 35,
+            bottom: 92,
+            left: 0,
+            right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [0.6, 1.0, 2.0].map((z) {
+                final bool selected = (_currentZoom - z).abs() < 0.15;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  child: InkWell(
+                    onTap: () => _applyCameraZoom(z),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: selected ? Colors.amber : Colors.black54,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: selected ? Colors.amber : Colors.white54,
+                        ),
+                      ),
+                      child: Text(
+                        '${z.toStringAsFixed(1)}x',
+                        style: TextStyle(
+                          color: selected ? Colors.black : Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          Positioned(
+            bottom: 25,
             right: 30,
             child: FloatingActionButton(
               heroTag: 'mapDashboardBtn',
@@ -470,14 +586,13 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   NaverMapController? _mapCtrl;
   String _dateFilter = '전체 보기';
 
-  // 도면(Blueprint) 상태 변수
   String? _bpPath;
   double? _bpLat;
   double? _bpLng;
-  double _bpBaseRadius = 100.0; // 지도 절반 크기에 해당하는 기준 반경(m)
-  double _bpSizeSlider = 0.5;   // 크기 슬라이더 위치 (0.0 ~ 1.0, 기본값 0.5 = 정중앙!)
-  double _bpRotation = 0.0;     // 회전 각도 (-180 ~ 180, 기본값 0.0 = 정중앙!)
-  double _bpOpacity = 0.5;      // 투명도 (0.1 ~ 1.0, 기본값 0.5 = 50%!)
+  double _bpBaseRadius = 200.0; // 지도 화면의 80% 크기에 해당하는 기준 반경(m)
+  double _bpSizeSlider = 0.5;   // 크기 슬라이더 위치 (0.5 = 정중앙)
+  double _bpRotation = 0.0;     // 회전 각도 (0.0 = 정중앙)
+  double _bpOpacity = 0.5;      // 투명도 (0.5 = 50%)
   bool _bpShow = true;
   bool _bpEditMode = false;
 
@@ -485,7 +600,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   bool _isRenderingBp = false;
   bool _pendingBpRender = false;
 
-  // 슬라이더 값(0.0~1.0)을 실제 반경(m)으로 변환 (0.5일 때 정확히 기준 크기 1.0배)
   double get _currentBpRadius =>
       _bpBaseRadius * pow(9.0, _bpSizeSlider - 0.5).toDouble();
 
@@ -504,7 +618,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 저장된 도면 정보를 디스크에서 읽어오고 이미지 프리캐시 수행
   Future<void> _restoreBlueprintConfig() async {
     try {
       final dir = await getApplicationDocumentsDirectory();
@@ -516,7 +629,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       final String? savedPath = data['imagePath'] as String?;
 
       if (savedPath != null && File(savedPath).existsSync()) {
-        // 이미지를 미리 메모리에 로드해 두어야 첫 화면에서 투명도 조작 없이 즉시 보임!
         if (mounted) {
           await precacheImage(FileImage(File(savedPath)), context);
         }
@@ -524,11 +636,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           _bpPath = savedPath;
           _bpLat = (data['centerLat'] as num?)?.toDouble();
           _bpLng = (data['centerLng'] as num?)?.toDouble();
-          _bpBaseRadius = (data['baseRadius'] as num?)?.toDouble() ?? 100.0;
+          _bpBaseRadius = (data['baseRadius'] as num?)?.toDouble() ?? 200.0;
           _bpSizeSlider =
               ((data['sizeSlider'] as num?)?.toDouble() ?? 0.5).clamp(0.0, 1.0);
-          _bpRotation =
-              ((data['rotation'] as num?)?.toDouble() ?? 0.0).clamp(-180.0, 180.0);
+          _bpRotation = ((data['rotation'] as num?)?.toDouble() ?? 0.0)
+              .clamp(-180.0, 180.0);
           _bpOpacity =
               ((data['opacity'] as num?)?.toDouble() ?? 0.5).clamp(0.1, 1.0);
           _bpShow = data['isVisible'] as bool? ?? true;
@@ -539,7 +651,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 도면 설정 변경 시마다 즉시 영구 저장
   Future<void> _persistBlueprintConfig() async {
     if (_bpPath == null) return;
     try {
@@ -561,9 +672,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 현재 지도 화면 크기의 절반(50%)에 해당하는 반경(m) 계산
-  Future<double> _calcHalfScreenRadius() async {
-    if (_mapCtrl == null) return 100.0;
+  // 현재 지도 화면 크기의 80%를 꽉 채우도록 반경(m) 계산
+  Future<double> _calcScreen80Radius() async {
+    if (_mapCtrl == null) return 200.0;
     try {
       final bounds = await _mapCtrl!.getContentBounds();
       final double widthMeters = Geolocator.distanceBetween(
@@ -579,14 +690,13 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         bounds.southWest.longitude,
       );
       final double minSpan = min(widthMeters, heightMeters);
-      // 지도 화면 절반 크기가 되도록 전체 폭의 1/4(반경 기준)로 설정
-      return (minSpan * 0.28).clamp(15.0, 1000.0);
+      // 지름(2*반경)이 지도 화면의 약 85~90%가 되도록 반경을 0.44배로 설정 (내부 여백 고려 시 실제 도면이 80% 차지)
+      return (minSpan * 0.44).clamp(30.0, 1500.0);
     } catch (_) {
-      return 100.0;
+      return 200.0;
     }
   }
 
-  // 갤러리에서 도면 가져온 직후 투명도 50%, 지도 절반 크기, 조절바 중간값으로 즉시 표시
   Future<void> _importBlueprintFromGallery() async {
     try {
       final picker = ImagePicker();
@@ -599,7 +709,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           '${dir.path}/bp_saved_${DateTime.now().millisecondsSinceEpoch}.$ext';
       await File(picked.path).copy(destPath);
 
-      // 핵심: 파일 이미지를 메모리에 완전히 디코딩될 때까지 대기 후 지도에 렌더링
       if (!mounted) return;
       final fileProvider = FileImage(File(destPath));
       await fileProvider.evict();
@@ -619,16 +728,16 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         centerLng = camPos.target.longitude;
       }
 
-      final double halfScreenRad = await _calcHalfScreenRadius();
+      final double screen80Rad = await _calcScreen80Radius();
 
       setState(() {
         _bpPath = destPath;
         _bpLat = centerLat;
         _bpLng = centerLng;
-        _bpBaseRadius = halfScreenRad;
-        _bpSizeSlider = 0.5; // 크기 조절바 정중앙!
-        _bpOpacity = 0.5;    // 투명도 50%!
-        _bpRotation = 0.0;   // 회전 조절바 정중앙!
+        _bpBaseRadius = screen80Rad; // 지도 화면의 80% 크기!
+        _bpSizeSlider = 0.5;         // 크기 조절바 정중앙!
+        _bpOpacity = 0.5;            // 투명도 50%!
+        _bpRotation = 0.0;           // 회전 조절바 정중앙!
         _bpShow = true;
         _bpEditMode = true;
         _bpCachedOverlayImg = null;
@@ -641,7 +750,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 회전이나 투명도 조절 시 프레임이 밀리지 않고 실시간으로 빠르게 돌아가도록 처리
   Future<void> _renderBlueprintOnMap({bool rebuildBitmap = false}) async {
     if (_mapCtrl == null) return;
 
@@ -669,7 +777,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
               child: Transform.rotate(
                 angle: _bpRotation * (pi / 180.0),
                 child: Padding(
-                  padding: const EdgeInsets.all(36),
+                  padding: const EdgeInsets.all(16),
                   child: Image.file(
                     File(_bpPath!),
                     fit: BoxFit.contain,
@@ -678,8 +786,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 ),
               ),
             ),
-            // 320x320 사이즈로 최적화하여 회전 슬라이더 드래그 시에도 크기 조절처럼 즉각 회전!
-            size: const Size(320, 320),
+            size: const Size(360, 360),
             context: context,
           );
         }
@@ -779,18 +886,18 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                   onPressed: () async {
                     if (_mapCtrl == null) return;
                     final pos = await _mapCtrl!.getCameraPosition();
-                    final halfRad = await _calcHalfScreenRadius();
+                    final rad80 = await _calcScreen80Radius();
                     setState(() {
                       _bpLat = pos.target.latitude;
                       _bpLng = pos.target.longitude;
-                      _bpBaseRadius = halfRad;
+                      _bpBaseRadius = rad80;
                       _bpSizeSlider = 0.5;
                     });
                     await _renderBlueprintOnMap(rebuildBitmap: false);
                     await _persistBlueprintConfig();
                   },
                   icon: const Icon(Icons.center_focus_strong, size: 15),
-                  label: const Text('화면 중앙·절반크기 초기화',
+                  label: const Text('화면 중앙·80%크기 초기화',
                       style: TextStyle(fontSize: 11)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.blueGrey,
@@ -823,7 +930,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 ),
               ],
             ),
-            // 1. 크기 슬라이더 (0.5가 정중앙 기본값)
             Row(
               children: [
                 SizedBox(
@@ -870,7 +976,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 ),
               ],
             ),
-            // 2. 회전 슬라이더 (드래그하는 즉시 빠르게 실시간 회전!)
             Row(
               children: [
                 SizedBox(
@@ -917,7 +1022,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 ),
               ],
             ),
-            // 3. 투명도 슬라이더 (기본값 50%에서 시작, 드래그 즉시 반영)
             Row(
               children: [
                 SizedBox(
