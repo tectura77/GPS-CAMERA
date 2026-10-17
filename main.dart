@@ -55,6 +55,7 @@ class PhotoItem {
   final double azimuth;
   final double pitch;
   final String timestamp;
+  String category; // 💡 사진별 카테고리 필드 추가
 
   PhotoItem({
     required this.path,
@@ -65,6 +66,7 @@ class PhotoItem {
     required this.azimuth,
     required this.pitch,
     required this.timestamp,
+    this.category = '미분류',
   });
 
   Map<String, dynamic> toMap() => {
@@ -76,6 +78,7 @@ class PhotoItem {
         'azimuth': azimuth,
         'pitch': pitch,
         'time': timestamp,
+        'category': category,
       };
 
   factory PhotoItem.fromMap(Map<String, dynamic> m) => PhotoItem(
@@ -87,6 +90,7 @@ class PhotoItem {
         azimuth: (m['azimuth'] as num).toDouble(),
         pitch: (m['pitch'] as num).toDouble(),
         timestamp: m['time'] as String,
+        category: m['category'] as String? ?? '미분류',
       );
 }
 
@@ -388,6 +392,7 @@ class _CameraScreenState extends State<CameraScreen> {
             azimuth: _heading,
             pitch: _tiltPitch,
             timestamp: nowStr,
+            category: '미분류',
           ));
         });
 
@@ -476,7 +481,6 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 1. [16:9 / 4:3 / 1:1 비율 버튼]: 상단 중앙 배치
           Positioned(
             top: landscape ? 14 : 45,
             left: 0,
@@ -504,7 +508,6 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 2. [촬영 정보(위도·경도·방위각)]: 좌측 하단 배치
           Positioned(
             left: 16,
             bottom: landscape ? 16 : 88,
@@ -525,7 +528,6 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 3. [0.6x / 1.0x / 2.0x 배율 버튼]: 맨 아래 중앙 배치
           Positioned(
             bottom: 22,
             left: 0,
@@ -564,7 +566,6 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 4. [노란색 카메라 버튼 + 파란색 지도보기 버튼]: 버튼 가로 길이의 절반(28px)만큼 좌측으로 추가 이동 (right: 48)
           Positioned(
             bottom: 16,
             right: 48,
@@ -615,6 +616,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   int _selectedIdx = 0;
   NaverMapController? _mapCtrl;
   String _dateFilter = '전체 보기';
+  String _categoryFilter = '전체 카테고리'; // 💡 카테고리 필터 상태
 
   String? _bpPath;
   double? _bpLat;
@@ -626,24 +628,21 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   bool _bpShow = true;
   bool _bpEditMode = false;
 
-  // 도면정렬 모드 시 터치 조작 대상 선택 (true: 도면이동/확대/회전, false: 지도이동/확대)
   bool _bpTouchModeIsBlueprint = true;
-  double _nudgeStepMeters = 1.0; // 화살표 이동 단위 (1m / 5m 전환 가능)
-
-  // 두 손가락 도면 제스처용 상태 변수
-  double _gestureStartRadius = 200.0;
-  double _gestureStartRotation = 0.0;
+  double _nudgeStepMeters = 1.0;
   double _metersPerPixel = 0.5;
+
+  final Map<int, Offset> _activePointers = {};
 
   NOverlayImage? _bpCachedOverlayImg;
   bool _isRenderingBp = false;
   bool _pendingBpRender = false;
+  bool _pendingFastQuality = false;
   bool _isExporting = false;
 
   double get _currentBpRadius =>
       _bpBaseRadius * pow(9.0, _bpSizeSlider - 0.5).toDouble();
 
-  // 원하는 반경(m)을 슬라이더 값으로 역변환하여 정밀 적용하는 함수
   void _setBpRadiusDirectly(double newRadiusMeters) {
     final double clamped = newRadiusMeters.clamp(5.0, 5000.0);
     double newSlider = 0.5 + log(clamped / _bpBaseRadius) / log(9.0);
@@ -654,11 +653,24 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     _bpSizeSlider = newSlider.clamp(0.0, 1.0);
   }
 
+  // 등록된 모든 카테고리 목록 추출
+  List<String> get _allCategories {
+    final Set<String> cats = {'미분류'};
+    for (var p in widget.photos) {
+      if (p.category.isNotEmpty) cats.add(p.category);
+    }
+    return cats.toList()..sort();
+  }
+
+  // 날짜 및 카테고리 필터링이 모두 적용된 사진 목록
   List<PhotoItem> get _visiblePhotos {
-    if (_dateFilter == '전체 보기') return widget.photos;
-    return widget.photos
-        .where((p) => p.timestamp.startsWith(_dateFilter))
-        .toList();
+    return widget.photos.where((p) {
+      final bool matchDate =
+          (_dateFilter == '전체 보기') || p.timestamp.startsWith(_dateFilter);
+      final bool matchCat = (_categoryFilter == '전체 카테고리') ||
+          (p.category == _categoryFilter);
+      return matchDate && matchCat;
+    }).toList();
   }
 
   @override
@@ -680,9 +692,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       final String? savedPath = data['imagePath'] as String?;
 
       if (savedPath != null && File(savedPath).existsSync()) {
-        if (mounted) {
-          await precacheImage(FileImage(File(savedPath)), context);
-        }
+        await _prepareFastBlueprintBytes(savedPath);
+        if (!mounted) return;
         setState(() {
           _bpPath = savedPath;
           _bpLat = (data['centerLat'] as num?)?.toDouble();
@@ -723,6 +734,63 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
+  Future<void> _persistPhotoMetadata() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final metaFile = File('${dir.path}/photos_meta.json');
+      final raw = jsonEncode(widget.photos.map((e) => e.toMap()).toList());
+      await metaFile.writeAsString(raw);
+    } catch (e) {
+      debugPrint('Photo meta save error: $e');
+    }
+  }
+
+  // 💡 카테고리 직접 입력 팝업 창
+  Future<void> _showAddCategoryDialog(PhotoItem photo) async {
+    final TextEditingController textCtrl = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text('새 카테고리 직접 등록',
+              style: TextStyle(color: Colors.amber, fontSize: 16)),
+          content: TextField(
+            controller: textCtrl,
+            autofocus: true,
+            style: const TextStyle(color: Colors.white),
+            decoration: const InputDecoration(
+              hintText: '예: 철근공사, 108동 마감 등',
+              hintStyle: TextStyle(color: Colors.white54),
+              enabledBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: Colors.amber)),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('취소', style: TextStyle(color: Colors.white60)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
+              onPressed: () {
+                final String newCat = textCtrl.text.trim();
+                if (newCat.isNotEmpty) {
+                  setState(() {
+                    photo.category = newCat;
+                  });
+                  _persistPhotoMetadata();
+                }
+                Navigator.pop(ctx);
+              },
+              child: const Text('추가 및 적용', style: TextStyle(color: Colors.black)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<double> _calcScreen80Radius() async {
     if (_mapCtrl == null) return 200.0;
     try {
@@ -746,7 +814,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 현재 지도 줌 레벨을 기준으로 화면 1픽셀당 실제 미터(m) 거리 계산
   Future<void> _updateMetersPerPixel() async {
     if (_mapCtrl == null) return;
     try {
@@ -756,6 +823,30 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           (156543.03392 * cos(latRad).abs()) / pow(2.0, camPos.zoom);
     } catch (_) {
       _metersPerPixel = 0.5;
+    }
+  }
+
+  Future<void> _prepareFastBlueprintBytes(String path) async {
+    try {
+      final raw = await File(path).readAsBytes();
+      final decoded = img.decodeImage(raw);
+      if (decoded != null) {
+        final resized = (decoded.width > 420 || decoded.height > 420)
+            ? img.copyResize(
+                decoded,
+                width: decoded.width >= decoded.height ? 420 : null,
+                height: decoded.height > decoded.width ? 420 : null,
+              )
+            : decoded;
+        _bpFastBytes = Uint8List.fromList(img.encodePng(resized, level: 1));
+      } else {
+        _bpFastBytes = raw;
+      }
+      if (mounted && _bpFastBytes != null) {
+        await precacheImage(MemoryImage(_bpFastBytes!), context);
+      }
+    } catch (e) {
+      debugPrint('Fast blueprint bytes error: $e');
     }
   }
 
@@ -771,11 +862,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           '${dir.path}/bp_saved_${DateTime.now().millisecondsSinceEpoch}.$ext';
       await File(picked.path).copy(destPath);
 
+      await _prepareFastBlueprintBytes(destPath);
       if (!mounted) return;
-      final fileProvider = FileImage(File(destPath));
-      await fileProvider.evict();
-      if (!mounted) return;
-      await precacheImage(fileProvider, context);
 
       double centerLat = _visiblePhotos.isNotEmpty
           ? _visiblePhotos[_selectedIdx].lat
@@ -808,13 +896,16 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       });
 
       await _persistBlueprintConfig();
-      await _renderBlueprintOnMap(rebuildBitmap: true);
+      await _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
     } catch (e) {
       debugPrint('Import blueprint error: $e');
     }
   }
 
-  Future<void> _renderBlueprintOnMap({bool rebuildBitmap = false}) async {
+  Future<void> _renderBlueprintOnMap({
+    bool rebuildBitmap = false,
+    bool fastQuality = false,
+  }) async {
     if (_mapCtrl == null) return;
 
     if (_bpPath == null || !_bpShow || _bpLat == null || _bpLng == null) {
@@ -825,32 +916,45 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     if (rebuildBitmap) {
       if (_isRenderingBp) {
         _pendingBpRender = true;
+        _pendingFastQuality = fastQuality;
         return;
       }
       _isRenderingBp = true;
     }
 
     try {
+      bool useFast = fastQuality;
       do {
         _pendingBpRender = false;
         if (rebuildBitmap || _bpCachedOverlayImg == null) {
           if (!mounted) return;
+          final double boxSize = useFast ? 210.0 : 360.0;
+          final double padSize = boxSize * (16.0 / 360.0);
+
+          final Widget imgWidget = _bpFastBytes != null
+              ? Image.memory(
+                  _bpFastBytes!,
+                  fit: BoxFit.contain,
+                  gaplessPlayback: true,
+                )
+              : Image.file(
+                  File(_bpPath!),
+                  fit: BoxFit.contain,
+                  gaplessPlayback: true,
+                );
+
           _bpCachedOverlayImg = await NOverlayImage.fromWidget(
             widget: Opacity(
               opacity: _bpOpacity.clamp(0.1, 1.0),
               child: Transform.rotate(
                 angle: _bpRotation * (pi / 180.0),
                 child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Image.file(
-                    File(_bpPath!),
-                    fit: BoxFit.contain,
-                    gaplessPlayback: true,
-                  ),
+                  padding: EdgeInsets.all(padSize),
+                  child: imgWidget,
                 ),
               ),
             ),
-            size: const Size(360, 360),
+            size: Size(boxSize, boxSize),
             context: context,
           );
         }
@@ -872,11 +976,90 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         );
 
         await _mapCtrl!.addOverlay(groundOverlay);
+        useFast = _pendingFastQuality;
       } while (_pendingBpRender && mounted);
     } catch (e) {
       debugPrint('Render blueprint error: $e');
     } finally {
       _isRenderingBp = false;
+    }
+  }
+
+  void _handleBlueprintPointerMove(PointerMoveEvent event) {
+    if (!_activePointers.containsKey(event.pointer)) return;
+    if (_bpLat == null || _bpLng == null) return;
+
+    if (_activePointers.length == 1) {
+      final Offset prev = _activePointers[event.pointer]!;
+      final Offset curr = event.localPosition;
+      _activePointers[event.pointer] = curr;
+
+      final double dx = curr.dx - prev.dx;
+      final double dy = curr.dy - prev.dy;
+      final double northM = -dy * _metersPerPixel;
+      final double eastM = dx * _metersPerPixel;
+
+      final double dLat = northM / 111320.0;
+      final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
+      final double dLng = eastM / (111320.0 * cosLat);
+
+      setState(() {
+        _bpLat = _bpLat! + dLat;
+        _bpLng = _bpLng! + dLng;
+      });
+      _renderBlueprintOnMap(rebuildBitmap: false);
+    } else if (_activePointers.length >= 2) {
+      final List<int> keys = _activePointers.keys.toList();
+      final int k1 = keys[0];
+      final int k2 = keys[1];
+
+      final Offset oldP1 = _activePointers[k1]!;
+      final Offset oldP2 = _activePointers[k2]!;
+      _activePointers[event.pointer] = event.localPosition;
+      final Offset newP1 = _activePointers[k1]!;
+      final Offset newP2 = _activePointers[k2]!;
+
+      final Offset oldCenter = (oldP1 + oldP2) / 2.0;
+      final Offset newCenter = (newP1 + newP2) / 2.0;
+      final double dx = newCenter.dx - oldCenter.dx;
+      final double dy = newCenter.dy - oldCenter.dy;
+      final double northM = -dy * _metersPerPixel;
+      final double eastM = dx * _metersPerPixel;
+
+      final double dLat = northM / 111320.0;
+      final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
+      final double dLng = eastM / (111320.0 * cosLat);
+
+      final double oldDist = (oldP2 - oldP1).distance;
+      final double newDist = (newP2 - newP1).distance;
+
+      final double oldAngle = atan2(oldP2.dy - oldP1.dy, oldP2.dx - oldP1.dx);
+      final double newAngle = atan2(newP2.dy - newP1.dy, newP2.dx - newP1.dx);
+      double angleDiffDeg = (newAngle - oldAngle) * (180.0 / pi);
+      if (angleDiffDeg > 180.0) angleDiffDeg -= 360.0;
+      if (angleDiffDeg < -180.0) angleDiffDeg += 360.0;
+
+      bool rotated = false;
+      setState(() {
+        _bpLat = _bpLat! + dLat;
+        _bpLng = _bpLng! + dLng;
+
+        if (oldDist > 8.0 && newDist > 8.0) {
+          final double scaleRatio = newDist / oldDist;
+          if ((scaleRatio - 1.0).abs() > 0.001) {
+            _setBpRadiusDirectly(_currentBpRadius * scaleRatio);
+          }
+        }
+
+        if (angleDiffDeg.abs() > 0.02) {
+          double nextRot = _bpRotation + angleDiffDeg;
+          nextRot = ((nextRot + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
+          _bpRotation = nextRot;
+          rotated = true;
+        }
+      });
+
+      _renderBlueprintOnMap(rebuildBitmap: rotated, fastQuality: true);
     }
   }
 
@@ -936,9 +1119,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                     style: TextStyle(
                         color: Colors.white, fontWeight: FontWeight.bold),
                   ),
-                  subtitle: const Text(
-                    '상대방이 앱 없이도 PC·폰 인터넷 창에서 도면+사진+지도를 클릭·확대하며 볼 수 있는 단일 파일',
-                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  subtitle: Text(
+                    '현재 필터링된 상태 (날짜: $_dateFilter, 카테고리: $_categoryFilter)의 도면+사진+지도를 공유',
+                    style:
+                        const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   onTap: () {
                     Navigator.pop(ctx);
@@ -954,7 +1138,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                         color: Colors.white, fontWeight: FontWeight.bold),
                   ),
                   subtitle: const Text(
-                    '원본 사진들과 맞춘 도면 이미지·좌표 설정 데이터를 통째로 묶어 동료나 PC로 전달',
+                    '현재 필터링된 원본 사진들과 도면 설정 데이터를 통째로 묶어 전달',
                     style: TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   onTap: () {
@@ -971,7 +1155,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                         color: Colors.white, fontWeight: FontWeight.bold),
                   ),
                   subtitle: const Text(
-                    '현재 선택된 사진과 도면이 얹어진 지도를 1장의 이미지로 합쳐 카톡 등으로 즉시 공유',
+                    '현재 선택된 사진과 도면이 얹어진 지도를 1장의 이미지로 합쳐 즉시 공유',
                     style: TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   onTap: () {
@@ -987,7 +1171,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // HTML 내보내기: 사진 칸 두 손가락 핀치 줌/드래그 이동 + 마우스 휠 줌 지원
   Future<void> _exportAsHtmlViewer() async {
     if (_visiblePhotos.isEmpty && _bpPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1018,6 +1201,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           'azimuth': p.azimuth,
           'pitch': p.pitch,
           'time': p.timestamp,
+          'category': p.category,
         });
       }
 
@@ -1084,7 +1268,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 </head>
 <body>
 <header>
-  <strong>📍 GPS 도면 & 현장 사진 뷰어 (${_dateFilter})</strong>
+  <strong>📍 날짜: $_dateFilter | 카테고리: $_categoryFilter</strong>
   <span id="info-txt" style="font-size:12px; color:#ffc107;"></span>
 </header>
 <div class="main-wrap">
@@ -1098,9 +1282,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 <script>
 const photos = $photosJs;
 const bp = $bpJs;
-let selectedIdx = photos.length > 0 ? $_selectedIdx : 0;
+let selectedIdx = photos.length > 0 ? 0 : 0;
 
-// 사진 두 손가락 핀치 줌 & 드래그 이동 로직
 const photoPane = document.getElementById('photo-pane');
 const mainImg = document.getElementById('main-photo');
 let pScale = 1.0, pX = 0, pY = 0;
@@ -1229,7 +1412,7 @@ function selectPhoto(idx) {
   const p = photos[idx];
   mainImg.src = p.b64;
   document.getElementById('info-txt').innerText =
-    `위도: \${p.lat.toFixed(6)} | 경도: \${p.lng.toFixed(6)} | 방위각: \${p.azimuth.toFixed(1)}° | \${p.time}`;
+    `[\${p.category}] 위도: \${p.lat.toFixed(6)} | 경도: \${p.lng.toFixed(6)} | 방위각: \${p.azimuth.toFixed(1)}° | \${p.time}`;
   renderThumbnails();
   renderMarkers();
   map.panTo([p.lat, p.lng]);
@@ -1446,7 +1629,7 @@ if (photos.length > 0) {
       await Share.shareXFiles(
         [XFile(outFile.path)],
         text:
-            '🖼️ 현장 사진 & 도면 위치 합본 (${currentPhoto.timestamp})\n위도: ${currentPhoto.lat.toStringAsFixed(6)}, 경도: ${currentPhoto.lng.toStringAsFixed(6)}',
+            '🖼️ 현장 사진 & 도면 위치 합본 [카테고리: ${currentPhoto.category}] (${currentPhoto.timestamp})\n위도: ${currentPhoto.lat.toStringAsFixed(6)}, 경도: ${currentPhoto.lng.toStringAsFixed(6)}',
       );
     } catch (e) {
       if (mounted) {
@@ -1459,7 +1642,6 @@ if (photos.length > 0) {
     }
   }
 
-  // 미세 조정 버튼 생성 헬퍼
   Widget _fineStepBtn(String label, VoidCallback onTap) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
@@ -1494,7 +1676,6 @@ if (photos.length > 0) {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 상단: [도면이동] vs [지도이동] 모드 전환 버튼 + [고정 및 저장]
             Row(
               children: [
                 Expanded(
@@ -1547,6 +1728,8 @@ if (photos.length > 0) {
                 const SizedBox(width: 8),
                 ElevatedButton.icon(
                   onPressed: () async {
+                    await _renderBlueprintOnMap(
+                        rebuildBitmap: true, fastQuality: false);
                     await _persistBlueprintConfig();
                     setState(() => _bpEditMode = false);
                     if (mounted) {
@@ -1573,7 +1756,7 @@ if (photos.length > 0) {
               padding: const EdgeInsets.symmetric(vertical: 3),
               child: Text(
                 _bpTouchModeIsBlueprint
-                    ? '💡 [도면이동 켜짐] 지도 위에서 한 손가락 끌기(이동), 두 손가락 벌리기(확대/축소) 및 회전이 가능합니다.'
+                    ? '💡 [도면이동 켜짐] 지도 위에서 한 손가락 끌기(이동), 두 손가락 벌리기(확대/축소) 및 즉시 회전이 가능합니다.'
                     : '💡 [지도이동 켜짐] 도면은 고정된 채로 지도를 두 손가락으로 이동·확대할 수 있습니다.',
                 style: TextStyle(
                   color: _bpTouchModeIsBlueprint
@@ -1584,7 +1767,6 @@ if (photos.length > 0) {
               ),
             ),
             const Divider(color: Colors.white24, height: 6),
-            // 1. 위치 미세 이동 (1m / 5m 단위 전환 가능)
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -1663,7 +1845,6 @@ if (photos.length > 0) {
                 ),
               ],
             ),
-            // 2. 크기 정밀 조절 (-5m / -0.5m / 슬라이더 / +0.5m / +5m)
             Row(
               children: [
                 SizedBox(
@@ -1716,7 +1897,6 @@ if (photos.length > 0) {
                 }),
               ],
             ),
-            // 3. 회전 정밀 조절 (-2° / -0.2° / 슬라이더 / +0.2° / +2°)
             Row(
               children: [
                 SizedBox(
@@ -1730,14 +1910,14 @@ if (photos.length > 0) {
                   setState(() {
                     _bpRotation = (_bpRotation - 2.0).clamp(-180.0, 180.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: true);
+                  _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
                   _persistBlueprintConfig();
                 }),
                 _fineStepBtn('-0.2°', () {
                   setState(() {
                     _bpRotation = (_bpRotation - 0.2).clamp(-180.0, 180.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: true);
+                  _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
                   _persistBlueprintConfig();
                 }),
                 Expanded(
@@ -1748,28 +1928,32 @@ if (photos.length > 0) {
                     activeColor: Colors.amber,
                     onChanged: (val) {
                       setState(() => _bpRotation = val);
-                      _renderBlueprintOnMap(rebuildBitmap: true);
+                      _renderBlueprintOnMap(
+                          rebuildBitmap: true, fastQuality: true);
                     },
-                    onChangeEnd: (_) => _persistBlueprintConfig(),
+                    onChangeEnd: (_) {
+                      _renderBlueprintOnMap(
+                          rebuildBitmap: true, fastQuality: false);
+                      _persistBlueprintConfig();
+                    },
                   ),
                 ),
                 _fineStepBtn('+0.2°', () {
                   setState(() {
                     _bpRotation = (_bpRotation + 0.2).clamp(-180.0, 180.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: true);
+                  _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
                   _persistBlueprintConfig();
                 }),
                 _fineStepBtn('+2°', () {
                   setState(() {
                     _bpRotation = (_bpRotation + 2.0).clamp(-180.0, 180.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: true);
+                  _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
                   _persistBlueprintConfig();
                 }),
               ],
             ),
-            // 4. 투명도 슬라이더
             Row(
               children: [
                 SizedBox(
@@ -1787,9 +1971,14 @@ if (photos.length > 0) {
                     activeColor: Colors.amber,
                     onChanged: (val) {
                       setState(() => _bpOpacity = val);
-                      _renderBlueprintOnMap(rebuildBitmap: true);
+                      _renderBlueprintOnMap(
+                          rebuildBitmap: true, fastQuality: true);
                     },
-                    onChangeEnd: (_) => _persistBlueprintConfig(),
+                    onChangeEnd: (_) {
+                      _renderBlueprintOnMap(
+                          rebuildBitmap: true, fastQuality: false);
+                      _persistBlueprintConfig();
+                    },
                   ),
                 ),
               ],
@@ -1810,7 +1999,9 @@ if (photos.length > 0) {
     dateTabs.addAll(sortedDays);
 
     final bool portrait =
-        MediaQuery.of(context).orientation == Orientation.portrait;
+        MediaQuery.of(context).orientation == Orientation.landscape;
+
+    final double bottomSafe = MediaQuery.of(context).viewPadding.bottom;
 
     final PhotoItem? activePhoto = _visiblePhotos.isNotEmpty
         ? _visiblePhotos[_selectedIdx.clamp(0, _visiblePhotos.length - 1)]
@@ -1823,15 +2014,76 @@ if (photos.length > 0) {
                 color: Colors.black,
                 width: double.infinity,
                 height: double.infinity,
-                child: InteractiveViewer(
-                  panEnabled: true,
-                  boundaryMargin: const EdgeInsets.all(20),
-                  minScale: 0.5,
-                  maxScale: 4.0,
-                  child: Center(
-                    child:
-                        Image.file(File(activePhoto.path), fit: BoxFit.contain),
-                  ),
+                child: Stack(
+                  children: [
+                    InteractiveViewer(
+                      panEnabled: true,
+                      boundaryMargin: const EdgeInsets.all(20),
+                      minScale: 0.5,
+                      maxScale: 4.0,
+                      child: Center(
+                        child: Image.file(File(activePhoto.path),
+                            fit: BoxFit.contain),
+                      ),
+                    ),
+                    // 💡 사진 보기 화면 좌측 상단 카테고리 선택 및 직접 등록 버튼
+                    Positioned(
+                      top: 10,
+                      left: 10,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.black87,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.amber, width: 1.5),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: _allCategories
+                                    .contains(activePhoto.category)
+                                    ? activePhoto.category
+                                    : '미분류',
+                            dropdownColor: Colors.black87,
+                            icon: const Icon(Icons.arrow_drop_down,
+                                color: Colors.amber),
+                            style: const TextStyle(
+                              color: Colors.amber,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                            items: [
+                              ..._allCategories.map(
+                                (c) => DropdownMenuItem(
+                                  value: c,
+                                  child: Text(c,
+                                      style: const TextStyle(
+                                          color: Colors.white)),
+                                ),
+                              ),
+                              const DropdownMenuItem(
+                                value: '__ADD_NEW__',
+                                child: Text('+ 새 카테고리 직접 입력',
+                                    style: TextStyle(
+                                        color: Colors.amberAccent,
+                                        fontWeight: FontWeight.bold)),
+                              ),
+                            ],
+                            onChanged: (val) {
+                              if (val == '__ADD_NEW__') {
+                                _showAddCategoryDialog(activePhoto);
+                              } else if (val != null) {
+                                setState(() {
+                                  activePhoto.category = val;
+                                });
+                                _persistPhotoMetadata();
+                              }
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               )
             : const Center(
@@ -1878,142 +2130,33 @@ if (photos.length > 0) {
                 onCameraIdle: () {
                   _updateMetersPerPixel();
                 },
-                onMapTapped: (point, latLng) {
-                  // 지도이동 모드일 때도 원한다면 슬라이더로 조정 가능
-                },
               ),
-              // [도면정렬 모드 + 도면이동 선택 시]: 지도 위에서 한 손가락 이동, 두 손가락 확대·축소·회전 제스처 처리
               if (_bpEditMode && _bpPath != null && _bpTouchModeIsBlueprint)
                 Positioned.fill(
-                  child: GestureDetector(
+                  child: Listener(
                     behavior: HitTestBehavior.opaque,
-                    onScaleStart: (details) async {
-                      await _updateMetersPerPixel();
-                      _gestureStartRadius = _currentBpRadius;
-                      _gestureStartRotation = _bpRotation;
+                    onPointerDown: (event) {
+                      _activePointers[event.pointer] = event.localPosition;
+                      _updateMetersPerPixel();
                     },
-                    onScaleUpdate: (details) {
-                      if (_bpLat == null || _bpLng == null) return;
-
-                      // 1. 한 손가락 또는 두 손가락 중심점 드래그 -> 도면 위치 이동
-                      final double dx = details.focalPointDelta.dx;
-                      final double dy = details.focalPointDelta.dy;
-                      final double northM = -dy * _metersPerPixel;
-                      final double eastM = dx * _metersPerPixel;
-
-                      final double dLat = northM / 111320.0;
-                      final double cosLat =
-                          cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
-                      final double dLng = eastM / (111320.0 * cosLat);
-
-                      bool needRebuildBitmap = false;
-
-                      setState(() {
-                        _bpLat = _bpLat! + dLat;
-                        _bpLng = _bpLng! + dLng;
-
-                        // 2. 두 손가락 벌리기/오므리기 -> 도면 확대/축소
-                        if (details.pointerCount >= 2 &&
-                            (details.scale - 1.0).abs() > 0.003) {
-                          final double targetRad =
-                              (_gestureStartRadius * details.scale)
-                                  .clamp(5.0, 5000.0);
-                          _setBpRadiusDirectly(targetRad);
-                        }
-
-                        // 3. 두 손가락 회전 -> 도면 회전
-                        if (details.pointerCount >= 2 &&
-                            details.rotation.abs() > 0.003) {
-                          final double degDelta =
-                              details.rotation * (180.0 / pi);
-                          double newRot = _gestureStartRotation + degDelta;
-                          newRot =
-                              ((newRot + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
-                          if ((newRot - _bpRotation).abs() > 0.15) {
-                            _bpRotation = newRot;
-                            needRebuildBitmap = true;
-                          }
-                        }
-                      });
-
-                      _renderBlueprintOnMap(rebuildBitmap: needRebuildBitmap);
+                    onPointerMove: _handleBlueprintPointerMove,
+                    onPointerUp: (event) {
+                      _activePointers.remove(event.pointer);
+                      if (_activePointers.isEmpty) {
+                        _renderBlueprintOnMap(
+                            rebuildBitmap: true, fastQuality: false);
+                        _persistBlueprintConfig();
+                      }
                     },
-                    onScaleEnd: (_) {
-                      _renderBlueprintOnMap(rebuildBitmap: true);
-                      _persistBlueprintConfig();
+                    onPointerCancel: (event) {
+                      _activePointers.remove(event.pointer);
+                      if (_activePointers.isEmpty) {
+                        _renderBlueprintOnMap(
+                            rebuildBitmap: true, fastQuality: false);
+                        _persistBlueprintConfig();
+                      }
                     },
-                    child: Container(
-                      color: Colors.transparent,
-                    ),
-                  ),
-                ),
-              // 지도 화면 상단에도 [도면이동 / 지도이동] 빠른 전환 플로팅 스위치 표시
-              if (_bpEditMode && _bpPath != null)
-                Positioned(
-                  top: 10,
-                  right: 10,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.black87,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.white38),
-                    ),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        InkWell(
-                          onTap: () =>
-                              setState(() => _bpTouchModeIsBlueprint = true),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: _bpTouchModeIsBlueprint
-                                  ? Colors.amber
-                                  : Colors.transparent,
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: Text(
-                              '🖐️ 도면이동',
-                              style: TextStyle(
-                                color: _bpTouchModeIsBlueprint
-                                    ? Colors.black
-                                    : Colors.white70,
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        InkWell(
-                          onTap: () =>
-                              setState(() => _bpTouchModeIsBlueprint = false),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: !_bpTouchModeIsBlueprint
-                                  ? Colors.lightBlueAccent
-                                  : Colors.transparent,
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: Text(
-                              '🗺️ 지도이동',
-                              style: TextStyle(
-                                color: !_bpTouchModeIsBlueprint
-                                    ? Colors.black
-                                    : Colors.white70,
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                    child: Container(color: Colors.transparent),
                   ),
                 ),
             ],
@@ -2033,9 +2176,10 @@ if (photos.length > 0) {
               constraints: const BoxConstraints(minWidth: 34, minHeight: 36),
               onPressed: () => Navigator.pop(context),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 4),
+            // 날짜 필터 드롭다운
             ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 108),
+              constraints: const BoxConstraints(minWidth: 98),
               child: DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
                   value: _dateFilter,
@@ -2043,11 +2187,11 @@ if (photos.length > 0) {
                   dropdownColor: Colors.black87,
                   style: const TextStyle(
                     color: Colors.white,
-                    fontSize: 14,
+                    fontSize: 13,
                     fontWeight: FontWeight.bold,
                   ),
                   icon: const Icon(Icons.arrow_drop_down,
-                      color: Colors.white, size: 20),
+                      color: Colors.white, size: 18),
                   items: dateTabs
                       .map(
                         (d) => DropdownMenuItem(
@@ -2077,22 +2221,69 @@ if (photos.length > 0) {
                 ),
               ),
             ),
+            const SizedBox(width: 4),
+            // 💡 카테고리 필터 드롭다운 추가
+            ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 96),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: _allCategories.contains(_categoryFilter)
+                      ? _categoryFilter
+                      : '전체 카테고리',
+                  isDense: true,
+                  dropdownColor: Colors.black87,
+                  style: const TextStyle(
+                    color: Colors.amberAccent,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  icon: const Icon(Icons.arrow_drop_down,
+                      color: Colors.amberAccent, size: 18),
+                  items: ['전체 카테고리', ..._allCategories]
+                      .map(
+                        (c) => DropdownMenuItem(
+                          value: c,
+                          child: Text(
+                            c,
+                            softWrap: false,
+                            overflow: TextOverflow.visible,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (val) {
+                    if (val == null) return;
+                    setState(() {
+                      _categoryFilter = val;
+                      _selectedIdx = _visiblePhotos.isNotEmpty
+                          ? _visiblePhotos.length - 1
+                          : 0;
+                    });
+                    _refreshAllOverlays(includeBlueprint: true);
+                    if (_visiblePhotos.isNotEmpty) {
+                      final p = _visiblePhotos[_selectedIdx];
+                      _panMapKeepZoom(p.lat, p.lng);
+                    }
+                  },
+                ),
+              ),
+            ),
             const Spacer(),
             InkWell(
               onTap: _isExporting ? null : _showExportOptionsSheet,
               child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(Icons.ios_share,
-                        color: Colors.lightBlueAccent, size: 16),
-                    SizedBox(width: 3),
+                        color: Colors.lightBlueAccent, size: 15),
+                    SizedBox(width: 2),
                     Text(
                       '내보내기',
                       style: TextStyle(
                         color: Colors.lightBlueAccent,
-                        fontSize: 12,
+                        fontSize: 11,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -2103,18 +2294,18 @@ if (photos.length > 0) {
             InkWell(
               onTap: _importBlueprintFromGallery,
               child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(Icons.add_photo_alternate,
-                        color: Colors.amber, size: 16),
-                    SizedBox(width: 3),
+                        color: Colors.amber, size: 15),
+                    SizedBox(width: 2),
                     Text(
                       '도면',
                       style: TextStyle(
                         color: Colors.amber,
-                        fontSize: 12,
+                        fontSize: 11,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -2125,11 +2316,11 @@ if (photos.length > 0) {
             if (_bpPath != null) ...[
               IconButton(
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 30, minHeight: 34),
+                constraints: const BoxConstraints(minWidth: 26, minHeight: 34),
                 icon: Icon(
                   _bpShow ? Icons.layers : Icons.layers_clear,
                   color: _bpShow ? Colors.lightGreenAccent : Colors.grey,
-                  size: 19,
+                  size: 18,
                 ),
                 onPressed: () async {
                   setState(() {
@@ -2141,7 +2332,7 @@ if (photos.length > 0) {
                 },
               ),
               SizedBox(
-                height: 30,
+                height: 28,
                 child: ElevatedButton(
                   onPressed: () async {
                     await _persistBlueprintConfig();
@@ -2153,13 +2344,13 @@ if (photos.length > 0) {
                         _bpEditMode ? Colors.amber : Colors.blueAccent,
                     foregroundColor:
                         _bpEditMode ? Colors.black : Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
                     minimumSize: Size.zero,
                   ),
                   child: Text(
                     _bpEditMode ? '고정저장' : '도면정렬',
                     style: const TextStyle(
-                        fontSize: 11, fontWeight: FontWeight.bold),
+                        fontSize: 10, fontWeight: FontWeight.bold),
                   ),
                 ),
               ),
@@ -2189,40 +2380,44 @@ if (photos.length > 0) {
                       ),
               ),
               if (_visiblePhotos.isNotEmpty)
-                SizedBox(
-                  height: 80,
-                  child: ListView.builder(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: _visiblePhotos.length,
-                    itemBuilder: (context, idx) {
-                      final bool selected = _selectedIdx == idx;
-                      return GestureDetector(
-                        onTap: () {
-                          setState(() => _selectedIdx = idx);
-                          _refreshAllOverlays(includeBlueprint: true);
-                          _panMapKeepZoom(
-                            _visiblePhotos[idx].lat,
-                            _visiblePhotos[idx].lng,
-                          );
-                        },
-                        child: Container(
-                          margin: const EdgeInsets.all(4),
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                              color:
-                                  selected ? Colors.amber : Colors.transparent,
-                              width: 3,
+                Padding(
+                  padding: EdgeInsets.only(bottom: bottomSafe + 28.0),
+                  child: SizedBox(
+                    height: 80,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _visiblePhotos.length,
+                      itemBuilder: (context, idx) {
+                        final bool selected = _selectedIdx == idx;
+                        return GestureDetector(
+                          onTap: () {
+                            setState(() => _selectedIdx = idx);
+                            _refreshAllOverlays(includeBlueprint: true);
+                            _panMapKeepZoom(
+                              _visiblePhotos[idx].lat,
+                              _visiblePhotos[idx].lng,
+                            );
+                          },
+                          child: Container(
+                            margin: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                color: selected
+                                    ? Colors.amber
+                                    : Colors.transparent,
+                                width: 3,
+                              ),
+                            ),
+                            child: Image.file(
+                              File(_visiblePhotos[idx].path),
+                              width: 70,
+                              height: 70,
+                              fit: BoxFit.cover,
                             ),
                           ),
-                          child: Image.file(
-                            File(_visiblePhotos[idx].path),
-                            width: 70,
-                            height: 70,
-                            fit: BoxFit.cover,
-                          ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
                 ),
             ],
