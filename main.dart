@@ -21,7 +21,7 @@ import 'package:archive/archive.dart';
 List<CameraDescription> appCameras = [];
 String? naverAuthErrorMsg;
 
-// 💡 대시보드 재진입 및 사진 전환 속도를 극대화하는 전역 오버레이 캐시
+// 대시보드 재진입 및 사진 전환 속도를 극대화하는 전역 오버레이 캐시
 final Map<String, NOverlayImage> globalMarkerIconCache = {};
 final Map<String, NOverlayImage> globalBpOverlayCache = {};
 
@@ -217,10 +217,10 @@ class _CameraScreenState extends State<CameraScreen> {
     _setupApp();
   }
 
-  // 💡 Endian 객체 없이 순수 비트 연산으로 WAV 헤더와 셔터음을 생성 (컴파일 에러 원천 차단)
+  // 순수 비트 연산으로 생성하는 고출력 기계식 카메라 셔터음("찰-칵!") WAV 데이터
   Uint8List _generateMechanicalShutterWav() {
     const int sampleRate = 22050;
-    const int durationMs = 170;
+    const int durationMs = 180;
     final int numSamples = (sampleRate * durationMs) ~/ 1000;
     final int dataSize = numSamples * 2;
     final Uint8List out = Uint8List(44 + dataSize);
@@ -262,22 +262,22 @@ class _CameraScreenState extends State<CameraScreen> {
       final double t = i / sampleRate;
       double amp = 0.0;
 
-      // 첫 번째 "찰-" (0~25ms)
-      if (t < 0.025) {
-        final double env = exp(-t * 170.0);
-        final double noise = (rng.nextDouble() * 2.0 - 1.0) * 0.7;
-        final double tone = sin(2.0 * pi * 1400.0 * t) * 0.5 +
-            sin(2.0 * pi * 2850.0 * t) * 0.4;
+      // 첫 번째 "찰-" (0~28ms)
+      if (t < 0.028) {
+        final double env = exp(-t * 145.0);
+        final double noise = (rng.nextDouble() * 2.0 - 1.0) * 0.85;
+        final double tone = sin(2.0 * pi * 1500.0 * t) * 0.6 +
+            sin(2.0 * pi * 3100.0 * t) * 0.45;
         amp += (noise + tone) * env;
       }
 
-      // 두 번째 "-칵!" (48~95ms)
-      if (t >= 0.048 && t < 0.095) {
-        final double dt = t - 0.048;
-        final double env = exp(-dt * 140.0);
-        final double noise = (rng.nextDouble() * 2.0 - 1.0) * 0.85;
-        final double tone = sin(2.0 * pi * 1100.0 * dt) * 0.5 +
-            sin(2.0 * pi * 2300.0 * dt) * 0.45;
+      // 두 번째 "-칵!" (46~105ms)
+      if (t >= 0.046 && t < 0.105) {
+        final double dt = t - 0.046;
+        final double env = exp(-dt * 120.0);
+        final double noise = (rng.nextDouble() * 2.0 - 1.0) * 0.95;
+        final double tone = sin(2.0 * pi * 1150.0 * dt) * 0.6 +
+            sin(2.0 * pi * 2450.0 * dt) * 0.5;
         amp += (noise + tone) * env;
       }
 
@@ -1026,6 +1026,116 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     } catch (e) {
       debugPrint('Photo meta save error: $e');
     }
+  }
+
+  // 💡 상단 바 [도면] 버튼 클릭 시 '도면 추가' / '도면 수정' 선택 팝업
+  Future<void> _showBlueprintActionMenuDialog() async {
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: Colors.grey[900],
+          insetPadding: const EdgeInsets.symmetric(horizontal: 50),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.map, color: Colors.amber, size: 18),
+                        SizedBox(width: 6),
+                        Text(
+                          '도면 작업 선택',
+                          style: TextStyle(
+                            color: Colors.amber,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    InkWell(
+                      onTap: () => Navigator.pop(ctx),
+                      child: const Icon(Icons.close,
+                          color: Colors.white54, size: 18),
+                    ),
+                  ],
+                ),
+                const Divider(color: Colors.white24, height: 18),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _importBlueprintFromGallery();
+                  },
+                  icon: const Icon(Icons.add_photo_alternate, size: 18),
+                  label: const Text(
+                    '도면 추가 (사진에서 가져오기)',
+                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.amber,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    if (_blueprints.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('등록된 도면이 없습니다. 먼저 [도면 추가]를 눌러주세요.'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                      return;
+                    }
+                    await _updateMapViewportInfo();
+                    setState(() {
+                      _bpEditMode = true;
+                      _bpTouchModeIsBlueprint = true;
+                      _bpGlobalShow = true;
+                      if (_activeBp != null) {
+                        _activeBp!.isVisible = true;
+                      }
+                    });
+                    await _persistBlueprintConfig();
+                    await _refreshAllOverlays(includeBlueprint: true);
+                  },
+                  icon: const Icon(Icons.tune, size: 18),
+                  label: Text(
+                    _blueprints.isEmpty
+                        ? '도면 수정 (등록된 도면 없음)'
+                        : '도면 수정 (기존 도면 ${_blueprints.length}개 편집)',
+                    style: const TextStyle(
+                        fontSize: 12.5, fontWeight: FontWeight.bold),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        _blueprints.isEmpty ? Colors.white12 : Colors.blueAccent,
+                    foregroundColor:
+                        _blueprints.isEmpty ? Colors.white54 : Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Future<String?> _promptBlueprintNameDialog({
@@ -3323,7 +3433,7 @@ if (photos.length > 0) {
       appBar: AppBar(
         backgroundColor: Colors.black,
         automaticallyImplyLeading: false,
-        titleSpacing: 6,
+        titleSpacing: 8,
         title: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -3419,8 +3529,9 @@ if (photos.length > 0) {
                 ),
               ),
             ),
+            // 💡 [도면] 버튼 클릭 시 '도면 추가'와 '도면 수정' 중 선택하는 팝업 호출
             InkWell(
-              onTap: _importBlueprintFromGallery,
+              onTap: _showBlueprintActionMenuDialog,
               borderRadius: BorderRadius.circular(4),
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
@@ -3438,50 +3549,20 @@ if (photos.length > 0) {
                 ),
               ),
             ),
-            if (_blueprints.isNotEmpty) ...[
+            if (_blueprints.isNotEmpty)
               IconButton(
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 26, minHeight: 32),
+                constraints: const BoxConstraints(minWidth: 28, minHeight: 34),
                 tooltip: '도면 선택 및 켜기/끄기',
                 icon: Icon(
                   _hasAnyVisibleBlueprint ? Icons.layers : Icons.layers_clear,
                   color: _hasAnyVisibleBlueprint
                       ? Colors.lightGreenAccent
                       : Colors.grey,
-                  size: 18,
+                  size: 19,
                 ),
                 onPressed: _showBlueprintLayerSelectorDialog,
               ),
-              SizedBox(
-                height: 26,
-                child: ElevatedButton(
-                  onPressed: () async {
-                    await _updateMapViewportInfo();
-                    setState(() {
-                      _bpEditMode = !_bpEditMode;
-                      if (_bpEditMode) {
-                        _bpTouchModeIsBlueprint = true;
-                        _bpGlobalShow = true;
-                        if (_activeBp != null) _activeBp!.isVisible = true;
-                      }
-                    });
-                    await _persistBlueprintConfig();
-                    await _refreshAllOverlays(includeBlueprint: true);
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        _bpEditMode ? Colors.amber : Colors.blueAccent,
-                    foregroundColor: _bpEditMode ? Colors.black : Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    minimumSize: Size.zero,
-                  ),
-                  child: Text(
-                    _bpEditMode ? '고정저장' : '도면정렬',
-                    style: unifiedTopTextStyle.copyWith(fontSize: 11),
-                  ),
-                ),
-              ),
-            ],
           ],
         ),
       ),
