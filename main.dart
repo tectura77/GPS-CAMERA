@@ -476,113 +476,123 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 1. [16:9 / 4:3 / 1:1] 버튼: 맨 위 중앙으로 이동
+          // 1. [16:9 / 4:3 / 1:1 비율 버튼]: 상단 중앙 배치 (가로모드 시 더 위쪽으로 밀착)
           Positioned(
-            top: 45,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: ['16:9', '4:3', '1:1'].map((m) {
-                final bool active = _ratioMode == m;
-                return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: ElevatedButton(
-                    onPressed: () => setState(() => _ratioMode = m),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: active ? Colors.amber : Colors.black54,
-                      foregroundColor: active ? Colors.black : Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                    ),
-                    child: Text(m),
-                  ),
-                );
-              }).toList(),
-            ),
-          ),
-          // 2. [위도·경도 정보 박스]: 좌측 중앙 부근으로 이동
-          Positioned(
-            left: 16,
-            top: MediaQuery.of(context).size.height * 0.38,
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              color: Colors.black54,
-              child: Text(
-                '$locInfo\n방위각: ${_heading.toStringAsFixed(1)}° ($dirKr)\n'
-                '피치각: ${_tiltPitch.toStringAsFixed(1)}° | 배율: ${_currentZoom.toStringAsFixed(1)}x\n'
-                '시간: ${DateTime.now().toString().substring(0, 16)}',
-                style: const TextStyle(color: Colors.white, fontSize: 12),
-              ),
-            ),
-          ),
-          // 3. [0.6x / 1.0x / 2.0x 배율 버튼]: 셔터 바로 위 중앙으로 이동
-          Positioned(
-            bottom: 95,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [0.6, 1.0, 2.0].map((z) {
-                final bool selected = (_currentZoom - z).abs() < 0.15;
-                return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: InkWell(
-                    onTap: () => _applyCameraZoom(z),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: selected ? Colors.amber : Colors.black54,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: selected ? Colors.amber : Colors.white54,
-                        ),
-                      ),
-                      child: Text(
-                        '${z.toStringAsFixed(1)}x',
-                        style: TextStyle(
-                          color: selected ? Colors.black : Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
-          ),
-          // 4. [파란색 지도 보기 버튼]: 우측 하단 구석으로 이동
-          Positioned(
-            bottom: 25,
-            right: 25,
-            child: FloatingActionButton(
-              heroTag: 'mapDashboardBtn',
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => GalleryMapDashboard(photos: _photoList),
-                  ),
-                );
-              },
-              backgroundColor: Colors.blueAccent,
-              child: const Icon(Icons.map, color: Colors.white),
-            ),
-          ),
-          // 5. [노란색 셔터 버튼]: 하단 정중앙 고정
-          Positioned(
-            bottom: 20,
+            top: landscape ? 14 : 45,
             left: 0,
             right: 0,
             child: Center(
-              child: FloatingActionButton(
-                heroTag: 'shutterBtn',
-                onPressed: _capturePhoto,
-                backgroundColor: Colors.amber,
-                child:
-                    const Icon(Icons.camera_alt, color: Colors.black, size: 30),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: ['16:9', '4:3', '1:1'].map((m) {
+                  final bool active = _ratioMode == m;
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    child: ElevatedButton(
+                      onPressed: () => setState(() => _ratioMode = m),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: active ? Colors.amber : Colors.black54,
+                        foregroundColor: active ? Colors.black : Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 4),
+                        minimumSize: const Size(54, 34),
+                      ),
+                      child: Text(m),
+                    ),
+                  );
+                }).toList(),
               ),
+            ),
+          ),
+          // 2. [촬영 정보(위도·경도·방위각)]: 왼쪽 하단 부근으로 보기 좋게 배치
+          Positioned(
+            left: 16,
+            bottom: landscape ? 16 : 88,
+            child: IgnorePointer(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '$locInfo\n방위각: ${_heading.toStringAsFixed(1)}° ($dirKr)\n'
+                  '피치각: ${_tiltPitch.toStringAsFixed(1)}° | 배율: ${_currentZoom.toStringAsFixed(1)}x\n'
+                  '시간: ${DateTime.now().toString().substring(0, 16)}',
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ),
+            ),
+          ),
+          // 3. [0.6x / 1.0x / 2.0x 배율 버튼]: 맨 아래 정중앙으로 이동
+          Positioned(
+            bottom: 22,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [0.6, 1.0, 2.0].map((z) {
+                  final bool selected = (_currentZoom - z).abs() < 0.15;
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 5),
+                    child: InkWell(
+                      onTap: () => _applyCameraZoom(z),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: selected ? Colors.amber : Colors.black54,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: selected ? Colors.amber : Colors.white54,
+                          ),
+                        ),
+                        child: Text(
+                          '${z.toStringAsFixed(1)}x',
+                          style: TextStyle(
+                            color: selected ? Colors.black : Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+          // 4. [노란색 카메라 버튼 + 파란색 지도보기 버튼]: 우측 하단에 나란히 배치
+          Positioned(
+            bottom: 16,
+            right: 20,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton(
+                  heroTag: 'shutterBtn',
+                  onPressed: _capturePhoto,
+                  backgroundColor: Colors.amber,
+                  child: const Icon(Icons.camera_alt,
+                      color: Colors.black, size: 28),
+                ),
+                const SizedBox(width: 12),
+                FloatingActionButton(
+                  heroTag: 'mapDashboardBtn',
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => GalleryMapDashboard(photos: _photoList),
+                      ),
+                    );
+                  },
+                  backgroundColor: Colors.blueAccent,
+                  child: const Icon(Icons.map, color: Colors.white),
+                ),
+              ],
             ),
           ),
           if (_busy)
@@ -769,7 +779,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 핵심 수정: 앱과 HTML 뷰어 간 도면 왜곡이 없도록 동일한 Bounds 수학 공식 적용
   Future<void> _renderBlueprintOnMap({bool rebuildBitmap = false}) async {
     if (_mapCtrl == null) return;
 
@@ -943,7 +952,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // HTML 내보내기에서도 앱과 완전히 동일한 도면 바운즈 및 비율 적용
+  // HTML 내보내기: 앱과 100% 동일한 정사각형 캔버스(회전·여백·비율 포함)로 도면을 구워 왜곡 제거 & 마커 순환 클릭 적용
   Future<void> _exportAsHtmlViewer() async {
     if (_visiblePhotos.isEmpty && _bpPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -981,7 +990,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       if (_bpPath != null &&
           File(_bpPath!).existsSync() &&
           _bpLat != null &&
-          _bpLng != null) {
+          _bpLng != null &&
+          _bpShow) {
         final bpBytes = await File(_bpPath!).readAsBytes();
         final String ext = _bpPath!.split('.').last.toLowerCase();
         final String mime = ext == 'png' ? 'image/png' : 'image/jpeg';
@@ -1003,6 +1013,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         };
       }
 
+      double currentMapZoom = 18.0;
+      if (_mapCtrl != null) {
+        try {
+          final cam = await _mapCtrl!.getCameraPosition();
+          currentMapZoom = cam.zoom;
+        } catch (_) {}
+      }
+
       final String photosJs = jsonEncode(encodedPhotos);
       final String bpJs = jsonEncode(bpJson);
 
@@ -1017,21 +1035,21 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   body, html { margin: 0; padding: 0; height: 100%; background: #111; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; }
-  header { padding: 10px 16px; background: #000; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; }
+  header { padding: 10px 14px; background: #000; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; flex-wrap: wrap; gap: 6px; }
   .main-wrap { flex: 1; display: flex; flex-direction: row; overflow: hidden; }
   @media (max-width: 768px) { .main-wrap { flex-direction: column; } }
   #photo-pane { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
   #photo-pane img { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform 0.15s ease; cursor: zoom-in; }
   #map-pane { flex: 1; position: relative; }
   #thumbs { height: 82px; background: #000; display: flex; overflow-x: auto; padding: 4px; border-top: 1px solid #333; }
-  #thumbs img { width: 70px; height: 70px; object-fit: cover; margin-right: 6px; border: 3px solid transparent; cursor: pointer; }
+  #thumbs img { width: 70px; height: 70px; object-fit: cover; margin-right: 6px; border: 3px solid transparent; cursor: pointer; flex-shrink: 0; }
   #thumbs img.active { border-color: #ffc107; }
 </style>
 </head>
 <body>
 <header>
   <strong>📍 GPS 도면 & 현장 사진 뷰어 (${_dateFilter})</strong>
-  <span id="info-txt" style="font-size:13px; color:#ffc107;"></span>
+  <span id="info-txt" style="font-size:12px; color:#ffc107;"></span>
 </header>
 <div class="main-wrap">
   <div id="photo-pane"><img id="main-photo" src="" alt="현장 사진"/></div>
@@ -1041,7 +1059,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 <script>
 const photos = $photosJs;
 const bp = $bpJs;
-let selectedIdx = photos.length > 0 ? photos.length - 1 : 0;
+let selectedIdx = photos.length > 0 ? $_selectedIdx : 0;
 let zoomed = false;
 
 const mainImg = document.getElementById('main-photo');
@@ -1054,23 +1072,53 @@ mainImg.onclick = () => {
 const initLat = photos.length > 0 ? photos[selectedIdx].lat : (bp ? bp.lat : 37.4984);
 const initLng = photos.length > 0 ? photos[selectedIdx].lng : (bp ? bp.lng : 127.1324);
 
-const map = L.map('map-pane').setView([initLat, initLng], 17);
+const map = L.map('map-pane', { maxZoom: 22 }).setView([initLat, initLng], ${currentMapZoom.toStringAsFixed(1)});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 20,
+  maxNativeZoom: 19,
+  maxZoom: 22,
   attribution: '© OpenStreetMap'
 }).addTo(map);
 
+// 앱의 NOverlayImage(360x360, 패딩 16, BoxFit.contain, 회전, 투명도)와 100% 동일하게 캔버스에 구워서 오버레이!
 if (bp) {
-  const bounds = [[bp.swLat, bp.swLng], [bp.neLat, bp.neLng]];
-  const overlay = L.imageOverlay(bp.b64, bounds, { opacity: bp.opacity }).addTo(map);
-  const el = overlay.getElement();
-  if (el) {
-    el.style.transformOrigin = 'center center';
-    el.style.transform = `rotate(\${bp.rotation}deg)`;
-  }
+  const bpImg = new Image();
+  bpImg.onload = () => {
+    const size = 720;
+    const pad = 32; // 앱의 16/360 여백 비율과 동일
+    const inner = size - pad * 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size, size);
+    ctx.save();
+    ctx.globalAlpha = bp.opacity;
+    ctx.translate(size / 2, size / 2);
+    ctx.rotate(bp.rotation * Math.PI / 180.0);
+    const scale = Math.min(inner / bpImg.width, inner / bpImg.height);
+    const drawW = bpImg.width * scale;
+    const drawH = bpImg.height * scale;
+    ctx.drawImage(bpImg, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.restore();
+
+    const bakedUrl = canvas.toDataURL('image/png');
+    const bounds = [[bp.swLat, bp.swLng], [bp.neLat, bp.neLng]];
+    L.imageOverlay(bakedUrl, bounds, { opacity: 1.0, interactive: false }).addTo(map);
+  };
+  bpImg.src = bp.b64;
 }
 
 const markersLayer = L.layerGroup().addTo(map);
+
+function getDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180.0;
+  const dLon = (lon2 - lon1) * Math.PI / 180.0;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * Math.PI / 180.0) * Math.cos(lat2 * Math.PI / 180.0) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 function selectPhoto(idx) {
   selectedIdx = idx;
@@ -1099,7 +1147,17 @@ function renderThumbnails() {
 
 function renderMarkers() {
   markersLayer.clearLayers();
-  photos.forEach((p, i) => {
+  // 선택 안 된 빨간 마커 먼저 그리고, 선택된 파란 마커를 맨 마지막(맨 위)에 그리기
+  const order = [];
+  for (let i = 0; i < photos.length; i++) {
+    if (i !== selectedIdx) order.push(i);
+  }
+  if (selectedIdx >= 0 && selectedIdx < photos.length) {
+    order.push(selectedIdx);
+  }
+
+  order.forEach((i) => {
+    const p = photos[i];
     const isSel = (i === selectedIdx);
     const color = isSel ? '#2979ff' : '#f44336';
     const zIdx = isSel ? 1000 : 100;
@@ -1107,12 +1165,25 @@ function renderMarkers() {
       className: '',
       iconSize: [28, 28],
       iconAnchor: [14, 14],
-      html: `<div style="width:24px;height:24px;border-radius:50%;background:\${color}44;border:2px solid \${color};display:flex;align-items:center;justify-content:center;transform:rotate(\${p.azimuth}deg);">
+      html: `<div style="width:24px;height:24px;border-radius:50%;background:\${color}4d;border:2px solid \${color};display:flex;align-items:center;justify-content:center;transform:rotate(\${p.azimuth}deg);">
                <span style="color:\${color};font-size:14px;font-weight:bold;">▲</span>
              </div>`
     });
     const m = L.marker([p.lat, p.lng], { icon: htmlIcon, zIndexOffset: zIdx }).addTo(markersLayer);
-    m.on('click', () => selectPhoto(i));
+    // 겹친 동그라미(반경 20m 이내) 클릭 시 다음 사진으로 순환 선택!
+    m.on('click', () => {
+      const nearby = [];
+      for (let j = 0; j < photos.length; j++) {
+        const dist = getDistanceMeters(p.lat, p.lng, photos[j].lat, photos[j].lng);
+        if (dist <= 20.0) nearby.push(j);
+      }
+      let nextIdx = i;
+      if (nearby.length > 1 && nearby.includes(selectedIdx)) {
+        const pos = nearby.indexOf(selectedIdx);
+        nextIdx = nearby[(pos + 1) % nearby.length];
+      }
+      selectPhoto(nextIdx);
+    });
   });
 }
 
@@ -1589,99 +1660,151 @@ if (photos.length > 0) {
 
     return Scaffold(
       backgroundColor: Colors.black,
+      // 상단 바 전체를 한 줄 Row로 제어하여 '전체 보기'와 날짜가 절대 잘리거나 줄바꿈되지 않도록 개선!
       appBar: AppBar(
         backgroundColor: Colors.black,
-        // 상단 전체보기 메뉴가 짤리지 않도록 우측 여백 확보 및 패딩 조정
-        title: Padding(
-          padding: const EdgeInsets.only(left: 8.0),
-          child: DropdownButton<String>(
-            value: _dateFilter,
-            dropdownColor: Colors.black87,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 15,
-              fontWeight: FontWeight.bold,
-            ),
-            underline: const SizedBox.shrink(),
-            icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
-            items: dateTabs
-                .map((d) => DropdownMenuItem(value: d, child: Text(d)))
-                .toList(),
-            onChanged: (val) {
-              if (val == null) return;
-              setState(() {
-                _dateFilter = val;
-                _selectedIdx =
-                    _visiblePhotos.isNotEmpty ? _visiblePhotos.length - 1 : 0;
-              });
-              _refreshAllOverlays(includeBlueprint: true);
-              if (_visiblePhotos.isNotEmpty) {
-                final p = _visiblePhotos[_selectedIdx];
-                _panMapKeepZoom(p.lat, p.lng);
-              }
-            },
-          ),
-        ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
-        ),
-        actions: [
-          TextButton.icon(
-            onPressed: _isExporting ? null : _showExportOptionsSheet,
-            icon: const Icon(Icons.ios_share,
-                color: Colors.lightBlueAccent, size: 18),
-            label: const Text(
-              '내보내기',
-              style: TextStyle(color: Colors.lightBlueAccent, fontSize: 12),
-            ),
-          ),
-          TextButton.icon(
-            onPressed: _importBlueprintFromGallery,
-            icon: const Icon(Icons.add_photo_alternate,
-                color: Colors.amber, size: 18),
-            label: const Text(
-              '도면',
-              style: TextStyle(color: Colors.amber, fontSize: 12),
-            ),
-          ),
-          if (_bpPath != null) ...[
+        automaticallyImplyLeading: false,
+        titleSpacing: 4,
+        title: Row(
+          children: [
             IconButton(
-              icon: Icon(
-                _bpShow ? Icons.layers : Icons.layers_clear,
-                color: _bpShow ? Colors.lightGreenAccent : Colors.grey,
-                size: 20,
-              ),
-              onPressed: () async {
-                setState(() {
-                  _bpShow = !_bpShow;
-                  if (!_bpShow) _bpEditMode = false;
-                });
-                await _persistBlueprintConfig();
-                await _refreshAllOverlays(includeBlueprint: true);
-              },
+              icon: const Icon(Icons.arrow_back, color: Colors.white, size: 22),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 34, minHeight: 36),
+              onPressed: () => Navigator.pop(context),
             ),
-            Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: ElevatedButton(
+            const SizedBox(width: 6), // 우측으로 살짝 밀어 여유 공간 확보
+            ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 108),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: _dateFilter,
+                  isDense: true,
+                  dropdownColor: Colors.black87,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  icon: const Icon(Icons.arrow_drop_down,
+                      color: Colors.white, size: 20),
+                  items: dateTabs
+                      .map(
+                        (d) => DropdownMenuItem(
+                          value: d,
+                          child: Text(
+                            d,
+                            softWrap: false,
+                            overflow: TextOverflow.visible,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (val) {
+                    if (val == null) return;
+                    setState(() {
+                      _dateFilter = val;
+                      _selectedIdx = _visiblePhotos.isNotEmpty
+                          ? _visiblePhotos.length - 1
+                          : 0;
+                    });
+                    _refreshAllOverlays(includeBlueprint: true);
+                    if (_visiblePhotos.isNotEmpty) {
+                      final p = _visiblePhotos[_selectedIdx];
+                      _panMapKeepZoom(p.lat, p.lng);
+                    }
+                  },
+                ),
+              ),
+            ),
+            const Spacer(),
+            InkWell(
+              onTap: _isExporting ? null : _showExportOptionsSheet,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.ios_share,
+                        color: Colors.lightBlueAccent, size: 16),
+                    SizedBox(width: 3),
+                    Text(
+                      '내보내기',
+                      style: TextStyle(
+                        color: Colors.lightBlueAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            InkWell(
+              onTap: _importBlueprintFromGallery,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.add_photo_alternate,
+                        color: Colors.amber, size: 16),
+                    SizedBox(width: 3),
+                    Text(
+                      '도면',
+                      style: TextStyle(
+                        color: Colors.amber,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (_bpPath != null) ...[
+              IconButton(
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 30, minHeight: 34),
+                icon: Icon(
+                  _bpShow ? Icons.layers : Icons.layers_clear,
+                  color: _bpShow ? Colors.lightGreenAccent : Colors.grey,
+                  size: 19,
+                ),
                 onPressed: () async {
+                  setState(() {
+                    _bpShow = !_bpShow;
+                    if (!_bpShow) _bpEditMode = false;
+                  });
                   await _persistBlueprintConfig();
-                  setState(() => _bpEditMode = !_bpEditMode);
+                  await _refreshAllOverlays(includeBlueprint: true);
                 },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor:
-                      _bpEditMode ? Colors.amber : Colors.blueAccent,
-                  foregroundColor: _bpEditMode ? Colors.black : Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                ),
-                child: Text(
-                  _bpEditMode ? '고정저장' : '도면정렬',
-                  style: const TextStyle(fontSize: 11),
+              ),
+              SizedBox(
+                height: 30,
+                child: ElevatedButton(
+                  onPressed: () async {
+                    await _persistBlueprintConfig();
+                    setState(() => _bpEditMode = !_bpEditMode);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        _bpEditMode ? Colors.amber : Colors.blueAccent,
+                    foregroundColor:
+                        _bpEditMode ? Colors.black : Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: Size.zero,
+                  ),
+                  child: Text(
+                    _bpEditMode ? '고정저장' : '도면정렬',
+                    style: const TextStyle(
+                        fontSize: 11, fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
-            ),
+            ],
           ],
-        ],
+        ),
       ),
       body: Stack(
         children: [
