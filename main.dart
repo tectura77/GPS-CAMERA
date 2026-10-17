@@ -20,6 +20,10 @@ import 'package:archive/archive.dart';
 List<CameraDescription> appCameras = [];
 String? naverAuthErrorMsg;
 
+// 💡 대시보드 재진입 및 사진 전환 속도를 극대화하는 전역 오버레이 캐시
+final Map<String, NOverlayImage> globalMarkerIconCache = {};
+final Map<String, NOverlayImage> globalBpOverlayCache = {};
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -139,6 +143,9 @@ class BlueprintItem {
     sizeSlider = newSlider.clamp(0.0, 1.0);
   }
 
+  String get cacheKey =>
+      '${id}_${rotation.toStringAsFixed(1)}_${opacity.toStringAsFixed(2)}';
+
   bool get needsBake =>
       cachedOverlayImg == null ||
       bakedRotation != rotation ||
@@ -182,11 +189,16 @@ class CameraScreen extends StatefulWidget {
 }
 
 class _CameraScreenState extends State<CameraScreen> {
+  static const MethodChannel _shutterChannel =
+      MethodChannel('gps_camera/shutter');
+  static Uint8List? _shutterWavBytes;
+
   CameraController? _camController;
   Position? _pos;
   double _heading = 0;
   double _tiltPitch = 0;
   bool _busy = false;
+  bool _shutterFlash = false;
   String _ratioMode = '16:9';
   final List<PhotoItem> _photoList = [];
 
@@ -200,7 +212,94 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   void initState() {
     super.initState();
+    _shutterWavBytes ??= _generateMechanicalShutterWav();
     _setupApp();
+  }
+
+  // 💡 외부 파일 없이 코드로 즉시 생성하는 리얼한 "찰-칵!" 기계식 카메라 셔터음 WAV 데이터
+  Uint8List _generateMechanicalShutterWav() {
+    const int sampleRate = 22050;
+    const int durationMs = 170;
+    final int numSamples = (sampleRate * durationMs) ~/ 1000;
+    final int dataSize = numSamples * 2;
+    final ByteData bd = ByteData(44 + dataSize);
+
+    void writeStr(int offset, String s) {
+      for (int i = 0; i < s.length; i++) {
+        bd.setUint8(offset + i, s.codeUnitAt(i));
+      }
+    }
+
+    writeStr(0, 'RIFF');
+    bd.setUint32(4, 36 + dataSize, Endian.little);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    bd.setUint32(16, 16, Endian.little);
+    bd.setUint16(20, 1, Endian.little); // PCM
+    bd.setUint16(22, 1, Endian.little); // Mono
+    bd.setUint32(24, sampleRate, Endian.little);
+    bd.setUint32(28, sampleRate * 2, Endian.little);
+    bd.setUint16(32, 2, Endian.little);
+    bd.setUint16(34, 16, Endian.little);
+    writeStr(36, 'data');
+    bd.setUint32(40, dataSize, Endian.little);
+
+    final Random rng = Random(42);
+    for (int i = 0; i < numSamples; i++) {
+      final double t = i / sampleRate;
+      double amp = 0.0;
+
+      // 첫 번째 "찰-" (미러 업 클릭: 0~25ms)
+      if (t < 0.025) {
+        final double env = exp(-t * 170.0);
+        final double noise = (rng.nextDouble() * 2.0 - 1.0) * 0.7;
+        final double tone =
+            sin(2.0 * pi * 1400.0 * t) * 0.5 + sin(2.0 * pi * 2850.0 * t) * 0.4;
+        amp += (noise + tone) * env;
+      }
+
+      // 두 번째 "-칵!" (셔터 커튼 닫힘 클릭: 48~95ms)
+      if (t >= 0.048 && t < 0.095) {
+        final double dt = t - 0.048;
+        final double env = exp(-dt * 140.0);
+        final double noise = (rng.nextDouble() * 2.0 - 1.0) * 0.85;
+        final double tone =
+            sin(2.0 * pi * 1100.0 * dt) * 0.5 + sin(2.0 * pi * 2300.0 * dt) * 0.45;
+        amp += (noise + tone) * env;
+      }
+
+      final int pcm = (amp.clamp(-1.0, 1.0) * 32767.0).round();
+      bd.setInt16(44 + i * 2, pcm, Endian.little);
+    }
+
+    return bd.buffer.asUint8List();
+  }
+
+  Future<void> _playShutterSoundAndFeedback() async {
+    // 화면 플래시 깜빡임 효과
+    if (mounted) {
+      setState(() => _shutterFlash = true);
+      Future.delayed(const Duration(milliseconds: 90), () {
+        if (mounted) setState(() => _shutterFlash = false);
+      });
+    }
+
+    // 진동 및 기본 시스템 클릭음 (찰-칵 2회 연속)
+    HapticFeedback.heavyImpact();
+    SystemSound.play(SystemSoundType.click);
+    Future.delayed(const Duration(milliseconds: 55), () {
+      SystemSound.play(SystemSoundType.click);
+      HapticFeedback.mediumImpact();
+    });
+
+    // 네이티브 알람 스트림(무음/진동 모드에서도 강제 출력) 호출
+    try {
+      await _shutterChannel.invokeMethod('playShutter', {
+        'wav': _shutterWavBytes,
+      });
+    } catch (_) {
+      // MainActivity.kt 미적용 환경에서도 에러 없이 기본 클릭음으로 동작
+    }
   }
 
   Future<void> _setupApp() async {
@@ -366,11 +465,7 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() => _busy = true);
 
     try {
-      SystemSound.play(SystemSoundType.alert);
-      HapticFeedback.heavyImpact();
-      Future.delayed(const Duration(milliseconds: 150), () {
-        HapticFeedback.heavyImpact();
-      });
+      await _playShutterSoundAndFeedback();
 
       final XFile rawFile = await _camController!.takePicture();
       final Uint8List rawBytes = await rawFile.readAsBytes();
@@ -481,7 +576,10 @@ class _CameraScreenState extends State<CameraScreen> {
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('사진이 촬영되어 저장되었습니다!')),
+            const SnackBar(
+              content: Text('📸 찰칵! 사진이 저장되었습니다.'),
+              duration: Duration(milliseconds: 1100),
+            ),
           );
         }
       }
@@ -565,6 +663,12 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
+          if (_shutterFlash)
+            IgnorePointer(
+              child: Container(
+                color: Colors.white.withOpacity(0.55),
+              ),
+            ),
           Positioned(
             top: landscape ? 14 : 45,
             left: 0,
@@ -702,10 +806,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   String _dateFilter = '전체 보기';
   String _categoryFilter = '전체 카테고리';
 
-  // 사용자 정의 카테고리 목록 (영구 저장 및 개별 삭제 지원)
   final Set<String> _customCategories = {};
 
-  // 다중 도면 목록 및 현재 선택된 도면 인덱스
   final List<BlueprintItem> _blueprints = [];
   int _activeBpIdx = 0;
   bool _bpGlobalShow = true;
@@ -720,6 +822,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
   final Map<int, Offset> _activePointers = {};
   bool _isExporting = false;
+  Future<void>? _bpLoadFuture;
 
   BlueprintItem? get _activeBp =>
       (_blueprints.isNotEmpty &&
@@ -728,7 +831,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           ? _blueprints[_activeBpIdx]
           : null;
 
-  // 실시간 Flutter 위젯 오버레이 사용 여부 (도면이동 모드이거나 슬라이더 조작 중일 때 지연 0초 렌더링)
+  bool get _hasAnyVisibleBlueprint =>
+      _bpGlobalShow && _blueprints.any((b) => b.isVisible);
+
   bool get _useLiveActiveBpOverlay =>
       _bpEditMode &&
       _bpGlobalShow &&
@@ -737,7 +842,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       _currentMapBounds != null &&
       (_bpTouchModeIsBlueprint || _isSliderManipulating);
 
-  // 가나다순 정렬 + '미분류'는 항상 최하단 위치
+  // 가나다순 정렬 + '미분류' 최하단 고정
   List<String> get _allCategories {
     final Set<String> cats = {..._customCategories};
     for (var p in widget.photos) {
@@ -764,6 +869,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   void initState() {
     super.initState();
     _restoreCategories();
+    // 💡 지도가 초기화되는 동안 백그라운드에서 도면 데이터를 동시에 미리 읽어 진입 딜레이 제거
+    _bpLoadFuture = _restoreBlueprintConfig();
     if (_visiblePhotos.isNotEmpty) {
       _selectedIdx = _visiblePhotos.length - 1;
     }
@@ -857,11 +964,15 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 BlueprintItem.fromMap(rawList[i] as Map<String, dynamic>, i);
             if (File(item.imagePath).existsSync()) {
               await _prepareFastBlueprintBytes(item);
+              if (globalBpOverlayCache.containsKey(item.cacheKey)) {
+                item.cachedOverlayImg = globalBpOverlayCache[item.cacheKey];
+                item.bakedRotation = item.rotation;
+                item.bakedOpacity = item.opacity;
+              }
               loaded.add(item);
             }
           }
         } else if (decoded.containsKey('imagePath')) {
-          // 구버전 단일 도면 데이터 자동 호환 복원
           final String? savedPath = decoded['imagePath'] as String?;
           if (savedPath != null && File(savedPath).existsSync()) {
             final item = BlueprintItem.fromMap(decoded, 0);
@@ -908,6 +1019,338 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     } catch (e) {
       debugPrint('Photo meta save error: $e');
     }
+  }
+
+  // 💡 도면 이름 설정 및 이름 변경 팝업창
+  Future<String?> _promptBlueprintNameDialog({
+    required String defaultName,
+    String title = '도면 이름 설정',
+  }) async {
+    final TextEditingController nameCtrl =
+        TextEditingController(text: defaultName);
+    nameCtrl.selection =
+        TextSelection(baseOffset: 0, extentOffset: defaultName.length);
+
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return Dialog(
+          backgroundColor: Colors.grey[900],
+          insetPadding: const EdgeInsets.symmetric(horizontal: 55),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.amber,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  '층수나 구역 이름을 입력하세요',
+                  style: TextStyle(color: Colors.white60, fontSize: 11),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: 185,
+                  child: TextField(
+                    controller: nameCtrl,
+                    autofocus: true,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 12.5),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      contentPadding:
+                          EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                      hintText: '예: 지하1층, 지상1층, 기준층',
+                      hintStyle:
+                          TextStyle(color: Colors.white38, fontSize: 11.5),
+                      enabledBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(color: Colors.amber),
+                      ),
+                      focusedBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(color: Colors.amber, width: 1.5),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(44, 30),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      onPressed: () => Navigator.pop(ctx, null),
+                      child: const Text('취소',
+                          style:
+                              TextStyle(color: Colors.white60, fontSize: 12)),
+                    ),
+                    const SizedBox(width: 4),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.amber,
+                        minimumSize: const Size(54, 30),
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                      ),
+                      onPressed: () {
+                        final String input = nameCtrl.text.trim();
+                        Navigator.pop(
+                            ctx, input.isNotEmpty ? input : defaultName);
+                      },
+                      child: const Text('확인',
+                          style: TextStyle(
+                              color: Colors.black,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // 💡 우측 상단 녹색 레이어 아이콘 클릭 시 열리는 '층별/구역별 도면 선택' 팝업 (전부 끄기 포함)
+  Future<void> _showBlueprintLayerSelectorDialog() async {
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return Dialog(
+              backgroundColor: Colors.grey[900],
+              insetPadding:
+                  const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14)),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.layers,
+                                color: Colors.lightGreenAccent, size: 18),
+                            SizedBox(width: 6),
+                            Text(
+                              '층별 · 구역별 도면 선택',
+                              style: TextStyle(
+                                color: Colors.amber,
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        InkWell(
+                          onTap: () => Navigator.pop(ctx),
+                          child: const Icon(Icons.close,
+                              color: Colors.white54, size: 18),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      '도면 이름을 누르면 해당 층 도면만 단독으로 켜집니다.',
+                      style: TextStyle(color: Colors.white60, fontSize: 11),
+                    ),
+                    const Divider(color: Colors.white24, height: 14),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 240),
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: _blueprints.length,
+                        itemBuilder: (_, i) {
+                          final bp = _blueprints[i];
+                          final bool isShown = _bpGlobalShow && bp.isVisible;
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 6),
+                            decoration: BoxDecoration(
+                              color: isShown
+                                  ? Colors.lightGreenAccent.withOpacity(0.14)
+                                  : Colors.white10,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: isShown
+                                    ? Colors.lightGreenAccent
+                                    : Colors.white24,
+                                width: isShown ? 1.4 : 1.0,
+                              ),
+                            ),
+                            child: ListTile(
+                              dense: true,
+                              visualDensity: const VisualDensity(
+                                  horizontal: -2, vertical: -3),
+                              contentPadding:
+                                  const EdgeInsets.symmetric(horizontal: 10),
+                              leading: Icon(
+                                isShown
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_unchecked,
+                                color: isShown
+                                    ? Colors.lightGreenAccent
+                                    : Colors.white54,
+                                size: 18,
+                              ),
+                              title: Text(
+                                bp.name,
+                                style: TextStyle(
+                                  color: isShown
+                                      ? Colors.lightGreenAccent
+                                      : Colors.white,
+                                  fontSize: 12.5,
+                                  fontWeight: isShown
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                ),
+                              ),
+                              // 도면 이름 클릭 시: 해당 도면만 단독으로 켜고 팝업 닫기
+                              onTap: () async {
+                                setState(() {
+                                  _bpGlobalShow = true;
+                                  for (int j = 0; j < _blueprints.length; j++) {
+                                    _blueprints[j].isVisible = (j == i);
+                                  }
+                                  _activeBpIdx = i;
+                                });
+                                Navigator.pop(ctx);
+                                await _persistBlueprintConfig();
+                                await _refreshAllOverlays(
+                                    includeBlueprint: true);
+                              },
+                              // 우측 눈 아이콘 클릭 시: 다른 도면과 함께 겹쳐서 켜기/끄기
+                              trailing: IconButton(
+                                icon: Icon(
+                                  isShown
+                                      ? Icons.visibility
+                                      : Icons.visibility_off,
+                                  color: isShown
+                                      ? Colors.amberAccent
+                                      : Colors.white38,
+                                  size: 18,
+                                ),
+                                tooltip: '개별 겹쳐 켜기/끄기',
+                                onPressed: () async {
+                                  setState(() {
+                                    if (!_bpGlobalShow) {
+                                      _bpGlobalShow = true;
+                                      for (final b in _blueprints) {
+                                        b.isVisible = false;
+                                      }
+                                      bp.isVisible = true;
+                                    } else {
+                                      bp.isVisible = !bp.isVisible;
+                                    }
+                                    if (bp.isVisible) _activeBpIdx = i;
+                                    if (!_blueprints.any((b) => b.isVisible)) {
+                                      _bpGlobalShow = false;
+                                    }
+                                  });
+                                  setDialogState(() {});
+                                  await _persistBlueprintConfig();
+                                  await _refreshAllOverlays(
+                                      includeBlueprint: true);
+                                },
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const Divider(color: Colors.white24, height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              setState(() {
+                                _bpGlobalShow = false;
+                                _bpEditMode = false;
+                              });
+                              Navigator.pop(ctx);
+                              await _persistBlueprintConfig();
+                              await _refreshAllOverlays(includeBlueprint: true);
+                            },
+                            icon: const Icon(Icons.layers_clear,
+                                size: 15, color: Colors.redAccent),
+                            label: const Text(
+                              '전부 끄기',
+                              style: TextStyle(
+                                color: Colors.redAccent,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              side: const BorderSide(color: Colors.redAccent),
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                            ),
+                          ),
+                        ),
+                        if (_blueprints.length > 1) ...[
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () async {
+                                setState(() {
+                                  _bpGlobalShow = true;
+                                  for (final b in _blueprints) {
+                                    b.isVisible = true;
+                                  }
+                                });
+                                Navigator.pop(ctx);
+                                await _persistBlueprintConfig();
+                                await _refreshAllOverlays(
+                                    includeBlueprint: true);
+                              },
+                              icon: const Icon(Icons.done_all,
+                                  size: 15, color: Colors.lightBlueAccent),
+                              label: const Text(
+                                '전체 함께 켜기',
+                                style: TextStyle(
+                                  color: Colors.lightBlueAccent,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                side: const BorderSide(
+                                    color: Colors.lightBlueAccent),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 8),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _showAddCategoryDialog(PhotoItem photo) async {
@@ -1049,21 +1492,28 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
+  // 💡 도면 경량 이미지를 디스크(.fast.png)에 캐싱해 대시보드 진입 시 디코딩 시간을 0초로 단축
   Future<void> _prepareFastBlueprintBytes(BlueprintItem item) async {
     try {
-      final raw = await File(item.imagePath).readAsBytes();
-      final decoded = img.decodeImage(raw);
-      if (decoded != null) {
-        final resized = (decoded.width > 480 || decoded.height > 480)
-            ? img.copyResize(
-                decoded,
-                width: decoded.width >= decoded.height ? 480 : null,
-                height: decoded.height > decoded.width ? 480 : null,
-              )
-            : decoded;
-        item.fastBytes = Uint8List.fromList(img.encodePng(resized, level: 1));
+      final File fastCacheFile = File('${item.imagePath}.fast.png');
+      if (await fastCacheFile.exists()) {
+        item.fastBytes = await fastCacheFile.readAsBytes();
       } else {
-        item.fastBytes = raw;
+        final raw = await File(item.imagePath).readAsBytes();
+        final decoded = img.decodeImage(raw);
+        if (decoded != null) {
+          final resized = (decoded.width > 480 || decoded.height > 480)
+              ? img.copyResize(
+                  decoded,
+                  width: decoded.width >= decoded.height ? 480 : null,
+                  height: decoded.height > decoded.width ? 480 : null,
+                )
+              : decoded;
+          item.fastBytes = Uint8List.fromList(img.encodePng(resized, level: 1));
+          await fastCacheFile.writeAsBytes(item.fastBytes!);
+        } else {
+          item.fastBytes = raw;
+        }
       }
       if (mounted && item.fastBytes != null) {
         await precacheImage(MemoryImage(item.fastBytes!), context);
@@ -1078,6 +1528,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       final picker = ImagePicker();
       final XFile? picked = await picker.pickImage(source: ImageSource.gallery);
       if (picked == null) return;
+      if (!mounted) return;
+
+      final String defaultName = '도면 ${_blueprints.length + 1}';
+      final String? chosenName = await _promptBlueprintNameDialog(
+        defaultName: defaultName,
+        title: '새 도면 이름 설정',
+      );
+      if (chosenName == null) return; // 취소 시 등록 중단
 
       final dir = await getApplicationDocumentsDirectory();
       final String ext = picked.path.split('.').last;
@@ -1103,7 +1561,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
       final newBp = BlueprintItem(
         id: 'bp_$nowMs',
-        name: '도면 ${_blueprints.length + 1}',
+        name: chosenName,
         imagePath: destPath,
         centerLat: centerLat,
         centerLng: centerLng,
@@ -1137,11 +1595,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     final removed = _blueprints[idx];
     setState(() {
       _blueprints.removeAt(idx);
-      for (int i = 0; i < _blueprints.length; i++) {
-        if (_blueprints[i].name.startsWith('도면 ')) {
-          _blueprints[i].name = '도면 ${i + 1}';
-        }
-      }
       if (_blueprints.isEmpty) {
         _activeBpIdx = 0;
         _bpEditMode = false;
@@ -1152,6 +1605,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     try {
       final f = File(removed.imagePath);
       if (await f.exists()) await f.delete();
+      final fastF = File('${removed.imagePath}.fast.png');
+      if (await fastF.exists()) await fastF.delete();
     } catch (_) {}
     await _persistBlueprintConfig();
     await _refreshAllOverlays(includeBlueprint: true);
@@ -1159,6 +1614,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
   Future<void> _bakeSingleBlueprintOverlay(BlueprintItem bp) async {
     if (!mounted) return;
+    final String key = bp.cacheKey;
+    if (globalBpOverlayCache.containsKey(key)) {
+      bp.cachedOverlayImg = globalBpOverlayCache[key];
+      bp.bakedRotation = bp.rotation;
+      bp.bakedOpacity = bp.opacity;
+      return;
+    }
+
     const double boxSize = 360.0;
     const double padSize = 16.0;
 
@@ -1174,7 +1637,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
             gaplessPlayback: true,
           );
 
-    bp.cachedOverlayImg = await NOverlayImage.fromWidget(
+    final builtImg = await NOverlayImage.fromWidget(
       widget: Opacity(
         opacity: bp.opacity.clamp(0.1, 1.0),
         child: Transform.rotate(
@@ -1188,6 +1651,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       size: const Size(boxSize, boxSize),
       context: context,
     );
+
+    globalBpOverlayCache[key] = builtImg;
+    bp.cachedOverlayImg = builtImg;
     bp.bakedRotation = bp.rotation;
     bp.bakedOpacity = bp.opacity;
   }
@@ -1195,10 +1661,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   Future<void> _syncBlueprintsToMap() async {
     if (_mapCtrl == null || !_bpGlobalShow) return;
 
+    final List<NAddableOverlay> bpOverlays = [];
     for (int i = 0; i < _blueprints.length; i++) {
       final bp = _blueprints[i];
       if (!bp.isVisible) continue;
-      // 실시간 조작 중인 활성 도면은 Flutter 위젯이 즉시 그리므로 지도 오버레이 생략
       if (_useLiveActiveBpOverlay && i == _activeBpIdx) continue;
 
       if (bp.needsBake) {
@@ -1217,12 +1683,15 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         northEast: NLatLng(bp.centerLat + dLat, bp.centerLng + dLng),
       );
 
-      final groundOverlay = NGroundOverlay(
+      bpOverlays.add(NGroundOverlay(
         id: bp.id,
         bounds: bounds,
         image: bp.cachedOverlayImg!,
-      );
-      await _mapCtrl!.addOverlay(groundOverlay);
+      ));
+    }
+
+    if (bpOverlays.isNotEmpty) {
+      await _mapCtrl!.addOverlayAll(bpOverlays.toSet());
     }
   }
 
@@ -1231,7 +1700,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     final bp = _activeBp;
     if (bp == null || !bp.isVisible) return;
 
-    // 화면 픽셀 대비 위경도 변환 비율 (지연 없이 손가락과 1:1 이동)
     double latPerPx = (_metersPerPixel / 111320.0);
     final double cosLat = cos(bp.centerLat * pi / 180.0).abs().clamp(0.1, 1.0);
     double lngPerPx = _metersPerPixel / (111320.0 * cosLat);
@@ -1326,6 +1794,100 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     _mapCtrl!.updateCamera(
       NCameraUpdate.scrollAndZoomTo(target: NLatLng(lat, lng)),
     );
+  }
+
+  // 💡 마커 아이콘 캐싱 (5도 단위 양자화로 재생성 방지, 초고속 렌더링)
+  Future<NOverlayImage> _getCachedMarkerIcon(
+      double azimuth, bool selected) async {
+    final int degStep = (((azimuth % 360 + 360) % 360) / 5).round() * 5 % 360;
+    final String key = '${selected ? "sel" : "unsel"}_$degStep';
+    if (globalMarkerIconCache.containsKey(key)) {
+      return globalMarkerIconCache[key]!;
+    }
+
+    final Color c = selected ? Colors.blueAccent : Colors.red;
+    final icon = await NOverlayImage.fromWidget(
+      widget: Stack(
+        alignment: Alignment.center,
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: c.withOpacity(0.3),
+              shape: BoxShape.circle,
+              border: Border.all(color: c, width: 2),
+            ),
+          ),
+          Transform.rotate(
+            angle: degStep * (pi / 180.0),
+            child: Icon(Icons.navigation, color: c, size: 20),
+          ),
+        ],
+      ),
+      size: const Size(28, 28),
+      context: context,
+    );
+    globalMarkerIconCache[key] = icon;
+    return icon;
+  }
+
+  NMarker _buildPhotoMarker(int idx, PhotoItem item, NOverlayImage icon) {
+    final marker = NMarker(
+      id: 'photo_marker_$idx',
+      position: NLatLng(item.lat, item.lng),
+      icon: icon,
+    );
+
+    marker.setOnTapListener((_) async {
+      final List<int> nearby = [];
+      for (int j = 0; j < _visiblePhotos.length; j++) {
+        final double dist = Geolocator.distanceBetween(
+          item.lat,
+          item.lng,
+          _visiblePhotos[j].lat,
+          _visiblePhotos[j].lng,
+        );
+        if (dist <= 20.0) nearby.add(j);
+      }
+
+      int nextIdx = idx;
+      if (nearby.length > 1 && nearby.contains(_selectedIdx)) {
+        final int pos = nearby.indexOf(_selectedIdx);
+        nextIdx = nearby[(pos + 1) % nearby.length];
+      }
+
+      await _selectPhotoFast(nextIdx);
+    });
+
+    return marker;
+  }
+
+  // 💡 사진 선택 시 전체 지도를 초기화하지 않고 바뀐 마커 2개만 즉시 교체 (딜레이 0초)
+  Future<void> _selectPhotoFast(int newIdx) async {
+    if (newIdx < 0 || newIdx >= _visiblePhotos.length) return;
+    final int prevIdx = _selectedIdx;
+    setState(() => _selectedIdx = newIdx);
+
+    final target = _visiblePhotos[newIdx];
+    _panMapKeepZoom(target.lat, target.lng);
+
+    if (_mapCtrl == null) return;
+    try {
+      final List<NAddableOverlay> updates = [];
+      if (prevIdx >= 0 &&
+          prevIdx < _visiblePhotos.length &&
+          prevIdx != newIdx) {
+        final prevItem = _visiblePhotos[prevIdx];
+        final prevIcon = await _getCachedMarkerIcon(prevItem.azimuth, false);
+        updates.add(_buildPhotoMarker(prevIdx, prevItem, prevIcon));
+      }
+      final newIcon = await _getCachedMarkerIcon(target.azimuth, true);
+      updates.add(_buildPhotoMarker(newIdx, target, newIcon));
+      await _mapCtrl!.addOverlayAll(updates.toSet());
+    } catch (e) {
+      debugPrint('Fast select marker update error: $e');
+    }
   }
 
   void _showExportOptionsSheet() {
@@ -1464,6 +2026,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         final double dLng = rad / (111320.0 * cosLat);
 
         bpJsonList.add({
+          'name': bp.name,
           'b64': 'data:$mime;base64,${base64Encode(bpBytes)}',
           'lat': bp.centerLat,
           'lng': bp.centerLng,
@@ -1834,7 +2397,6 @@ if (photos.length > 0) {
 
     setState(() => _isExporting = true);
     try {
-      // 스냅샷 촬영 전 모든 도면을 지도 네이티브 오버레이로 동기화
       final bool prevEdit = _bpEditMode;
       if (prevEdit) {
         setState(() => _bpEditMode = false);
@@ -1926,7 +2488,6 @@ if (photos.length > 0) {
     );
   }
 
-  // 실시간 지연 0초 도면 회전·이동·확대 오버레이 위젯
   Widget _buildLiveBlueprintOverlayWidget(Size mapSize) {
     final bp = _activeBp;
     final bounds = _currentMapBounds;
@@ -2023,7 +2584,7 @@ if (photos.length > 0) {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 다중 도면 선택 · 개별 켜기/끄기 · 개별 삭제 바
+            // 다중 도면 선택 · 이름 변경(길게 누르기) · 개별 켜기/끄기 · 삭제 바
             SizedBox(
               height: 32,
               child: ListView(
@@ -2052,6 +2613,7 @@ if (photos.length > 0) {
                             onTap: () async {
                               setState(() {
                                 item.isVisible = !item.isVisible;
+                                if (item.isVisible) _bpGlobalShow = true;
                               });
                               await _persistBlueprintConfig();
                               await _refreshAllOverlays(includeBlueprint: true);
@@ -2071,12 +2633,23 @@ if (photos.length > 0) {
                           ),
                           InkWell(
                             onTap: () async {
-                              if (_activeBpIdx == i) return;
                               await _updateMapViewportInfo();
                               setState(() {
                                 _activeBpIdx = i;
+                                item.isVisible = true;
+                                _bpGlobalShow = true;
                               });
                               await _refreshAllOverlays(includeBlueprint: true);
+                            },
+                            onLongPress: () async {
+                              final newName = await _promptBlueprintNameDialog(
+                                defaultName: item.name,
+                                title: '도면 이름 변경',
+                              );
+                              if (newName != null && newName.isNotEmpty) {
+                                setState(() => item.name = newName);
+                                await _persistBlueprintConfig();
+                              }
                             },
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
@@ -2226,7 +2799,7 @@ if (photos.length > 0) {
               padding: const EdgeInsets.symmetric(vertical: 3),
               child: Text(
                 _bpTouchModeIsBlueprint
-                    ? '💡 [${bp.name} 이동 켜짐] 한 손가락 끌기(이동), 두 손가락 벌리기(확대/축소) 및 회전이 지연 없이 즉시 반영됩니다.'
+                    ? '💡 [${bp.name}] 한 손가락 이동, 두 손가락 확대·회전이 즉시 반영됩니다. (탭 길게 눌러 이름 변경)'
                     : '💡 [지도이동 켜짐] 도면은 고정된 채로 배경 지도를 이동·확대할 수 있습니다.',
                 style: TextStyle(
                   color: _bpTouchModeIsBlueprint
@@ -2522,11 +3095,13 @@ if (photos.length > 0) {
                       minScale: 0.5,
                       maxScale: 4.0,
                       child: Center(
-                        child: Image.file(File(activePhoto.path),
-                            fit: BoxFit.contain),
+                        child: Image.file(
+                          File(activePhoto.path),
+                          fit: BoxFit.contain,
+                          gaplessPlayback: true,
+                        ),
                       ),
                     ),
-                    // 좌측 상단 카테고리 선택 박스 (아담한 가로폭 + 가나다순/미분류 최하단 + 개별 X 삭제)
                     Positioned(
                       top: 10,
                       left: 10,
@@ -2697,7 +3272,9 @@ if (photos.length > 0) {
                     ),
                     onMapReady: (ctrl) async {
                       _mapCtrl = ctrl;
-                      await _restoreBlueprintConfig();
+                      if (_bpLoadFuture != null) {
+                        await _bpLoadFuture;
+                      }
                       await _updateMapViewportInfo();
                       await _refreshAllOverlays(includeBlueprint: true);
                     },
@@ -2737,7 +3314,6 @@ if (photos.length > 0) {
             },
           );
 
-    // 상단 바: 모든 항목 글씨 크기 12px 통일 및 좌우 균등 배분
     const TextStyle unifiedTopTextStyle = TextStyle(
       fontSize: 12,
       fontWeight: FontWeight.bold,
@@ -2758,7 +3334,6 @@ if (photos.length > 0) {
               constraints: const BoxConstraints(minWidth: 28, minHeight: 34),
               onPressed: () => Navigator.pop(context),
             ),
-            // 1. 날짜 선택
             DropdownButtonHideUnderline(
               child: DropdownButton<String>(
                 value: _dateFilter,
@@ -2791,7 +3366,6 @@ if (photos.length > 0) {
                 },
               ),
             ),
-            // 2. 카테고리 필터 (가나다순 + 미분류 최하단)
             DropdownButtonHideUnderline(
               child: DropdownButton<String>(
                 value: cats.contains(_categoryFilter)
@@ -2826,7 +3400,6 @@ if (photos.length > 0) {
                 },
               ),
             ),
-            // 3. 내보내기
             InkWell(
               onTap: _isExporting ? null : _showExportOptionsSheet,
               borderRadius: BorderRadius.circular(4),
@@ -2847,7 +3420,6 @@ if (photos.length > 0) {
                 ),
               ),
             ),
-            // 4. 도면 추가
             InkWell(
               onTap: _importBlueprintFromGallery,
               borderRadius: BorderRadius.circular(4),
@@ -2867,24 +3439,20 @@ if (photos.length > 0) {
                 ),
               ),
             ),
-            // 5. 도면이 있을 때 전체 레이어 토글 & 도면정렬 버튼
             if (_blueprints.isNotEmpty) ...[
+              // 💡 녹색 레이어 아이콘 클릭 시 층별 도면 선택 팝업 열기
               IconButton(
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 24, minHeight: 32),
+                constraints: const BoxConstraints(minWidth: 26, minHeight: 32),
+                tooltip: '도면 선택 및 켜기/끄기',
                 icon: Icon(
-                  _bpGlobalShow ? Icons.layers : Icons.layers_clear,
-                  color: _bpGlobalShow ? Colors.lightGreenAccent : Colors.grey,
-                  size: 17,
+                  _hasAnyVisibleBlueprint ? Icons.layers : Icons.layers_clear,
+                  color: _hasAnyVisibleBlueprint
+                      ? Colors.lightGreenAccent
+                      : Colors.grey,
+                  size: 18,
                 ),
-                onPressed: () async {
-                  setState(() {
-                    _bpGlobalShow = !_bpGlobalShow;
-                    if (!_bpGlobalShow) _bpEditMode = false;
-                  });
-                  await _persistBlueprintConfig();
-                  await _refreshAllOverlays(includeBlueprint: true);
-                },
+                onPressed: _showBlueprintLayerSelectorDialog,
               ),
               SizedBox(
                 height: 26,
@@ -2893,7 +3461,11 @@ if (photos.length > 0) {
                     await _updateMapViewportInfo();
                     setState(() {
                       _bpEditMode = !_bpEditMode;
-                      if (_bpEditMode) _bpTouchModeIsBlueprint = true;
+                      if (_bpEditMode) {
+                        _bpTouchModeIsBlueprint = true;
+                        _bpGlobalShow = true;
+                        if (_activeBp != null) _activeBp!.isVisible = true;
+                      }
                     });
                     await _persistBlueprintConfig();
                     await _refreshAllOverlays(includeBlueprint: true);
@@ -2947,14 +3519,7 @@ if (photos.length > 0) {
                       itemBuilder: (context, idx) {
                         final bool selected = _selectedIdx == idx;
                         return GestureDetector(
-                          onTap: () {
-                            setState(() => _selectedIdx = idx);
-                            _refreshAllOverlays(includeBlueprint: true);
-                            _panMapKeepZoom(
-                              _visiblePhotos[idx].lat,
-                              _visiblePhotos[idx].lng,
-                            );
-                          },
+                          onTap: () => _selectPhotoFast(idx),
                           child: Container(
                             margin: const EdgeInsets.all(4),
                             decoration: BoxDecoration(
@@ -2965,11 +3530,14 @@ if (photos.length > 0) {
                                 width: 3,
                               ),
                             ),
+                            // 💡 cacheWidth: 160 적용으로 고화질 사진이 많아도 썸네일 디코딩 지연 0초
                             child: Image.file(
                               File(_visiblePhotos[idx].path),
                               width: 70,
                               height: 70,
+                              cacheWidth: 160,
                               fit: BoxFit.cover,
+                              gaplessPlayback: true,
                             ),
                           ),
                         );
@@ -3020,69 +3588,21 @@ if (photos.length > 0) {
       order.add(_selectedIdx);
     }
 
+    final List<NAddableOverlay> markerBatch = [];
     for (final int i in order) {
       final PhotoItem item = _visiblePhotos[i];
       final bool selected = i == _selectedIdx;
-      final Color c = selected ? Colors.blueAccent : Colors.red;
-
       try {
-        final icon = await NOverlayImage.fromWidget(
-          widget: Stack(
-            alignment: Alignment.center,
-            children: [
-              Container(
-                width: 28,
-                height: 28,
-                decoration: BoxDecoration(
-                  color: c.withOpacity(0.3),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: c, width: 2),
-                ),
-              ),
-              Transform.rotate(
-                angle: item.azimuth * (pi / 180.0),
-                child: Icon(Icons.navigation, color: c, size: 20),
-              ),
-            ],
-          ),
-          size: const Size(28, 28),
-          context: context,
-        );
-
-        final marker = NMarker(
-          id: 'photo_marker_$i',
-          position: NLatLng(item.lat, item.lng),
-          icon: icon,
-        );
-
-        marker.setOnTapListener((_) async {
-          final List<int> nearby = [];
-          for (int j = 0; j < _visiblePhotos.length; j++) {
-            final double dist = Geolocator.distanceBetween(
-              item.lat,
-              item.lng,
-              _visiblePhotos[j].lat,
-              _visiblePhotos[j].lng,
-            );
-            if (dist <= 20.0) nearby.add(j);
-          }
-
-          int nextIdx = i;
-          if (nearby.length > 1 && nearby.contains(_selectedIdx)) {
-            final int pos = nearby.indexOf(_selectedIdx);
-            nextIdx = nearby[(pos + 1) % nearby.length];
-          }
-
-          setState(() => _selectedIdx = nextIdx);
-          await _refreshAllOverlays(includeBlueprint: true);
-          final target = _visiblePhotos[_selectedIdx];
-          _panMapKeepZoom(target.lat, target.lng);
-        });
-
-        await _mapCtrl!.addOverlay(marker);
+        final icon = await _getCachedMarkerIcon(item.azimuth, selected);
+        markerBatch.add(_buildPhotoMarker(i, item, icon));
       } catch (e) {
-        debugPrint('Marker error: $e');
+        debugPrint('Marker build error: $e');
       }
+    }
+
+    // 💡 개별 addOverlay 대신 addOverlayAll로 한 번에 일괄 등록하여 렌더링 속도 대폭 향상
+    if (markerBatch.isNotEmpty) {
+      await _mapCtrl!.addOverlayAll(markerBatch.toSet());
     }
   }
 }
