@@ -476,7 +476,7 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 1. [16:9 / 4:3 / 1:1 비율 버튼]: 상단 중앙 배치 (가로모드 시 더 위쪽으로 밀착)
+          // 1. [16:9 / 4:3 / 1:1 비율 버튼]: 상단 중앙 배치
           Positioned(
             top: landscape ? 14 : 45,
             left: 0,
@@ -504,7 +504,7 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 2. [촬영 정보(위도·경도·방위각)]: 왼쪽 하단 부근으로 보기 좋게 배치
+          // 2. [촬영 정보(위도·경도·방위각)]: 좌측 하단 배치
           Positioned(
             left: 16,
             bottom: landscape ? 16 : 88,
@@ -525,7 +525,7 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 3. [0.6x / 1.0x / 2.0x 배율 버튼]: 맨 아래 정중앙으로 이동
+          // 3. [0.6x / 1.0x / 2.0x 배율 버튼]: 맨 아래 중앙 배치
           Positioned(
             bottom: 22,
             left: 0,
@@ -564,10 +564,10 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
-          // 4. [노란색 카메라 버튼 + 파란색 지도보기 버튼]: 우측 하단에 나란히 배치
+          // 4. [노란색 카메라 버튼 + 파란색 지도보기 버튼]: 버튼 가로 길이의 절반(28px)만큼 좌측으로 추가 이동 (right: 48)
           Positioned(
             bottom: 16,
-            right: 20,
+            right: 48,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -626,6 +626,15 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   bool _bpShow = true;
   bool _bpEditMode = false;
 
+  // 도면정렬 모드 시 터치 조작 대상 선택 (true: 도면이동/확대/회전, false: 지도이동/확대)
+  bool _bpTouchModeIsBlueprint = true;
+  double _nudgeStepMeters = 1.0; // 화살표 이동 단위 (1m / 5m 전환 가능)
+
+  // 두 손가락 도면 제스처용 상태 변수
+  double _gestureStartRadius = 200.0;
+  double _gestureStartRotation = 0.0;
+  double _metersPerPixel = 0.5;
+
   NOverlayImage? _bpCachedOverlayImg;
   bool _isRenderingBp = false;
   bool _pendingBpRender = false;
@@ -633,6 +642,17 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
   double get _currentBpRadius =>
       _bpBaseRadius * pow(9.0, _bpSizeSlider - 0.5).toDouble();
+
+  // 원하는 반경(m)을 슬라이더 값으로 역변환하여 정밀 적용하는 함수
+  void _setBpRadiusDirectly(double newRadiusMeters) {
+    final double clamped = newRadiusMeters.clamp(5.0, 5000.0);
+    double newSlider = 0.5 + log(clamped / _bpBaseRadius) / log(9.0);
+    if (newSlider < 0.05 || newSlider > 0.95) {
+      _bpBaseRadius = clamped;
+      newSlider = 0.5;
+    }
+    _bpSizeSlider = newSlider.clamp(0.0, 1.0);
+  }
 
   List<PhotoItem> get _visiblePhotos {
     if (_dateFilter == '전체 보기') return widget.photos;
@@ -726,6 +746,19 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
+  // 현재 지도 줌 레벨을 기준으로 화면 1픽셀당 실제 미터(m) 거리 계산
+  Future<void> _updateMetersPerPixel() async {
+    if (_mapCtrl == null) return;
+    try {
+      final camPos = await _mapCtrl!.getCameraPosition();
+      final double latRad = camPos.target.latitude * pi / 180.0;
+      _metersPerPixel =
+          (156543.03392 * cos(latRad).abs()) / pow(2.0, camPos.zoom);
+    } catch (_) {
+      _metersPerPixel = 0.5;
+    }
+  }
+
   Future<void> _importBlueprintFromGallery() async {
     try {
       final picker = ImagePicker();
@@ -758,6 +791,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       }
 
       final double screen80Rad = await _calcScreen80Radius();
+      await _updateMetersPerPixel();
 
       setState(() {
         _bpPath = destPath;
@@ -769,6 +803,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         _bpRotation = 0.0;
         _bpShow = true;
         _bpEditMode = true;
+        _bpTouchModeIsBlueprint = true;
         _bpCachedOverlayImg = null;
       });
 
@@ -902,7 +937,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                         color: Colors.white, fontWeight: FontWeight.bold),
                   ),
                   subtitle: const Text(
-                    '상대방이 앱 없이도 PC·폰 인터넷 창에서 도면+사진+지도를 클릭하며 볼 수 있는 단일 파일',
+                    '상대방이 앱 없이도 PC·폰 인터넷 창에서 도면+사진+지도를 클릭·확대하며 볼 수 있는 단일 파일',
                     style: TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   onTap: () {
@@ -952,7 +987,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // HTML 내보내기: 앱과 100% 동일한 정사각형 캔버스(회전·여백·비율 포함)로 도면을 구워 왜곡 제거 & 마커 순환 클릭 적용
+  // HTML 내보내기: 사진 칸 두 손가락 핀치 줌/드래그 이동 + 마우스 휠 줌 지원
   Future<void> _exportAsHtmlViewer() async {
     if (_visiblePhotos.isEmpty && _bpPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1029,17 +1064,18 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>GPS 도면 & 현장 사진 대시보드</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-  body, html { margin: 0; padding: 0; height: 100%; background: #111; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; }
+  body, html { margin: 0; padding: 0; height: 100%; background: #111; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; overflow: hidden; }
   header { padding: 10px 14px; background: #000; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; flex-wrap: wrap; gap: 6px; }
   .main-wrap { flex: 1; display: flex; flex-direction: row; overflow: hidden; }
   @media (max-width: 768px) { .main-wrap { flex-direction: column; } }
-  #photo-pane { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
-  #photo-pane img { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform 0.15s ease; cursor: zoom-in; }
+  #photo-pane { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; touch-action: none; }
+  #photo-pane img { max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center center; user-select: none; -webkit-user-drag: none; }
+  .zoom-hint { position: absolute; bottom: 8px; right: 10px; background: rgba(0,0,0,0.6); color: #ddd; font-size: 11px; padding: 3px 8px; border-radius: 12px; pointer-events: none; }
   #map-pane { flex: 1; position: relative; }
   #thumbs { height: 82px; background: #000; display: flex; overflow-x: auto; padding: 4px; border-top: 1px solid #333; }
   #thumbs img { width: 70px; height: 70px; object-fit: cover; margin-right: 6px; border: 3px solid transparent; cursor: pointer; flex-shrink: 0; }
@@ -1052,7 +1088,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   <span id="info-txt" style="font-size:12px; color:#ffc107;"></span>
 </header>
 <div class="main-wrap">
-  <div id="photo-pane"><img id="main-photo" src="" alt="현장 사진"/></div>
+  <div id="photo-pane">
+    <img id="main-photo" src="" alt="현장 사진"/>
+    <div class="zoom-hint">두 손가락 확대/이동 · 더블터치 초기화</div>
+  </div>
   <div id="map-pane"></div>
 </div>
 <div id="thumbs"></div>
@@ -1060,14 +1099,79 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 const photos = $photosJs;
 const bp = $bpJs;
 let selectedIdx = photos.length > 0 ? $_selectedIdx : 0;
-let zoomed = false;
 
+// 사진 두 손가락 핀치 줌 & 드래그 이동 로직
+const photoPane = document.getElementById('photo-pane');
 const mainImg = document.getElementById('main-photo');
-mainImg.onclick = () => {
-  zoomed = !zoomed;
-  mainImg.style.transform = zoomed ? 'scale(2.2)' : 'scale(1.0)';
-  mainImg.style.cursor = zoomed ? 'zoom-out' : 'zoom-in';
-};
+let pScale = 1.0, pX = 0, pY = 0;
+let startDist = 0, startScale = 1.0;
+let isDragging = false, dragStartX = 0, dragStartY = 0;
+let lastTapTime = 0;
+
+function applyPhotoTransform() {
+  mainImg.style.transform = `translate(\${pX}px, \${pY}px) scale(\${pScale})`;
+}
+
+function resetPhotoZoom() {
+  pScale = 1.0; pX = 0; pY = 0;
+  applyPhotoTransform();
+}
+
+function getTouchDist(t1, t2) {
+  const dx = t1.clientX - t2.clientX;
+  const dy = t1.clientY - t2.clientY;
+  return Math.hypot(dx, dy);
+}
+
+photoPane.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2) {
+    isDragging = false;
+    startDist = getTouchDist(e.touches[0], e.touches[1]);
+    startScale = pScale;
+  } else if (e.touches.length === 1) {
+    const now = Date.now();
+    if (now - lastTapTime < 300) {
+      pScale = pScale > 1.2 ? 1.0 : 2.5;
+      pX = 0; pY = 0;
+      applyPhotoTransform();
+      lastTapTime = 0;
+      return;
+    }
+    lastTapTime = now;
+    if (pScale > 1.02) {
+      isDragging = true;
+      dragStartX = e.touches[0].clientX - pX;
+      dragStartY = e.touches[0].clientY - pY;
+    }
+  }
+}, { passive: false });
+
+photoPane.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (e.touches.length === 2 && startDist > 0) {
+    const dist = getTouchDist(e.touches[0], e.touches[1]);
+    pScale = Math.min(5.0, Math.max(1.0, startScale * (dist / startDist)));
+    if (pScale <= 1.02) { pX = 0; pY = 0; }
+    applyPhotoTransform();
+  } else if (e.touches.length === 1 && isDragging && pScale > 1.02) {
+    pX = e.touches[0].clientX - dragStartX;
+    pY = e.touches[0].clientY - dragStartY;
+    applyPhotoTransform();
+  }
+}, { passive: false });
+
+photoPane.addEventListener('touchend', (e) => {
+  if (e.touches.length < 2) startDist = 0;
+  if (e.touches.length === 0) isDragging = false;
+});
+
+photoPane.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const delta = e.deltaY < 0 ? 0.2 : -0.2;
+  pScale = Math.min(5.0, Math.max(1.0, pScale + delta));
+  if (pScale <= 1.02) { pX = 0; pY = 0; }
+  applyPhotoTransform();
+}, { passive: false });
 
 const initLat = photos.length > 0 ? photos[selectedIdx].lat : (bp ? bp.lat : 37.4984);
 const initLng = photos.length > 0 ? photos[selectedIdx].lng : (bp ? bp.lng : 127.1324);
@@ -1079,12 +1183,11 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap'
 }).addTo(map);
 
-// 앱의 NOverlayImage(360x360, 패딩 16, BoxFit.contain, 회전, 투명도)와 100% 동일하게 캔버스에 구워서 오버레이!
 if (bp) {
   const bpImg = new Image();
   bpImg.onload = () => {
     const size = 720;
-    const pad = 32; // 앱의 16/360 여백 비율과 동일
+    const pad = 32;
     const inner = size - pad * 2;
     const canvas = document.createElement('canvas');
     canvas.width = size;
@@ -1122,8 +1225,7 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
 
 function selectPhoto(idx) {
   selectedIdx = idx;
-  zoomed = false;
-  mainImg.style.transform = 'scale(1.0)';
+  resetPhotoZoom();
   const p = photos[idx];
   mainImg.src = p.b64;
   document.getElementById('info-txt').innerText =
@@ -1147,7 +1249,6 @@ function renderThumbnails() {
 
 function renderMarkers() {
   markersLayer.clearLayers();
-  // 선택 안 된 빨간 마커 먼저 그리고, 선택된 파란 마커를 맨 마지막(맨 위)에 그리기
   const order = [];
   for (let i = 0; i < photos.length; i++) {
     if (i !== selectedIdx) order.push(i);
@@ -1170,7 +1271,6 @@ function renderMarkers() {
              </div>`
     });
     const m = L.marker([p.lat, p.lng], { icon: htmlIcon, zIndexOffset: zIdx }).addTo(markersLayer);
-    // 겹친 동그라미(반경 20m 이내) 클릭 시 다음 사진으로 순환 선택!
     m.on('click', () => {
       const nearby = [];
       for (let j = 0; j < photos.length; j++) {
@@ -1359,25 +1459,92 @@ if (photos.length > 0) {
     }
   }
 
+  // 미세 조정 버튼 생성 헬퍼
+  Widget _fineStepBtn(String label, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.white12,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildBlueprintControlBox() {
     return Container(
       color: Colors.grey[900],
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // 상단: [도면이동] vs [지도이동] 모드 전환 버튼 + [고정 및 저장]
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  '📐 도면 정렬 (지도 터치 시 즉시 이동)',
-                  style: TextStyle(
-                    color: Colors.amber,
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            setState(() => _bpTouchModeIsBlueprint = true);
+                          },
+                          icon: const Icon(Icons.pan_tool_alt, size: 15),
+                          label: const Text('도면이동',
+                              style: TextStyle(
+                                  fontSize: 12, fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _bpTouchModeIsBlueprint
+                                ? Colors.amber
+                                : Colors.white12,
+                            foregroundColor: _bpTouchModeIsBlueprint
+                                ? Colors.black
+                                : Colors.white70,
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            setState(() => _bpTouchModeIsBlueprint = false);
+                          },
+                          icon: const Icon(Icons.map_outlined, size: 15),
+                          label: const Text('지도이동',
+                              style: TextStyle(
+                                  fontSize: 12, fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: !_bpTouchModeIsBlueprint
+                                ? Colors.lightBlueAccent
+                                : Colors.white12,
+                            foregroundColor: !_bpTouchModeIsBlueprint
+                                ? Colors.black
+                                : Colors.white70,
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
+                const SizedBox(width: 8),
                 ElevatedButton.icon(
                   onPressed: () async {
                     await _persistBlueprintConfig();
@@ -1385,22 +1552,39 @@ if (photos.length > 0) {
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('도면이 영구 저장되었습니다! (앱 재실행 시 유지)'),
+                          content: Text('도면이 영구 저장되었습니다!'),
                         ),
                       );
                     }
                   },
                   icon: const Icon(Icons.check, size: 15),
-                  label: const Text('고정 및 저장', style: TextStyle(fontSize: 12)),
+                  label: const Text('저장',
+                      style:
+                          TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.amber,
-                    foregroundColor: Colors.black,
+                    backgroundColor: Colors.greenAccent[700],
+                    foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                   ),
                 ),
               ],
             ),
-            const Divider(color: Colors.white24, height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Text(
+                _bpTouchModeIsBlueprint
+                    ? '💡 [도면이동 켜짐] 지도 위에서 한 손가락 끌기(이동), 두 손가락 벌리기(확대/축소) 및 회전이 가능합니다.'
+                    : '💡 [지도이동 켜짐] 도면은 고정된 채로 지도를 두 손가락으로 이동·확대할 수 있습니다.',
+                style: TextStyle(
+                  color: _bpTouchModeIsBlueprint
+                      ? Colors.amberAccent
+                      : Colors.lightBlueAccent,
+                  fontSize: 11,
+                ),
+              ),
+            ),
+            const Divider(color: Colors.white24, height: 6),
+            // 1. 위치 미세 이동 (1m / 5m 단위 전환 가능)
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -1418,63 +1602,94 @@ if (photos.length > 0) {
                     await _renderBlueprintOnMap(rebuildBitmap: false);
                     await _persistBlueprintConfig();
                   },
-                  icon: const Icon(Icons.center_focus_strong, size: 15),
-                  label: const Text('화면 중앙·80%크기 초기화',
-                      style: TextStyle(fontSize: 11)),
+                  icon: const Icon(Icons.center_focus_strong, size: 14),
+                  label:
+                      const Text('화면중앙 초기화', style: TextStyle(fontSize: 11)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.blueGrey,
                     foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: const Size(0, 30),
                   ),
                 ),
                 Row(
                   children: [
+                    _fineStepBtn(
+                      _nudgeStepMeters == 1.0 ? '단위: 1m' : '단위: 5m',
+                      () {
+                        setState(() {
+                          _nudgeStepMeters =
+                              (_nudgeStepMeters == 1.0) ? 5.0 : 1.0;
+                        });
+                      },
+                    ),
                     IconButton(
+                      constraints:
+                          const BoxConstraints(minWidth: 32, minHeight: 32),
+                      padding: EdgeInsets.zero,
                       icon: const Icon(Icons.arrow_back,
-                          color: Colors.white, size: 20),
-                      onPressed: () => _shiftBlueprintMeters(0, -3),
+                          color: Colors.white, size: 18),
+                      onPressed: () =>
+                          _shiftBlueprintMeters(0, -_nudgeStepMeters),
                     ),
                     IconButton(
+                      constraints:
+                          const BoxConstraints(minWidth: 32, minHeight: 32),
+                      padding: EdgeInsets.zero,
                       icon: const Icon(Icons.arrow_upward,
-                          color: Colors.white, size: 20),
-                      onPressed: () => _shiftBlueprintMeters(3, 0),
+                          color: Colors.white, size: 18),
+                      onPressed: () =>
+                          _shiftBlueprintMeters(_nudgeStepMeters, 0),
                     ),
                     IconButton(
+                      constraints:
+                          const BoxConstraints(minWidth: 32, minHeight: 32),
+                      padding: EdgeInsets.zero,
                       icon: const Icon(Icons.arrow_downward,
-                          color: Colors.white, size: 20),
-                      onPressed: () => _shiftBlueprintMeters(-3, 0),
+                          color: Colors.white, size: 18),
+                      onPressed: () =>
+                          _shiftBlueprintMeters(-_nudgeStepMeters, 0),
                     ),
                     IconButton(
+                      constraints:
+                          const BoxConstraints(minWidth: 32, minHeight: 32),
+                      padding: EdgeInsets.zero,
                       icon: const Icon(Icons.arrow_forward,
-                          color: Colors.white, size: 20),
-                      onPressed: () => _shiftBlueprintMeters(0, 3),
+                          color: Colors.white, size: 18),
+                      onPressed: () =>
+                          _shiftBlueprintMeters(0, _nudgeStepMeters),
                     ),
                   ],
                 ),
               ],
             ),
+            // 2. 크기 정밀 조절 (-5m / -0.5m / 슬라이더 / +0.5m / +5m)
             Row(
               children: [
                 SizedBox(
-                  width: 82,
+                  width: 78,
                   child: Text(
-                    '크기: ${_currentBpRadius.toInt()}m',
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                    '크기:${_currentBpRadius.toStringAsFixed(1)}m',
+                    style: const TextStyle(color: Colors.white, fontSize: 11),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.remove_circle_outline,
-                      color: Colors.white70, size: 20),
-                  onPressed: () {
-                    setState(() {
-                      _bpSizeSlider = (_bpSizeSlider - 0.05).clamp(0.0, 1.0);
-                    });
-                    _renderBlueprintOnMap(rebuildBitmap: false);
-                    _persistBlueprintConfig();
-                  },
-                ),
+                _fineStepBtn('-5m', () {
+                  setState(() {
+                    _setBpRadiusDirectly(_currentBpRadius - 5.0);
+                  });
+                  _renderBlueprintOnMap(rebuildBitmap: false);
+                  _persistBlueprintConfig();
+                }),
+                _fineStepBtn('-0.5', () {
+                  setState(() {
+                    _setBpRadiusDirectly(_currentBpRadius - 0.5);
+                  });
+                  _renderBlueprintOnMap(rebuildBitmap: false);
+                  _persistBlueprintConfig();
+                }),
                 Expanded(
                   child: Slider(
-                    value: _bpSizeSlider,
+                    value: _bpSizeSlider.clamp(0.0, 1.0),
                     min: 0.0,
                     max: 1.0,
                     activeColor: Colors.amber,
@@ -1485,39 +1700,46 @@ if (photos.length > 0) {
                     onChangeEnd: (_) => _persistBlueprintConfig(),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.add_circle_outline,
-                      color: Colors.white70, size: 20),
-                  onPressed: () {
-                    setState(() {
-                      _bpSizeSlider = (_bpSizeSlider + 0.05).clamp(0.0, 1.0);
-                    });
-                    _renderBlueprintOnMap(rebuildBitmap: false);
-                    _persistBlueprintConfig();
-                  },
-                ),
+                _fineStepBtn('+0.5', () {
+                  setState(() {
+                    _setBpRadiusDirectly(_currentBpRadius + 0.5);
+                  });
+                  _renderBlueprintOnMap(rebuildBitmap: false);
+                  _persistBlueprintConfig();
+                }),
+                _fineStepBtn('+5m', () {
+                  setState(() {
+                    _setBpRadiusDirectly(_currentBpRadius + 5.0);
+                  });
+                  _renderBlueprintOnMap(rebuildBitmap: false);
+                  _persistBlueprintConfig();
+                }),
               ],
             ),
+            // 3. 회전 정밀 조절 (-2° / -0.2° / 슬라이더 / +0.2° / +2°)
             Row(
               children: [
                 SizedBox(
-                  width: 82,
+                  width: 78,
                   child: Text(
-                    '회전: ${_bpRotation.toStringAsFixed(0)}°',
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                    '회전:${_bpRotation.toStringAsFixed(1)}°',
+                    style: const TextStyle(color: Colors.white, fontSize: 11),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.rotate_left,
-                      color: Colors.white70, size: 20),
-                  onPressed: () {
-                    setState(() {
-                      _bpRotation = (_bpRotation - 5.0).clamp(-180.0, 180.0);
-                    });
-                    _renderBlueprintOnMap(rebuildBitmap: true);
-                    _persistBlueprintConfig();
-                  },
-                ),
+                _fineStepBtn('-2°', () {
+                  setState(() {
+                    _bpRotation = (_bpRotation - 2.0).clamp(-180.0, 180.0);
+                  });
+                  _renderBlueprintOnMap(rebuildBitmap: true);
+                  _persistBlueprintConfig();
+                }),
+                _fineStepBtn('-0.2°', () {
+                  setState(() {
+                    _bpRotation = (_bpRotation - 0.2).clamp(-180.0, 180.0);
+                  });
+                  _renderBlueprintOnMap(rebuildBitmap: true);
+                  _persistBlueprintConfig();
+                }),
                 Expanded(
                   child: Slider(
                     value: _bpRotation.clamp(-180.0, 180.0),
@@ -1531,26 +1753,30 @@ if (photos.length > 0) {
                     onChangeEnd: (_) => _persistBlueprintConfig(),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.rotate_right,
-                      color: Colors.white70, size: 20),
-                  onPressed: () {
-                    setState(() {
-                      _bpRotation = (_bpRotation + 5.0).clamp(-180.0, 180.0);
-                    });
-                    _renderBlueprintOnMap(rebuildBitmap: true);
-                    _persistBlueprintConfig();
-                  },
-                ),
+                _fineStepBtn('+0.2°', () {
+                  setState(() {
+                    _bpRotation = (_bpRotation + 0.2).clamp(-180.0, 180.0);
+                  });
+                  _renderBlueprintOnMap(rebuildBitmap: true);
+                  _persistBlueprintConfig();
+                }),
+                _fineStepBtn('+2°', () {
+                  setState(() {
+                    _bpRotation = (_bpRotation + 2.0).clamp(-180.0, 180.0);
+                  });
+                  _renderBlueprintOnMap(rebuildBitmap: true);
+                  _persistBlueprintConfig();
+                }),
               ],
             ),
+            // 4. 투명도 슬라이더
             Row(
               children: [
                 SizedBox(
-                  width: 82,
+                  width: 78,
                   child: Text(
-                    '투명도: ${(_bpOpacity * 100).toInt()}%',
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                    '투명도:${(_bpOpacity * 100).toInt()}%',
+                    style: const TextStyle(color: Colors.white, fontSize: 11),
                   ),
                 ),
                 Expanded(
@@ -1634,33 +1860,167 @@ if (photos.length > 0) {
               ),
             ),
           )
-        : NaverMap(
-            options: NaverMapViewOptions(
-              initialCameraPosition: NCameraPosition(
-                target: NLatLng(initLat, initLng),
-                zoom: 16,
+        : Stack(
+            children: [
+              NaverMap(
+                options: NaverMapViewOptions(
+                  initialCameraPosition: NCameraPosition(
+                    target: NLatLng(initLat, initLng),
+                    zoom: 16,
+                  ),
+                ),
+                onMapReady: (ctrl) async {
+                  _mapCtrl = ctrl;
+                  await _restoreBlueprintConfig();
+                  await _updateMetersPerPixel();
+                  await _refreshAllOverlays(includeBlueprint: true);
+                },
+                onCameraIdle: () {
+                  _updateMetersPerPixel();
+                },
+                onMapTapped: (point, latLng) {
+                  // 지도이동 모드일 때도 원한다면 슬라이더로 조정 가능
+                },
               ),
-            ),
-            onMapReady: (ctrl) async {
-              _mapCtrl = ctrl;
-              await _restoreBlueprintConfig();
-              await _refreshAllOverlays(includeBlueprint: true);
-            },
-            onMapTapped: (point, latLng) {
-              if (_bpEditMode && _bpPath != null) {
-                setState(() {
-                  _bpLat = latLng.latitude;
-                  _bpLng = latLng.longitude;
-                });
-                _renderBlueprintOnMap(rebuildBitmap: false);
-                _persistBlueprintConfig();
-              }
-            },
+              // [도면정렬 모드 + 도면이동 선택 시]: 지도 위에서 한 손가락 이동, 두 손가락 확대·축소·회전 제스처 처리
+              if (_bpEditMode && _bpPath != null && _bpTouchModeIsBlueprint)
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onScaleStart: (details) async {
+                      await _updateMetersPerPixel();
+                      _gestureStartRadius = _currentBpRadius;
+                      _gestureStartRotation = _bpRotation;
+                    },
+                    onScaleUpdate: (details) {
+                      if (_bpLat == null || _bpLng == null) return;
+
+                      // 1. 한 손가락 또는 두 손가락 중심점 드래그 -> 도면 위치 이동
+                      final double dx = details.focalPointDelta.dx;
+                      final double dy = details.focalPointDelta.dy;
+                      final double northM = -dy * _metersPerPixel;
+                      final double eastM = dx * _metersPerPixel;
+
+                      final double dLat = northM / 111320.0;
+                      final double cosLat =
+                          cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
+                      final double dLng = eastM / (111320.0 * cosLat);
+
+                      bool needRebuildBitmap = false;
+
+                      setState(() {
+                        _bpLat = _bpLat! + dLat;
+                        _bpLng = _bpLng! + dLng;
+
+                        // 2. 두 손가락 벌리기/오므리기 -> 도면 확대/축소
+                        if (details.pointerCount >= 2 &&
+                            (details.scale - 1.0).abs() > 0.003) {
+                          final double targetRad =
+                              (_gestureStartRadius * details.scale)
+                                  .clamp(5.0, 5000.0);
+                          _setBpRadiusDirectly(targetRad);
+                        }
+
+                        // 3. 두 손가락 회전 -> 도면 회전
+                        if (details.pointerCount >= 2 &&
+                            details.rotation.abs() > 0.003) {
+                          final double degDelta =
+                              details.rotation * (180.0 / pi);
+                          double newRot = _gestureStartRotation + degDelta;
+                          newRot =
+                              ((newRot + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
+                          if ((newRot - _bpRotation).abs() > 0.15) {
+                            _bpRotation = newRot;
+                            needRebuildBitmap = true;
+                          }
+                        }
+                      });
+
+                      _renderBlueprintOnMap(rebuildBitmap: needRebuildBitmap);
+                    },
+                    onScaleEnd: (_) {
+                      _renderBlueprintOnMap(rebuildBitmap: true);
+                      _persistBlueprintConfig();
+                    },
+                    child: Container(
+                      color: Colors.transparent,
+                    ),
+                  ),
+                ),
+              // 지도 화면 상단에도 [도면이동 / 지도이동] 빠른 전환 플로팅 스위치 표시
+              if (_bpEditMode && _bpPath != null)
+                Positioned(
+                  top: 10,
+                  right: 10,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.black87,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.white38),
+                    ),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        InkWell(
+                          onTap: () =>
+                              setState(() => _bpTouchModeIsBlueprint = true),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: _bpTouchModeIsBlueprint
+                                  ? Colors.amber
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Text(
+                              '🖐️ 도면이동',
+                              style: TextStyle(
+                                color: _bpTouchModeIsBlueprint
+                                    ? Colors.black
+                                    : Colors.white70,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        InkWell(
+                          onTap: () =>
+                              setState(() => _bpTouchModeIsBlueprint = false),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: !_bpTouchModeIsBlueprint
+                                  ? Colors.lightBlueAccent
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Text(
+                              '🗺️ 지도이동',
+                              style: TextStyle(
+                                color: !_bpTouchModeIsBlueprint
+                                    ? Colors.black
+                                    : Colors.white70,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
           );
 
     return Scaffold(
       backgroundColor: Colors.black,
-      // 상단 바 전체를 한 줄 Row로 제어하여 '전체 보기'와 날짜가 절대 잘리거나 줄바꿈되지 않도록 개선!
       appBar: AppBar(
         backgroundColor: Colors.black,
         automaticallyImplyLeading: false,
@@ -1673,7 +2033,7 @@ if (photos.length > 0) {
               constraints: const BoxConstraints(minWidth: 34, minHeight: 36),
               onPressed: () => Navigator.pop(context),
             ),
-            const SizedBox(width: 6), // 우측으로 살짝 밀어 여유 공간 확보
+            const SizedBox(width: 6),
             ConstrainedBox(
               constraints: const BoxConstraints(minWidth: 108),
               child: DropdownButtonHideUnderline(
@@ -1785,6 +2145,7 @@ if (photos.length > 0) {
                 child: ElevatedButton(
                   onPressed: () async {
                     await _persistBlueprintConfig();
+                    await _updateMetersPerPixel();
                     setState(() => _bpEditMode = !_bpEditMode);
                   },
                   style: ElevatedButton.styleFrom(
