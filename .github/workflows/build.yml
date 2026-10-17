@@ -1,10 +1,97 @@
-- name: Inject Shutter Sound into MainActivity.kt
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Create Flutter Project Structure
         run: |
-          MAIN_KT=$(find android/app/src/main/kotlin -name "MainActivity.kt" | head -n 1)
-          if [ -n "$MAIN_KT" ]; then
-            PKG_LINE=$(grep "^package " "$MAIN_KT" | head -n 1)
-            echo "$PKG_LINE" > "$MAIN_KT"
-            cat << 'EOF' >> "$MAIN_KT"
+          cp pubspec.yaml pubspec.yaml.bak
+          cp lib/main.dart main.dart.bak
+          flutter create --org com.example --project-name gps_camera .
+          mv pubspec.yaml.bak pubspec.yaml
+          mv main.dart.bak lib/main.dart
+
+      - name: Configure Android Permissions & Naver Map & Gradle
+        run: |
+          python3 - << 'EOF'
+          import glob, re
+
+          # 1. AndroidManifest.xml 권한 및 네이버 지도 Client ID 자동 설정
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          perms = """
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
+              <uses-permission android:name="android.permission.READ_media_IMAGES"/>
+          """
+          if "android.permission.CAMERA" not in content:
+              content = content.replace("<application", perms + "\n    <application", 1)
+
+          meta = """
+                  <meta-data
+                      android:name="com.naver.maps.map.CLIENT_ID"
+                      android:value="b3agnvaern" />
+          """
+          if "com.naver.maps.map.CLIENT_ID" not in content:
+              content = content.replace("</activity>", "</activity>\n" + meta, 1)
+
+          with open(manifest_path, "w", encoding="utf-8") as f:
+              f.write(content)
+
+          # 2. minSdkVersion 23 이상으로 상향 (네이버 지도 & 카메라 호환)
+          for gpath in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
+              try:
+                  with open(gpath, "r", encoding="utf-8") as f:
+                      g = f.read()
+                  g = re.sub(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 23", g)
+                  g = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", g)
+                  with open(gpath, "w", encoding="utf-8") as f:
+                      f.write(g)
+              except FileNotFoundError:
+                  pass
+          EOF
+
+      - name: Inject Shutter Sound into MainActivity.kt
+        run: |
+          python3 - << 'EOF'
+          import glob, re
+
+          kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
+          if kt_files:
+              kt_path = kt_files[0]
+              with open(kt_path, "r", encoding="utf-8") as f:
+                  first_line = f.readline().strip()
+              pkg_line = first_line if first_line.startswith("package ") else "package com.example.gps_camera"
+
+              kt_code = pkg_line + """
+
           import android.content.Context
           import android.media.AudioAttributes
           import android.media.AudioManager
@@ -72,5 +159,19 @@
                   }
               }
           }
+          """
+              with open(kt_path, "w", encoding="utf-8") as f:
+                  f.write(kt_code)
           EOF
-          fi
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
