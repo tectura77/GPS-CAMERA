@@ -22,9 +22,9 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.7'
+          flutter-version: '3.16.9'
           channel: 'stable'
-      
+
       - name: Create Flutter Project Structure
         run: |
           cp pubspec.yaml pubspec.yaml.bak
@@ -38,7 +38,6 @@ jobs:
           python3 - << 'EOF'
           import glob, re
 
-          # 1. AndroidManifest.xml 권한 및 네이버 지도 Client ID 자동 설정
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "r", encoding="utf-8") as f:
               content = f.read()
@@ -66,7 +65,6 @@ jobs:
           with open(manifest_path, "w", encoding="utf-8") as f:
               f.write(content)
 
-          # 2. minSdkVersion 23 이상으로 상향 (네이버 지도 & 카메라 호환)
           for gpath in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
               try:
                   with open(gpath, "r", encoding="utf-8") as f:
