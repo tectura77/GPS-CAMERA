@@ -1,42 +1,76 @@
-name: Build Android APK
+- name: Inject Shutter Sound into MainActivity.kt
+        run: |
+          MAIN_KT=$(find android/app/src/main/kotlin -name "MainActivity.kt" | head -n 1)
+          if [ -n "$MAIN_KT" ]; then
+            PKG_LINE=$(grep "^package " "$MAIN_KT" | head -n 1)
+            echo "$PKG_LINE" > "$MAIN_KT"
+            cat << 'EOF' >> "$MAIN_KT"
+          import android.content.Context
+          import android.media.AudioAttributes
+          import android.media.AudioManager
+          import android.media.MediaActionSound
+          import android.media.MediaPlayer
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+          import java.io.File
+          import java.io.FileOutputStream
 
-on:
-  push:
-    branches: [ main, master ]
-  workflow_dispatch:
+          class MainActivity: FlutterActivity() {
+              private val CHANNEL = "gps_camera/shutter"
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          
-      - name: Create Flutter Project
-        run: |
-          flutter create my_app
-          cp pubspec.yaml my_app/
-          mkdir -p my_app/lib
-          cp main.dart my_app/lib/
-          
-      - name: Add Android Permissions
-        run: |
-          sed -i '/<application/i \    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />' my_app/android/app/src/main/AndroidManifest.xml
-          
-      - name: Build APK
-        working-directory: ./my_app
-        run: |
-          flutter pub get
-          flutter build apk --release
-          
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: my_app/build/app/outputs/flutter-apk/app-release.apk
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      if (call.method == "playShutter") {
+                          val wavBytes = call.argument<ByteArray>("wav")
+                          playShutterOnAlarmStream(wavBytes)
+                          result.success(null)
+                      } else {
+                          result.notImplemented()
+                      }
+                  }
+              }
+
+              private fun playShutterOnAlarmStream(wavBytes: ByteArray?) {
+                  try {
+                      val actionSound = MediaActionSound()
+                      actionSound.play(MediaActionSound.SHUTTER_CLICK)
+
+                      if (wavBytes != null) {
+                          val tempFile = File(cacheDir, "shutter_click.wav")
+                          FileOutputStream(tempFile).use { it.write(wavBytes) }
+
+                          val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                          val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+                          val curVol = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)
+                          if (curVol == 0) {
+                              audioManager.setStreamVolume(
+                                  AudioManager.STREAM_ALARM,
+                                  (maxVol * 0.65).toInt().coerceAtLeast(1),
+                                  0
+                              )
+                          }
+
+                          val mp = MediaPlayer()
+                          mp.setAudioAttributes(
+                              AudioAttributes.Builder()
+                                  .setUsage(AudioAttributes.USAGE_ALARM)
+                                  .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                  .build()
+                          )
+                          mp.setDataSource(tempFile.absolutePath)
+                          mp.setOnCompletionListener {
+                              it.release()
+                              actionSound.release()
+                          }
+                          mp.prepare()
+                          mp.start()
+                      }
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+              }
+          }
+          EOF
+          fi
