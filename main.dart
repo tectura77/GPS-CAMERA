@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -216,67 +217,79 @@ class _CameraScreenState extends State<CameraScreen> {
     _setupApp();
   }
 
-  // 💡 외부 파일 없이 코드로 즉시 생성하는 리얼한 "찰-칵!" 기계식 카메라 셔터음 WAV 데이터
+  // 💡 Endian 객체 없이 순수 비트 연산으로 WAV 헤더와 셔터음을 생성 (컴파일 에러 원천 차단)
   Uint8List _generateMechanicalShutterWav() {
     const int sampleRate = 22050;
     const int durationMs = 170;
     final int numSamples = (sampleRate * durationMs) ~/ 1000;
     final int dataSize = numSamples * 2;
-    final ByteData bd = ByteData(44 + dataSize);
+    final Uint8List out = Uint8List(44 + dataSize);
 
     void writeStr(int offset, String s) {
       for (int i = 0; i < s.length; i++) {
-        bd.setUint8(offset + i, s.codeUnitAt(i));
+        out[offset + i] = s.codeUnitAt(i) & 0xFF;
       }
     }
 
+    void writeU16LE(int offset, int val) {
+      out[offset] = val & 0xFF;
+      out[offset + 1] = (val >> 8) & 0xFF;
+    }
+
+    void writeU32LE(int offset, int val) {
+      out[offset] = val & 0xFF;
+      out[offset + 1] = (val >> 8) & 0xFF;
+      out[offset + 2] = (val >> 16) & 0xFF;
+      out[offset + 3] = (val >> 24) & 0xFF;
+    }
+
     writeStr(0, 'RIFF');
-    bd.setUint32(4, 36 + dataSize, Endian.little);
+    writeU32LE(4, 36 + dataSize);
     writeStr(8, 'WAVE');
     writeStr(12, 'fmt ');
-    bd.setUint32(16, 16, Endian.little);
-    bd.setUint16(20, 1, Endian.little); // PCM
-    bd.setUint16(22, 1, Endian.little); // Mono
-    bd.setUint32(24, sampleRate, Endian.little);
-    bd.setUint32(28, sampleRate * 2, Endian.little);
-    bd.setUint16(32, 2, Endian.little);
-    bd.setUint16(34, 16, Endian.little);
+    writeU32LE(16, 16);
+    writeU16LE(20, 1); // PCM
+    writeU16LE(22, 1); // Mono
+    writeU32LE(24, sampleRate);
+    writeU32LE(28, sampleRate * 2);
+    writeU16LE(32, 2);
+    writeU16LE(34, 16);
     writeStr(36, 'data');
-    bd.setUint32(40, dataSize, Endian.little);
+    writeU32LE(40, dataSize);
 
     final Random rng = Random(42);
     for (int i = 0; i < numSamples; i++) {
       final double t = i / sampleRate;
       double amp = 0.0;
 
-      // 첫 번째 "찰-" (미러 업 클릭: 0~25ms)
+      // 첫 번째 "찰-" (0~25ms)
       if (t < 0.025) {
         final double env = exp(-t * 170.0);
         final double noise = (rng.nextDouble() * 2.0 - 1.0) * 0.7;
-        final double tone =
-            sin(2.0 * pi * 1400.0 * t) * 0.5 + sin(2.0 * pi * 2850.0 * t) * 0.4;
+        final double tone = sin(2.0 * pi * 1400.0 * t) * 0.5 +
+            sin(2.0 * pi * 2850.0 * t) * 0.4;
         amp += (noise + tone) * env;
       }
 
-      // 두 번째 "-칵!" (셔터 커튼 닫힘 클릭: 48~95ms)
+      // 두 번째 "-칵!" (48~95ms)
       if (t >= 0.048 && t < 0.095) {
         final double dt = t - 0.048;
         final double env = exp(-dt * 140.0);
         final double noise = (rng.nextDouble() * 2.0 - 1.0) * 0.85;
-        final double tone =
-            sin(2.0 * pi * 1100.0 * dt) * 0.5 + sin(2.0 * pi * 2300.0 * dt) * 0.45;
+        final double tone = sin(2.0 * pi * 1100.0 * dt) * 0.5 +
+            sin(2.0 * pi * 2300.0 * dt) * 0.45;
         amp += (noise + tone) * env;
       }
 
-      final int pcm = (amp.clamp(-1.0, 1.0) * 32767.0).round();
-      bd.setInt16(44 + i * 2, pcm, Endian.little);
+      int pcm = (amp.clamp(-1.0, 1.0) * 32767.0).round();
+      if (pcm < 0) pcm += 65536;
+      writeU16LE(44 + i * 2, pcm);
     }
 
-    return bd.buffer.asUint8List();
+    return out;
   }
 
   Future<void> _playShutterSoundAndFeedback() async {
-    // 화면 플래시 깜빡임 효과
     if (mounted) {
       setState(() => _shutterFlash = true);
       Future.delayed(const Duration(milliseconds: 90), () {
@@ -284,7 +297,6 @@ class _CameraScreenState extends State<CameraScreen> {
       });
     }
 
-    // 진동 및 기본 시스템 클릭음 (찰-칵 2회 연속)
     HapticFeedback.heavyImpact();
     SystemSound.play(SystemSoundType.click);
     Future.delayed(const Duration(milliseconds: 55), () {
@@ -292,14 +304,11 @@ class _CameraScreenState extends State<CameraScreen> {
       HapticFeedback.mediumImpact();
     });
 
-    // 네이티브 알람 스트림(무음/진동 모드에서도 강제 출력) 호출
     try {
       await _shutterChannel.invokeMethod('playShutter', {
         'wav': _shutterWavBytes,
       });
-    } catch (_) {
-      // MainActivity.kt 미적용 환경에서도 에러 없이 기본 클릭음으로 동작
-    }
+    } catch (_) {}
   }
 
   Future<void> _setupApp() async {
@@ -842,7 +851,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       _currentMapBounds != null &&
       (_bpTouchModeIsBlueprint || _isSliderManipulating);
 
-  // 가나다순 정렬 + '미분류' 최하단 고정
   List<String> get _allCategories {
     final Set<String> cats = {..._customCategories};
     for (var p in widget.photos) {
@@ -869,7 +877,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   void initState() {
     super.initState();
     _restoreCategories();
-    // 💡 지도가 초기화되는 동안 백그라운드에서 도면 데이터를 동시에 미리 읽어 진입 딜레이 제거
     _bpLoadFuture = _restoreBlueprintConfig();
     if (_visiblePhotos.isNotEmpty) {
       _selectedIdx = _visiblePhotos.length - 1;
@@ -1021,7 +1028,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 💡 도면 이름 설정 및 이름 변경 팝업창
   Future<String?> _promptBlueprintNameDialog({
     required String defaultName,
     String title = '도면 이름 설정',
@@ -1124,7 +1130,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // 💡 우측 상단 녹색 레이어 아이콘 클릭 시 열리는 '층별/구역별 도면 선택' 팝업 (전부 끄기 포함)
   Future<void> _showBlueprintLayerSelectorDialog() async {
     await showDialog(
       context: context,
@@ -1223,7 +1228,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                                       : FontWeight.normal,
                                 ),
                               ),
-                              // 도면 이름 클릭 시: 해당 도면만 단독으로 켜고 팝업 닫기
                               onTap: () async {
                                 setState(() {
                                   _bpGlobalShow = true;
@@ -1237,7 +1241,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                                 await _refreshAllOverlays(
                                     includeBlueprint: true);
                               },
-                              // 우측 눈 아이콘 클릭 시: 다른 도면과 함께 겹쳐서 켜기/끄기
                               trailing: IconButton(
                                 icon: Icon(
                                   isShown
@@ -1492,7 +1495,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 💡 도면 경량 이미지를 디스크(.fast.png)에 캐싱해 대시보드 진입 시 디코딩 시간을 0초로 단축
   Future<void> _prepareFastBlueprintBytes(BlueprintItem item) async {
     try {
       final File fastCacheFile = File('${item.imagePath}.fast.png');
@@ -1535,7 +1537,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         defaultName: defaultName,
         title: '새 도면 이름 설정',
       );
-      if (chosenName == null) return; // 취소 시 등록 중단
+      if (chosenName == null) return;
 
       final dir = await getApplicationDocumentsDirectory();
       final String ext = picked.path.split('.').last;
@@ -1796,7 +1798,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // 💡 마커 아이콘 캐싱 (5도 단위 양자화로 재생성 방지, 초고속 렌더링)
   Future<NOverlayImage> _getCachedMarkerIcon(
       double azimuth, bool selected) async {
     final int degStep = (((azimuth % 360 + 360) % 360) / 5).round() * 5 % 360;
@@ -1863,7 +1864,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     return marker;
   }
 
-  // 💡 사진 선택 시 전체 지도를 초기화하지 않고 바뀐 마커 2개만 즉시 교체 (딜레이 0초)
   Future<void> _selectPhotoFast(int newIdx) async {
     if (newIdx < 0 || newIdx >= _visiblePhotos.length) return;
     final int prevIdx = _selectedIdx;
@@ -2584,7 +2584,6 @@ if (photos.length > 0) {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 다중 도면 선택 · 이름 변경(길게 누르기) · 개별 켜기/끄기 · 삭제 바
             SizedBox(
               height: 32,
               child: ListView(
@@ -3440,7 +3439,6 @@ if (photos.length > 0) {
               ),
             ),
             if (_blueprints.isNotEmpty) ...[
-              // 💡 녹색 레이어 아이콘 클릭 시 층별 도면 선택 팝업 열기
               IconButton(
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 26, minHeight: 32),
@@ -3530,7 +3528,6 @@ if (photos.length > 0) {
                                 width: 3,
                               ),
                             ),
-                            // 💡 cacheWidth: 160 적용으로 고화질 사진이 많아도 썸네일 디코딩 지연 0초
                             child: Image.file(
                               File(_visiblePhotos[idx].path),
                               width: 70,
@@ -3600,7 +3597,6 @@ if (photos.length > 0) {
       }
     }
 
-    // 💡 개별 addOverlay 대신 addOverlayAll로 한 번에 일괄 등록하여 렌더링 속도 대폭 향상
     if (markerBatch.isNotEmpty) {
       await _mapCtrl!.addOverlayAll(markerBatch.toSet());
     }
