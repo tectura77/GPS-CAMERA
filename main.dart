@@ -55,7 +55,7 @@ class PhotoItem {
   final double azimuth;
   final double pitch;
   final String timestamp;
-  String category; // 💡 사진별 카테고리 필드 추가
+  String category;
 
   PhotoItem({
     required this.path,
@@ -437,6 +437,9 @@ class _CameraScreenState extends State<CameraScreen> {
     final bool landscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
 
+    final double bottomSafe = MediaQuery.of(context).viewPadding.bottom;
+    final double liftOffset = bottomSafe + 28.0;
+
     final double targetFrameRatio = _ratioMode == '1:1'
         ? 1.0
         : (_ratioMode == '4:3'
@@ -510,7 +513,7 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
           Positioned(
             left: 16,
-            bottom: landscape ? 16 : 88,
+            bottom: (landscape ? 16 : 88) + liftOffset,
             child: IgnorePointer(
               child: Container(
                 padding:
@@ -529,7 +532,7 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
           Positioned(
-            bottom: 22,
+            bottom: 22 + liftOffset,
             left: 0,
             right: 0,
             child: Center(
@@ -567,7 +570,7 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
           Positioned(
-            bottom: 16,
+            bottom: 16 + liftOffset,
             right: 48,
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -616,9 +619,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   int _selectedIdx = 0;
   NaverMapController? _mapCtrl;
   String _dateFilter = '전체 보기';
-  String _categoryFilter = '전체 카테고리'; // 💡 카테고리 필터 상태
+  String _categoryFilter = '전체 카테고리';
 
   String? _bpPath;
+  Uint8List? _bpFastBytes; // 💡 누락되었던 고속 회전용 메모리 이미지 변수 선언 복구!
   double? _bpLat;
   double? _bpLng;
   double _bpBaseRadius = 200.0;
@@ -653,7 +657,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     _bpSizeSlider = newSlider.clamp(0.0, 1.0);
   }
 
-  // 등록된 모든 카테고리 목록 추출
   List<String> get _allCategories {
     final Set<String> cats = {'미분류'};
     for (var p in widget.photos) {
@@ -662,13 +665,12 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     return cats.toList()..sort();
   }
 
-  // 날짜 및 카테고리 필터링이 모두 적용된 사진 목록
   List<PhotoItem> get _visiblePhotos {
     return widget.photos.where((p) {
       final bool matchDate =
           (_dateFilter == '전체 보기') || p.timestamp.startsWith(_dateFilter);
-      final bool matchCat = (_categoryFilter == '전체 카테고리') ||
-          (p.category == _categoryFilter);
+      final bool matchCat =
+          (_categoryFilter == '전체 카테고리') || (p.category == _categoryFilter);
       return matchDate && matchCat;
     }).toList();
   }
@@ -745,7 +747,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 💡 카테고리 직접 입력 팝업 창
   Future<void> _showAddCategoryDialog(PhotoItem photo) async {
     final TextEditingController textCtrl = TextEditingController();
     await showDialog(
@@ -783,7 +784,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                 }
                 Navigator.pop(ctx);
               },
-              child: const Text('추가 및 적용', style: TextStyle(color: Colors.black)),
+              child:
+                  const Text('추가 및 적용', style: TextStyle(color: Colors.black)),
             ),
           ],
         );
@@ -1120,7 +1122,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                         color: Colors.white, fontWeight: FontWeight.bold),
                   ),
                   subtitle: Text(
-                    '현재 필터링된 상태 (날짜: $_dateFilter, 카테고리: $_categoryFilter)의 도면+사진+지도를 공유',
+                    '현재 필터(날짜: $_dateFilter, 카테고리: $_categoryFilter) 상태 + 도면 불투명 100%로 내보내기',
                     style:
                         const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
@@ -1171,6 +1173,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
+  // 💡 HTML 내보내기: 바탕 지도는 그대로 켜두고, 도면은 불투명 100%(opacity: 1.0)로 선명하게 내보냄
   Future<void> _exportAsHtmlViewer() async {
     if (_visiblePhotos.isEmpty && _bpPath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1228,7 +1231,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           'neLat': _bpLat! + dLat,
           'neLng': _bpLng! + dLng,
           'rotation': _bpRotation,
-          'opacity': _bpOpacity,
+          'opacity': 1.0, // 💡 HTML 내보내기 시 도면을 불투명 100%로 고정!
         };
       }
 
@@ -1366,6 +1369,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap'
 }).addTo(map);
 
+// 💡 바탕 지도는 켜두고, 도면은 불투명 100%(globalAlpha = 1.0)로 렌더링!
 if (bp) {
   const bpImg = new Image();
   bpImg.onload = () => {
@@ -1378,7 +1382,7 @@ if (bp) {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, size, size);
     ctx.save();
-    ctx.globalAlpha = bp.opacity;
+    ctx.globalAlpha = 1.0; // 불투명도 100% 고정
     ctx.translate(size / 2, size / 2);
     ctx.rotate(bp.rotation * Math.PI / 180.0);
     const scale = Math.min(inner / bpImg.width, inner / bpImg.height);
@@ -1999,7 +2003,7 @@ if (photos.length > 0) {
     dateTabs.addAll(sortedDays);
 
     final bool portrait =
-        MediaQuery.of(context).orientation == Orientation.landscape;
+        MediaQuery.of(context).orientation == Orientation.portrait;
 
     final double bottomSafe = MediaQuery.of(context).viewPadding.bottom;
 
@@ -2026,7 +2030,6 @@ if (photos.length > 0) {
                             fit: BoxFit.contain),
                       ),
                     ),
-                    // 💡 사진 보기 화면 좌측 상단 카테고리 선택 및 직접 등록 버튼
                     Positioned(
                       top: 10,
                       left: 10,
@@ -2040,10 +2043,9 @@ if (photos.length > 0) {
                         ),
                         child: DropdownButtonHideUnderline(
                           child: DropdownButton<String>(
-                            value: _allCategories
-                                    .contains(activePhoto.category)
-                                    ? activePhoto.category
-                                    : '미분류',
+                            value: _allCategories.contains(activePhoto.category)
+                                ? activePhoto.category
+                                : '미분류',
                             dropdownColor: Colors.black87,
                             icon: const Icon(Icons.arrow_drop_down,
                                 color: Colors.amber),
@@ -2177,7 +2179,6 @@ if (photos.length > 0) {
               onPressed: () => Navigator.pop(context),
             ),
             const SizedBox(width: 4),
-            // 날짜 필터 드롭다운
             ConstrainedBox(
               constraints: const BoxConstraints(minWidth: 98),
               child: DropdownButtonHideUnderline(
@@ -2222,7 +2223,6 @@ if (photos.length > 0) {
               ),
             ),
             const SizedBox(width: 4),
-            // 💡 카테고리 필터 드롭다운 추가
             ConstrainedBox(
               constraints: const BoxConstraints(minWidth: 96),
               child: DropdownButtonHideUnderline(
