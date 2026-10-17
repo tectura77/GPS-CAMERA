@@ -24,12 +24,12 @@ jobs:
         with:
           flutter-version: '3.47.7'
           channel: 'stable'
-
+      
       - name: Create Flutter Project Structure
         run: |
           cp pubspec.yaml pubspec.yaml.bak
           cp lib/main.dart main.dart.bak
-          flutter create --org com.example --project-name gps_camera .
+          flutter create --org com.example --project-name gps_camera --platforms=android .
           mv pubspec.yaml.bak pubspec.yaml
           mv main.dart.bak lib/main.dart
 
