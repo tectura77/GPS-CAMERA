@@ -94,6 +94,87 @@ class PhotoItem {
       );
 }
 
+class BlueprintItem {
+  final String id;
+  String name;
+  final String imagePath;
+  double centerLat;
+  double centerLng;
+  double baseRadius;
+  double sizeSlider;
+  double rotation;
+  double opacity;
+  bool isVisible;
+
+  Uint8List? fastBytes;
+  NOverlayImage? cachedOverlayImg;
+  double? bakedRotation;
+  double? bakedOpacity;
+
+  BlueprintItem({
+    required this.id,
+    required this.name,
+    required this.imagePath,
+    required this.centerLat,
+    required this.centerLng,
+    this.baseRadius = 200.0,
+    this.sizeSlider = 0.5,
+    this.rotation = 0.0,
+    this.opacity = 0.5,
+    this.isVisible = true,
+    this.fastBytes,
+    this.cachedOverlayImg,
+  });
+
+  double get currentRadius =>
+      baseRadius * pow(9.0, sizeSlider - 0.5).toDouble();
+
+  void setRadiusDirectly(double newRadiusMeters) {
+    final double clamped = newRadiusMeters.clamp(5.0, 5000.0);
+    double newSlider = 0.5 + log(clamped / baseRadius) / log(9.0);
+    if (newSlider < 0.05 || newSlider > 0.95) {
+      baseRadius = clamped;
+      newSlider = 0.5;
+    }
+    sizeSlider = newSlider.clamp(0.0, 1.0);
+  }
+
+  bool get needsBake =>
+      cachedOverlayImg == null ||
+      bakedRotation != rotation ||
+      bakedOpacity != opacity;
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'name': name,
+        'imagePath': imagePath,
+        'centerLat': centerLat,
+        'centerLng': centerLng,
+        'baseRadius': baseRadius,
+        'sizeSlider': sizeSlider,
+        'rotation': rotation,
+        'opacity': opacity,
+        'isVisible': isVisible,
+      };
+
+  factory BlueprintItem.fromMap(Map<String, dynamic> m, int idx) =>
+      BlueprintItem(
+        id: m['id'] as String? ??
+            'bp_${DateTime.now().millisecondsSinceEpoch}_$idx',
+        name: m['name'] as String? ?? '도면 ${idx + 1}',
+        imagePath: m['imagePath'] as String,
+        centerLat: (m['centerLat'] as num?)?.toDouble() ?? 37.4984,
+        centerLng: (m['centerLng'] as num?)?.toDouble() ?? 127.1324,
+        baseRadius: (m['baseRadius'] as num?)?.toDouble() ?? 200.0,
+        sizeSlider:
+            ((m['sizeSlider'] as num?)?.toDouble() ?? 0.5).clamp(0.0, 1.0),
+        rotation:
+            ((m['rotation'] as num?)?.toDouble() ?? 0.0).clamp(-180.0, 180.0),
+        opacity: ((m['opacity'] as num?)?.toDouble() ?? 0.5).clamp(0.1, 1.0),
+        isVisible: m['isVisible'] as bool? ?? true,
+      );
+}
+
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
   @override
@@ -621,48 +702,52 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   String _dateFilter = '전체 보기';
   String _categoryFilter = '전체 카테고리';
 
-  String? _bpPath;
-  Uint8List? _bpFastBytes; // 💡 누락되었던 고속 회전용 메모리 이미지 변수 선언 복구!
-  double? _bpLat;
-  double? _bpLng;
-  double _bpBaseRadius = 200.0;
-  double _bpSizeSlider = 0.5;
-  double _bpRotation = 0.0;
-  double _bpOpacity = 0.5;
-  bool _bpShow = true;
+  // 사용자 정의 카테고리 목록 (영구 저장 및 개별 삭제 지원)
+  final Set<String> _customCategories = {};
+
+  // 다중 도면 목록 및 현재 선택된 도면 인덱스
+  final List<BlueprintItem> _blueprints = [];
+  int _activeBpIdx = 0;
+  bool _bpGlobalShow = true;
   bool _bpEditMode = false;
 
   bool _bpTouchModeIsBlueprint = true;
+  bool _isSliderManipulating = false;
   double _nudgeStepMeters = 1.0;
   double _metersPerPixel = 0.5;
+  NLatLngBounds? _currentMapBounds;
+  Size _mapWidgetSize = const Size(360, 360);
 
   final Map<int, Offset> _activePointers = {};
-
-  NOverlayImage? _bpCachedOverlayImg;
-  bool _isRenderingBp = false;
-  bool _pendingBpRender = false;
-  bool _pendingFastQuality = false;
   bool _isExporting = false;
 
-  double get _currentBpRadius =>
-      _bpBaseRadius * pow(9.0, _bpSizeSlider - 0.5).toDouble();
+  BlueprintItem? get _activeBp =>
+      (_blueprints.isNotEmpty &&
+              _activeBpIdx >= 0 &&
+              _activeBpIdx < _blueprints.length)
+          ? _blueprints[_activeBpIdx]
+          : null;
 
-  void _setBpRadiusDirectly(double newRadiusMeters) {
-    final double clamped = newRadiusMeters.clamp(5.0, 5000.0);
-    double newSlider = 0.5 + log(clamped / _bpBaseRadius) / log(9.0);
-    if (newSlider < 0.05 || newSlider > 0.95) {
-      _bpBaseRadius = clamped;
-      newSlider = 0.5;
-    }
-    _bpSizeSlider = newSlider.clamp(0.0, 1.0);
-  }
+  // 실시간 Flutter 위젯 오버레이 사용 여부 (도면이동 모드이거나 슬라이더 조작 중일 때 지연 0초 렌더링)
+  bool get _useLiveActiveBpOverlay =>
+      _bpEditMode &&
+      _bpGlobalShow &&
+      _activeBp != null &&
+      _activeBp!.isVisible &&
+      _currentMapBounds != null &&
+      (_bpTouchModeIsBlueprint || _isSliderManipulating);
 
+  // 가나다순 정렬 + '미분류'는 항상 최하단 위치
   List<String> get _allCategories {
-    final Set<String> cats = {'미분류'};
+    final Set<String> cats = {..._customCategories};
     for (var p in widget.photos) {
-      if (p.category.isNotEmpty) cats.add(p.category);
+      if (p.category.isNotEmpty && p.category != '미분류') {
+        cats.add(p.category);
+      }
     }
-    return cats.toList()..sort();
+    final List<String> sorted = cats.toList()..sort((a, b) => a.compareTo(b));
+    sorted.add('미분류');
+    return sorted;
   }
 
   List<PhotoItem> get _visiblePhotos {
@@ -678,8 +763,78 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   @override
   void initState() {
     super.initState();
+    _restoreCategories();
     if (_visiblePhotos.isNotEmpty) {
       _selectedIdx = _visiblePhotos.length - 1;
+    }
+  }
+
+  Future<void> _restoreCategories() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final catFile = File('${dir.path}/custom_categories.json');
+      if (await catFile.exists()) {
+        final List<dynamic> list = jsonDecode(await catFile.readAsString());
+        if (mounted) {
+          setState(() {
+            for (final c in list) {
+              final s = c.toString().trim();
+              if (s.isNotEmpty && s != '미분류') {
+                _customCategories.add(s);
+              }
+            }
+          });
+        }
+      } else {
+        for (final p in widget.photos) {
+          if (p.category.isNotEmpty && p.category != '미분류') {
+            _customCategories.add(p.category);
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Restore categories error: $e');
+    }
+  }
+
+  Future<void> _persistCategories() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final catFile = File('${dir.path}/custom_categories.json');
+      for (final p in widget.photos) {
+        if (p.category.isNotEmpty && p.category != '미분류') {
+          _customCategories.add(p.category);
+        }
+      }
+      await catFile.writeAsString(jsonEncode(_customCategories.toList()));
+    } catch (e) {
+      debugPrint('Persist categories error: $e');
+    }
+  }
+
+  Future<void> _deleteCategory(String targetCat) async {
+    if (targetCat == '미분류') return;
+    setState(() {
+      _customCategories.remove(targetCat);
+      for (final p in widget.photos) {
+        if (p.category == targetCat) {
+          p.category = '미분류';
+        }
+      }
+      if (_categoryFilter == targetCat) {
+        _categoryFilter = '전체 카테고리';
+      }
+    });
+    await _persistCategories();
+    await _persistPhotoMetadata();
+    await _refreshAllOverlays(includeBlueprint: true);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("'$targetCat' 카테고리가 삭제되었습니다. (해당 사진은 미분류로 전환)"),
+          duration: const Duration(seconds: 2),
+        ),
+      );
     }
   }
 
@@ -689,46 +844,54 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       final cfgFile = File('${dir.path}/blueprint_config.json');
       if (!await cfgFile.exists()) return;
 
-      final Map<String, dynamic> data =
-          jsonDecode(await cfgFile.readAsString());
-      final String? savedPath = data['imagePath'] as String?;
+      final dynamic decoded = jsonDecode(await cfgFile.readAsString());
+      final List<BlueprintItem> loaded = [];
 
-      if (savedPath != null && File(savedPath).existsSync()) {
-        await _prepareFastBlueprintBytes(savedPath);
-        if (!mounted) return;
-        setState(() {
-          _bpPath = savedPath;
-          _bpLat = (data['centerLat'] as num?)?.toDouble();
-          _bpLng = (data['centerLng'] as num?)?.toDouble();
-          _bpBaseRadius = (data['baseRadius'] as num?)?.toDouble() ?? 200.0;
-          _bpSizeSlider =
-              ((data['sizeSlider'] as num?)?.toDouble() ?? 0.5).clamp(0.0, 1.0);
-          _bpRotation = ((data['rotation'] as num?)?.toDouble() ?? 0.0)
-              .clamp(-180.0, 180.0);
-          _bpOpacity =
-              ((data['opacity'] as num?)?.toDouble() ?? 0.5).clamp(0.1, 1.0);
-          _bpShow = data['isVisible'] as bool? ?? true;
-        });
+      if (decoded is Map<String, dynamic>) {
+        if (decoded.containsKey('blueprints') &&
+            decoded['blueprints'] is List) {
+          _bpGlobalShow = decoded['globalShow'] as bool? ?? true;
+          final List<dynamic> rawList = decoded['blueprints'] as List<dynamic>;
+          for (int i = 0; i < rawList.length; i++) {
+            final item =
+                BlueprintItem.fromMap(rawList[i] as Map<String, dynamic>, i);
+            if (File(item.imagePath).existsSync()) {
+              await _prepareFastBlueprintBytes(item);
+              loaded.add(item);
+            }
+          }
+        } else if (decoded.containsKey('imagePath')) {
+          // 구버전 단일 도면 데이터 자동 호환 복원
+          final String? savedPath = decoded['imagePath'] as String?;
+          if (savedPath != null && File(savedPath).existsSync()) {
+            final item = BlueprintItem.fromMap(decoded, 0);
+            await _prepareFastBlueprintBytes(item);
+            loaded.add(item);
+          }
+        }
       }
+
+      if (!mounted) return;
+      setState(() {
+        _blueprints
+          ..clear()
+          ..addAll(loaded);
+        if (_activeBpIdx >= _blueprints.length) {
+          _activeBpIdx = _blueprints.isNotEmpty ? _blueprints.length - 1 : 0;
+        }
+      });
     } catch (e) {
       debugPrint('Blueprint restore error: $e');
     }
   }
 
   Future<void> _persistBlueprintConfig() async {
-    if (_bpPath == null) return;
     try {
       final dir = await getApplicationDocumentsDirectory();
       final cfgFile = File('${dir.path}/blueprint_config.json');
       final Map<String, dynamic> data = {
-        'imagePath': _bpPath,
-        'centerLat': _bpLat,
-        'centerLng': _bpLng,
-        'baseRadius': _bpBaseRadius,
-        'sizeSlider': _bpSizeSlider,
-        'rotation': _bpRotation,
-        'opacity': _bpOpacity,
-        'isVisible': _bpShow,
+        'globalShow': _bpGlobalShow,
+        'blueprints': _blueprints.map((b) => b.toMap()).toList(),
       };
       await cfgFile.writeAsString(jsonEncode(data));
     } catch (e) {
@@ -752,42 +915,94 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     await showDialog(
       context: context,
       builder: (ctx) {
-        return AlertDialog(
+        return Dialog(
           backgroundColor: Colors.grey[900],
-          title: const Text('새 카테고리 직접 등록',
-              style: TextStyle(color: Colors.amber, fontSize: 16)),
-          content: TextField(
-            controller: textCtrl,
-            autofocus: true,
-            style: const TextStyle(color: Colors.white),
-            decoration: const InputDecoration(
-              hintText: '예: 철근공사, 108동 마감 등',
-              hintStyle: TextStyle(color: Colors.white54),
-              enabledBorder: UnderlineInputBorder(
-                  borderSide: BorderSide(color: Colors.amber)),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 65),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  '새 카테고리 입력',
+                  style: TextStyle(
+                    color: Colors.amber,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: 165,
+                  child: TextField(
+                    controller: textCtrl,
+                    autofocus: true,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      contentPadding:
+                          EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                      hintText: '예: 철근, 수장, 108동',
+                      hintStyle:
+                          TextStyle(color: Colors.white54, fontSize: 11.5),
+                      enabledBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(color: Colors.amber),
+                      ),
+                      focusedBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(color: Colors.amber, width: 1.5),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(44, 30),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('취소',
+                          style:
+                              TextStyle(color: Colors.white60, fontSize: 12)),
+                    ),
+                    const SizedBox(width: 4),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.amber,
+                        minimumSize: const Size(54, 30),
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                      ),
+                      onPressed: () {
+                        final String newCat = textCtrl.text.trim();
+                        if (newCat.isNotEmpty) {
+                          setState(() {
+                            if (newCat != '미분류') {
+                              _customCategories.add(newCat);
+                            }
+                            photo.category = newCat;
+                          });
+                          _persistCategories();
+                          _persistPhotoMetadata();
+                        }
+                        Navigator.pop(ctx);
+                      },
+                      child: const Text('추가',
+                          style: TextStyle(
+                              color: Colors.black,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('취소', style: TextStyle(color: Colors.white60)),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
-              onPressed: () {
-                final String newCat = textCtrl.text.trim();
-                if (newCat.isNotEmpty) {
-                  setState(() {
-                    photo.category = newCat;
-                  });
-                  _persistPhotoMetadata();
-                }
-                Navigator.pop(ctx);
-              },
-              child:
-                  const Text('추가 및 적용', style: TextStyle(color: Colors.black)),
-            ),
-          ],
         );
       },
     );
@@ -816,36 +1031,42 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  Future<void> _updateMetersPerPixel() async {
+  Future<void> _updateMapViewportInfo() async {
     if (_mapCtrl == null) return;
     try {
+      final bounds = await _mapCtrl!.getContentBounds();
       final camPos = await _mapCtrl!.getCameraPosition();
       final double latRad = camPos.target.latitude * pi / 180.0;
-      _metersPerPixel =
-          (156543.03392 * cos(latRad).abs()) / pow(2.0, camPos.zoom);
+      if (mounted) {
+        setState(() {
+          _currentMapBounds = bounds;
+          _metersPerPixel =
+              (156543.03392 * cos(latRad).abs()) / pow(2.0, camPos.zoom);
+        });
+      }
     } catch (_) {
       _metersPerPixel = 0.5;
     }
   }
 
-  Future<void> _prepareFastBlueprintBytes(String path) async {
+  Future<void> _prepareFastBlueprintBytes(BlueprintItem item) async {
     try {
-      final raw = await File(path).readAsBytes();
+      final raw = await File(item.imagePath).readAsBytes();
       final decoded = img.decodeImage(raw);
       if (decoded != null) {
-        final resized = (decoded.width > 420 || decoded.height > 420)
+        final resized = (decoded.width > 480 || decoded.height > 480)
             ? img.copyResize(
                 decoded,
-                width: decoded.width >= decoded.height ? 420 : null,
-                height: decoded.height > decoded.width ? 420 : null,
+                width: decoded.width >= decoded.height ? 480 : null,
+                height: decoded.height > decoded.width ? 480 : null,
               )
             : decoded;
-        _bpFastBytes = Uint8List.fromList(img.encodePng(resized, level: 1));
+        item.fastBytes = Uint8List.fromList(img.encodePng(resized, level: 1));
       } else {
-        _bpFastBytes = raw;
+        item.fastBytes = raw;
       }
-      if (mounted && _bpFastBytes != null) {
-        await precacheImage(MemoryImage(_bpFastBytes!), context);
+      if (mounted && item.fastBytes != null) {
+        await precacheImage(MemoryImage(item.fastBytes!), context);
       }
     } catch (e) {
       debugPrint('Fast blueprint bytes error: $e');
@@ -860,12 +1081,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
       final dir = await getApplicationDocumentsDirectory();
       final String ext = picked.path.split('.').last;
-      final String destPath =
-          '${dir.path}/bp_saved_${DateTime.now().millisecondsSinceEpoch}.$ext';
+      final int nowMs = DateTime.now().millisecondsSinceEpoch;
+      final String destPath = '${dir.path}/bp_saved_$nowMs.$ext';
       await File(picked.path).copy(destPath);
-
-      await _prepareFastBlueprintBytes(destPath);
-      if (!mounted) return;
 
       double centerLat = _visiblePhotos.isNotEmpty
           ? _visiblePhotos[_selectedIdx].lat
@@ -881,115 +1099,153 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       }
 
       final double screen80Rad = await _calcScreen80Radius();
-      await _updateMetersPerPixel();
+      await _updateMapViewportInfo();
+
+      final newBp = BlueprintItem(
+        id: 'bp_$nowMs',
+        name: '도면 ${_blueprints.length + 1}',
+        imagePath: destPath,
+        centerLat: centerLat,
+        centerLng: centerLng,
+        baseRadius: screen80Rad,
+        sizeSlider: 0.5,
+        rotation: 0.0,
+        opacity: 0.5,
+        isVisible: true,
+      );
+
+      await _prepareFastBlueprintBytes(newBp);
+      if (!mounted) return;
 
       setState(() {
-        _bpPath = destPath;
-        _bpLat = centerLat;
-        _bpLng = centerLng;
-        _bpBaseRadius = screen80Rad;
-        _bpSizeSlider = 0.5;
-        _bpOpacity = 0.5;
-        _bpRotation = 0.0;
-        _bpShow = true;
+        _blueprints.add(newBp);
+        _activeBpIdx = _blueprints.length - 1;
+        _bpGlobalShow = true;
         _bpEditMode = true;
         _bpTouchModeIsBlueprint = true;
-        _bpCachedOverlayImg = null;
       });
 
       await _persistBlueprintConfig();
-      await _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
+      await _refreshAllOverlays(includeBlueprint: true);
     } catch (e) {
       debugPrint('Import blueprint error: $e');
     }
   }
 
-  Future<void> _renderBlueprintOnMap({
-    bool rebuildBitmap = false,
-    bool fastQuality = false,
-  }) async {
-    if (_mapCtrl == null) return;
-
-    if (_bpPath == null || !_bpShow || _bpLat == null || _bpLng == null) {
-      await _refreshAllOverlays(includeBlueprint: false);
-      return;
-    }
-
-    if (rebuildBitmap) {
-      if (_isRenderingBp) {
-        _pendingBpRender = true;
-        _pendingFastQuality = fastQuality;
-        return;
-      }
-      _isRenderingBp = true;
-    }
-
-    try {
-      bool useFast = fastQuality;
-      do {
-        _pendingBpRender = false;
-        if (rebuildBitmap || _bpCachedOverlayImg == null) {
-          if (!mounted) return;
-          final double boxSize = useFast ? 210.0 : 360.0;
-          final double padSize = boxSize * (16.0 / 360.0);
-
-          final Widget imgWidget = _bpFastBytes != null
-              ? Image.memory(
-                  _bpFastBytes!,
-                  fit: BoxFit.contain,
-                  gaplessPlayback: true,
-                )
-              : Image.file(
-                  File(_bpPath!),
-                  fit: BoxFit.contain,
-                  gaplessPlayback: true,
-                );
-
-          _bpCachedOverlayImg = await NOverlayImage.fromWidget(
-            widget: Opacity(
-              opacity: _bpOpacity.clamp(0.1, 1.0),
-              child: Transform.rotate(
-                angle: _bpRotation * (pi / 180.0),
-                child: Padding(
-                  padding: EdgeInsets.all(padSize),
-                  child: imgWidget,
-                ),
-              ),
-            ),
-            size: Size(boxSize, boxSize),
-            context: context,
-          );
+  Future<void> _deleteBlueprintAt(int idx) async {
+    if (idx < 0 || idx >= _blueprints.length) return;
+    final removed = _blueprints[idx];
+    setState(() {
+      _blueprints.removeAt(idx);
+      for (int i = 0; i < _blueprints.length; i++) {
+        if (_blueprints[i].name.startsWith('도면 ')) {
+          _blueprints[i].name = '도면 ${i + 1}';
         }
+      }
+      if (_blueprints.isEmpty) {
+        _activeBpIdx = 0;
+        _bpEditMode = false;
+      } else if (_activeBpIdx >= _blueprints.length) {
+        _activeBpIdx = _blueprints.length - 1;
+      }
+    });
+    try {
+      final f = File(removed.imagePath);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    await _persistBlueprintConfig();
+    await _refreshAllOverlays(includeBlueprint: true);
+  }
 
-        final double rad = _currentBpRadius;
-        final double dLat = rad / 111320.0;
-        final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
-        final double dLng = rad / (111320.0 * cosLat);
+  Future<void> _bakeSingleBlueprintOverlay(BlueprintItem bp) async {
+    if (!mounted) return;
+    const double boxSize = 360.0;
+    const double padSize = 16.0;
 
-        final bounds = NLatLngBounds(
-          southWest: NLatLng(_bpLat! - dLat, _bpLng! - dLng),
-          northEast: NLatLng(_bpLat! + dLat, _bpLng! + dLng),
-        );
+    final Widget imgWidget = bp.fastBytes != null
+        ? Image.memory(
+            bp.fastBytes!,
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+          )
+        : Image.file(
+            File(bp.imagePath),
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+          );
 
-        final groundOverlay = NGroundOverlay(
-          id: 'blueprint_ground_overlay',
-          bounds: bounds,
-          image: _bpCachedOverlayImg!,
-        );
+    bp.cachedOverlayImg = await NOverlayImage.fromWidget(
+      widget: Opacity(
+        opacity: bp.opacity.clamp(0.1, 1.0),
+        child: Transform.rotate(
+          angle: bp.rotation * (pi / 180.0),
+          child: Padding(
+            padding: const EdgeInsets.all(padSize),
+            child: imgWidget,
+          ),
+        ),
+      ),
+      size: const Size(boxSize, boxSize),
+      context: context,
+    );
+    bp.bakedRotation = bp.rotation;
+    bp.bakedOpacity = bp.opacity;
+  }
 
-        await _mapCtrl!.addOverlay(groundOverlay);
-        useFast = _pendingFastQuality;
-      } while (_pendingBpRender && mounted);
-    } catch (e) {
-      debugPrint('Render blueprint error: $e');
-    } finally {
-      _isRenderingBp = false;
+  Future<void> _syncBlueprintsToMap() async {
+    if (_mapCtrl == null || !_bpGlobalShow) return;
+
+    for (int i = 0; i < _blueprints.length; i++) {
+      final bp = _blueprints[i];
+      if (!bp.isVisible) continue;
+      // 실시간 조작 중인 활성 도면은 Flutter 위젯이 즉시 그리므로 지도 오버레이 생략
+      if (_useLiveActiveBpOverlay && i == _activeBpIdx) continue;
+
+      if (bp.needsBake) {
+        await _bakeSingleBlueprintOverlay(bp);
+      }
+      if (bp.cachedOverlayImg == null) continue;
+
+      final double rad = bp.currentRadius;
+      final double dLat = rad / 111320.0;
+      final double cosLat =
+          cos(bp.centerLat * pi / 180.0).abs().clamp(0.1, 1.0);
+      final double dLng = rad / (111320.0 * cosLat);
+
+      final bounds = NLatLngBounds(
+        southWest: NLatLng(bp.centerLat - dLat, bp.centerLng - dLng),
+        northEast: NLatLng(bp.centerLat + dLat, bp.centerLng + dLng),
+      );
+
+      final groundOverlay = NGroundOverlay(
+        id: bp.id,
+        bounds: bounds,
+        image: bp.cachedOverlayImg!,
+      );
+      await _mapCtrl!.addOverlay(groundOverlay);
     }
   }
 
   void _handleBlueprintPointerMove(PointerMoveEvent event) {
     if (!_activePointers.containsKey(event.pointer)) return;
-    if (_bpLat == null || _bpLng == null) return;
+    final bp = _activeBp;
+    if (bp == null || !bp.isVisible) return;
+
+    // 화면 픽셀 대비 위경도 변환 비율 (지연 없이 손가락과 1:1 이동)
+    double latPerPx = (_metersPerPixel / 111320.0);
+    final double cosLat = cos(bp.centerLat * pi / 180.0).abs().clamp(0.1, 1.0);
+    double lngPerPx = _metersPerPixel / (111320.0 * cosLat);
+
+    if (_currentMapBounds != null &&
+        _mapWidgetSize.width > 10 &&
+        _mapWidgetSize.height > 10) {
+      latPerPx = (_currentMapBounds!.northEast.latitude -
+              _currentMapBounds!.southWest.latitude) /
+          _mapWidgetSize.height;
+      lngPerPx = (_currentMapBounds!.northEast.longitude -
+              _currentMapBounds!.southWest.longitude) /
+          _mapWidgetSize.width;
+    }
 
     if (_activePointers.length == 1) {
       final Offset prev = _activePointers[event.pointer]!;
@@ -998,18 +1254,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
       final double dx = curr.dx - prev.dx;
       final double dy = curr.dy - prev.dy;
-      final double northM = -dy * _metersPerPixel;
-      final double eastM = dx * _metersPerPixel;
-
-      final double dLat = northM / 111320.0;
-      final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
-      final double dLng = eastM / (111320.0 * cosLat);
 
       setState(() {
-        _bpLat = _bpLat! + dLat;
-        _bpLng = _bpLng! + dLng;
+        bp.centerLat -= dy * latPerPx;
+        bp.centerLng += dx * lngPerPx;
       });
-      _renderBlueprintOnMap(rebuildBitmap: false);
     } else if (_activePointers.length >= 2) {
       final List<int> keys = _activePointers.keys.toList();
       final int k1 = keys[0];
@@ -1025,12 +1274,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       final Offset newCenter = (newP1 + newP2) / 2.0;
       final double dx = newCenter.dx - oldCenter.dx;
       final double dy = newCenter.dy - oldCenter.dy;
-      final double northM = -dy * _metersPerPixel;
-      final double eastM = dx * _metersPerPixel;
-
-      final double dLat = northM / 111320.0;
-      final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
-      final double dLng = eastM / (111320.0 * cosLat);
 
       final double oldDist = (oldP2 - oldP1).distance;
       final double newDist = (newP2 - newP1).distance;
@@ -1041,41 +1284,40 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       if (angleDiffDeg > 180.0) angleDiffDeg -= 360.0;
       if (angleDiffDeg < -180.0) angleDiffDeg += 360.0;
 
-      bool rotated = false;
       setState(() {
-        _bpLat = _bpLat! + dLat;
-        _bpLng = _bpLng! + dLng;
+        bp.centerLat -= dy * latPerPx;
+        bp.centerLng += dx * lngPerPx;
 
         if (oldDist > 8.0 && newDist > 8.0) {
           final double scaleRatio = newDist / oldDist;
           if ((scaleRatio - 1.0).abs() > 0.001) {
-            _setBpRadiusDirectly(_currentBpRadius * scaleRatio);
+            bp.setRadiusDirectly(bp.currentRadius * scaleRatio);
           }
         }
 
-        if (angleDiffDeg.abs() > 0.02) {
-          double nextRot = _bpRotation + angleDiffDeg;
+        if (angleDiffDeg.abs() > 0.005) {
+          double nextRot = bp.rotation + angleDiffDeg;
           nextRot = ((nextRot + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
-          _bpRotation = nextRot;
-          rotated = true;
+          bp.rotation = nextRot;
         }
       });
-
-      _renderBlueprintOnMap(rebuildBitmap: rotated, fastQuality: true);
     }
   }
 
   void _shiftBlueprintMeters(double northM, double eastM) {
-    if (_bpLat == null || _bpLng == null) return;
+    final bp = _activeBp;
+    if (bp == null) return;
     final double dLat = northM / 111320.0;
-    final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
+    final double cosLat = cos(bp.centerLat * pi / 180.0).abs().clamp(0.1, 1.0);
     final double dLng = eastM / (111320.0 * cosLat);
 
     setState(() {
-      _bpLat = _bpLat! + dLat;
-      _bpLng = _bpLng! + dLng;
+      bp.centerLat += dLat;
+      bp.centerLng += dLng;
     });
-    _renderBlueprintOnMap(rebuildBitmap: false);
+    if (!_useLiveActiveBpOverlay) {
+      _syncBlueprintsToMap();
+    }
     _persistBlueprintConfig();
   }
 
@@ -1122,7 +1364,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                         color: Colors.white, fontWeight: FontWeight.bold),
                   ),
                   subtitle: Text(
-                    '현재 필터(날짜: $_dateFilter, 카테고리: $_categoryFilter) 상태 + 도면 불투명 100%로 내보내기',
+                    '현재 필터(날짜: $_dateFilter, 카테고리: $_categoryFilter) 상태 + 켜진 도면 불투명 100%로 내보내기',
                     style:
                         const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
@@ -1140,7 +1382,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                         color: Colors.white, fontWeight: FontWeight.bold),
                   ),
                   subtitle: const Text(
-                    '현재 필터링된 원본 사진들과 도면 설정 데이터를 통째로 묶어 전달',
+                    '현재 필터링된 원본 사진들과 저장된 모든 도면 설정 데이터를 통째로 묶어 전달',
                     style: TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   onTap: () {
@@ -1173,9 +1415,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // 💡 HTML 내보내기: 바탕 지도는 그대로 켜두고, 도면은 불투명 100%(opacity: 1.0)로 선명하게 내보냄
   Future<void> _exportAsHtmlViewer() async {
-    if (_visiblePhotos.isEmpty && _bpPath == null) {
+    final visibleBps =
+        _bpGlobalShow ? _blueprints.where((b) => b.isVisible).toList() : [];
+    if (_visiblePhotos.isEmpty && visibleBps.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('내보낼 사진이나 도면이 없습니다.')),
       );
@@ -1208,31 +1451,29 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         });
       }
 
-      Map<String, dynamic>? bpJson;
-      if (_bpPath != null &&
-          File(_bpPath!).existsSync() &&
-          _bpLat != null &&
-          _bpLng != null &&
-          _bpShow) {
-        final bpBytes = await File(_bpPath!).readAsBytes();
-        final String ext = _bpPath!.split('.').last.toLowerCase();
+      final List<Map<String, dynamic>> bpJsonList = [];
+      for (final bp in visibleBps) {
+        if (!File(bp.imagePath).existsSync()) continue;
+        final bpBytes = await File(bp.imagePath).readAsBytes();
+        final String ext = bp.imagePath.split('.').last.toLowerCase();
         final String mime = ext == 'png' ? 'image/png' : 'image/jpeg';
-        final double rad = _currentBpRadius;
+        final double rad = bp.currentRadius;
         final double dLat = rad / 111320.0;
-        final double cosLat = cos(_bpLat! * pi / 180.0).abs().clamp(0.1, 1.0);
+        final double cosLat =
+            cos(bp.centerLat * pi / 180.0).abs().clamp(0.1, 1.0);
         final double dLng = rad / (111320.0 * cosLat);
 
-        bpJson = {
+        bpJsonList.add({
           'b64': 'data:$mime;base64,${base64Encode(bpBytes)}',
-          'lat': _bpLat,
-          'lng': _bpLng,
-          'swLat': _bpLat! - dLat,
-          'swLng': _bpLng! - dLng,
-          'neLat': _bpLat! + dLat,
-          'neLng': _bpLng! + dLng,
-          'rotation': _bpRotation,
-          'opacity': 1.0, // 💡 HTML 내보내기 시 도면을 불투명 100%로 고정!
-        };
+          'lat': bp.centerLat,
+          'lng': bp.centerLng,
+          'swLat': bp.centerLat - dLat,
+          'swLng': bp.centerLng - dLng,
+          'neLat': bp.centerLat + dLat,
+          'neLng': bp.centerLng + dLng,
+          'rotation': bp.rotation,
+          'opacity': 1.0,
+        });
       }
 
       double currentMapZoom = 18.0;
@@ -1244,7 +1485,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       }
 
       final String photosJs = jsonEncode(encodedPhotos);
-      final String bpJs = jsonEncode(bpJson);
+      final String bpsJs = jsonEncode(bpJsonList);
 
       final String htmlContent = '''
 <!DOCTYPE html>
@@ -1284,7 +1525,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 <div id="thumbs"></div>
 <script>
 const photos = $photosJs;
-const bp = $bpJs;
+const bps = $bpsJs;
 let selectedIdx = photos.length > 0 ? 0 : 0;
 
 const photoPane = document.getElementById('photo-pane');
@@ -1359,8 +1600,8 @@ photoPane.addEventListener('wheel', (e) => {
   applyPhotoTransform();
 }, { passive: false });
 
-const initLat = photos.length > 0 ? photos[selectedIdx].lat : (bp ? bp.lat : 37.4984);
-const initLng = photos.length > 0 ? photos[selectedIdx].lng : (bp ? bp.lng : 127.1324);
+const initLat = photos.length > 0 ? photos[selectedIdx].lat : (bps.length > 0 ? bps[0].lat : 37.4984);
+const initLng = photos.length > 0 ? photos[selectedIdx].lng : (bps.length > 0 ? bps[0].lng : 127.1324);
 
 const map = L.map('map-pane', { maxZoom: 22 }).setView([initLat, initLng], ${currentMapZoom.toStringAsFixed(1)});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -1369,8 +1610,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap'
 }).addTo(map);
 
-// 💡 바탕 지도는 켜두고, 도면은 불투명 100%(globalAlpha = 1.0)로 렌더링!
-if (bp) {
+bps.forEach((bp) => {
   const bpImg = new Image();
   bpImg.onload = () => {
     const size = 720;
@@ -1382,7 +1622,7 @@ if (bp) {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, size, size);
     ctx.save();
-    ctx.globalAlpha = 1.0; // 불투명도 100% 고정
+    ctx.globalAlpha = 1.0;
     ctx.translate(size / 2, size / 2);
     ctx.rotate(bp.rotation * Math.PI / 180.0);
     const scale = Math.min(inner / bpImg.width, inner / bpImg.height);
@@ -1396,7 +1636,7 @@ if (bp) {
     L.imageOverlay(bakedUrl, bounds, { opacity: 1.0, interactive: false }).addTo(map);
   };
   bpImg.src = bp.b64;
-}
+});
 
 const markersLayer = L.layerGroup().addTo(map);
 
@@ -1506,7 +1746,7 @@ if (photos.length > 0) {
   }
 
   Future<void> _exportAsZipArchive() async {
-    if (_visiblePhotos.isEmpty && _bpPath == null) {
+    if (_visiblePhotos.isEmpty && _blueprints.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('내보낼 사진이나 도면이 없습니다.')),
       );
@@ -1535,24 +1775,25 @@ if (photos.length > 0) {
       archive.addFile(
           ArchiveFile('photos_meta.json', metaBytes.length, metaBytes));
 
-      if (_bpPath != null && File(_bpPath!).existsSync()) {
-        final String bpName = _bpPath!.split('/').last;
-        final Uint8List bpBytes = await File(_bpPath!).readAsBytes();
+      final List<Map<String, dynamic>> exportedBps = [];
+      for (final bp in _blueprints) {
+        final f = File(bp.imagePath);
+        if (!f.existsSync()) continue;
+        final String bpName = bp.imagePath.split('/').last;
+        final Uint8List bpBytes = await f.readAsBytes();
         archive.addFile(
             ArchiveFile('blueprint/$bpName', bpBytes.length, bpBytes));
 
-        final Map<String, dynamic> bpCfg = {
-          'fileName': bpName,
-          'centerLat': _bpLat,
-          'centerLng': _bpLng,
-          'baseRadius': _bpBaseRadius,
-          'sizeSlider': _bpSizeSlider,
-          'rotation': _bpRotation,
-          'opacity': _bpOpacity,
-          'isVisible': _bpShow,
-        };
-        final Uint8List cfgBytes =
-            Uint8List.fromList(utf8.encode(jsonEncode(bpCfg)));
+        final bpMap = bp.toMap();
+        bpMap['fileName'] = bpName;
+        exportedBps.add(bpMap);
+      }
+
+      if (exportedBps.isNotEmpty) {
+        final Uint8List cfgBytes = Uint8List.fromList(utf8.encode(jsonEncode({
+          'globalShow': _bpGlobalShow,
+          'blueprints': exportedBps,
+        })));
         archive.addFile(
             ArchiveFile('blueprint_config.json', cfgBytes.length, cfgBytes));
       }
@@ -1593,9 +1834,22 @@ if (photos.length > 0) {
 
     setState(() => _isExporting = true);
     try {
+      // 스냅샷 촬영 전 모든 도면을 지도 네이티브 오버레이로 동기화
+      final bool prevEdit = _bpEditMode;
+      if (prevEdit) {
+        setState(() => _bpEditMode = false);
+        await _refreshAllOverlays(includeBlueprint: true);
+        await Future.delayed(const Duration(milliseconds: 120));
+      }
+
       final PhotoItem currentPhoto =
           _visiblePhotos[_selectedIdx.clamp(0, _visiblePhotos.length - 1)];
       final File mapSnapFile = await _mapCtrl!.takeSnapshot();
+
+      if (prevEdit && mounted) {
+        setState(() => _bpEditMode = true);
+        await _refreshAllOverlays(includeBlueprint: true);
+      }
 
       final Uint8List photoBytes = await File(currentPhoto.path).readAsBytes();
       final Uint8List mapBytes = await mapSnapFile.readAsBytes();
@@ -1672,7 +1926,96 @@ if (photos.length > 0) {
     );
   }
 
+  // 실시간 지연 0초 도면 회전·이동·확대 오버레이 위젯
+  Widget _buildLiveBlueprintOverlayWidget(Size mapSize) {
+    final bp = _activeBp;
+    final bounds = _currentMapBounds;
+    if (bp == null || bounds == null || !bp.isVisible) {
+      return const SizedBox.shrink();
+    }
+
+    final double rad = bp.currentRadius;
+    final double dLat = rad / 111320.0;
+    final double cosLat = cos(bp.centerLat * pi / 180.0).abs().clamp(0.1, 1.0);
+    final double dLng = rad / (111320.0 * cosLat);
+
+    final double swLat = bp.centerLat - dLat;
+    final double neLat = bp.centerLat + dLat;
+    final double swLng = bp.centerLng - dLng;
+    final double neLng = bp.centerLng + dLng;
+
+    final double latSpan =
+        (bounds.northEast.latitude - bounds.southWest.latitude).abs();
+    final double lngSpan =
+        (bounds.northEast.longitude - bounds.southWest.longitude).abs();
+    if (latSpan < 1e-9 || lngSpan < 1e-9) return const SizedBox.shrink();
+
+    final double left =
+        ((swLng - bounds.southWest.longitude) / lngSpan) * mapSize.width;
+    final double right =
+        ((neLng - bounds.southWest.longitude) / lngSpan) * mapSize.width;
+    final double top =
+        ((bounds.northEast.latitude - neLat) / latSpan) * mapSize.height;
+    final double bottom =
+        ((bounds.northEast.latitude - swLat) / latSpan) * mapSize.height;
+
+    final double boxW = (right - left).abs();
+    final double boxH = (bottom - top).abs();
+    if (boxW < 2 || boxH < 2) return const SizedBox.shrink();
+
+    final Widget imgWidget = bp.fastBytes != null
+        ? Image.memory(
+            bp.fastBytes!,
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+          )
+        : Image.file(
+            File(bp.imagePath),
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+          );
+
+    return Positioned(
+      left: left,
+      top: top,
+      width: boxW,
+      height: boxH,
+      child: IgnorePointer(
+        child: Opacity(
+          opacity: bp.opacity.clamp(0.1, 1.0),
+          child: Transform.rotate(
+            angle: bp.rotation * (pi / 180.0),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: boxW * (16.0 / 360.0),
+                vertical: boxH * (16.0 / 360.0),
+              ),
+              child: imgWidget,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildBlueprintControlBox() {
+    final bp = _activeBp;
+    if (bp == null) {
+      return Container(
+        color: Colors.grey[900],
+        alignment: Alignment.center,
+        child: ElevatedButton.icon(
+          onPressed: _importBlueprintFromGallery,
+          icon: const Icon(Icons.add_photo_alternate),
+          label: const Text('도면 추가하기'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.amber,
+            foregroundColor: Colors.black,
+          ),
+        ),
+      );
+    }
+
     return Container(
       color: Colors.grey[900],
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1680,6 +2023,123 @@ if (photos.length > 0) {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // 다중 도면 선택 · 개별 켜기/끄기 · 개별 삭제 바
+            SizedBox(
+              height: 32,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  ...List.generate(_blueprints.length, (i) {
+                    final item = _blueprints[i];
+                    final bool isSel = i == _activeBpIdx;
+                    return Container(
+                      margin: const EdgeInsets.only(right: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      decoration: BoxDecoration(
+                        color: isSel
+                            ? Colors.amber.withOpacity(0.22)
+                            : Colors.white10,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: isSel ? Colors.amber : Colors.white24,
+                          width: isSel ? 1.5 : 1.0,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          InkWell(
+                            onTap: () async {
+                              setState(() {
+                                item.isVisible = !item.isVisible;
+                              });
+                              await _persistBlueprintConfig();
+                              await _refreshAllOverlays(includeBlueprint: true);
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.only(right: 4),
+                              child: Icon(
+                                item.isVisible
+                                    ? Icons.visibility
+                                    : Icons.visibility_off,
+                                size: 15,
+                                color: item.isVisible
+                                    ? Colors.lightGreenAccent
+                                    : Colors.white38,
+                              ),
+                            ),
+                          ),
+                          InkWell(
+                            onTap: () async {
+                              if (_activeBpIdx == i) return;
+                              await _updateMapViewportInfo();
+                              setState(() {
+                                _activeBpIdx = i;
+                              });
+                              await _refreshAllOverlays(includeBlueprint: true);
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 4, vertical: 4),
+                              child: Text(
+                                item.name,
+                                style: TextStyle(
+                                  color: isSel ? Colors.amber : Colors.white,
+                                  fontSize: 11.5,
+                                  fontWeight: isSel
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                ),
+                              ),
+                            ),
+                          ),
+                          InkWell(
+                            onTap: () => _deleteBlueprintAt(i),
+                            child: const Padding(
+                              padding: EdgeInsets.only(left: 4),
+                              child: Icon(
+                                Icons.close,
+                                size: 14,
+                                color: Colors.redAccent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+                  InkWell(
+                    onTap: _importBlueprintFromGallery,
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.amber.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.amber),
+                      ),
+                      alignment: Alignment.center,
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.add, size: 14, color: Colors.amber),
+                          SizedBox(width: 2),
+                          Text(
+                            '도면추가',
+                            style: TextStyle(
+                              color: Colors.amber,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
             Row(
               children: [
                 Expanded(
@@ -1687,8 +2147,10 @@ if (photos.length > 0) {
                     children: [
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: () {
+                          onPressed: () async {
+                            await _updateMapViewportInfo();
                             setState(() => _bpTouchModeIsBlueprint = true);
+                            await _refreshAllOverlays(includeBlueprint: true);
                           },
                           icon: const Icon(Icons.pan_tool_alt, size: 15),
                           label: const Text('도면이동',
@@ -1708,8 +2170,10 @@ if (photos.length > 0) {
                       const SizedBox(width: 6),
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: () {
+                          onPressed: () async {
                             setState(() => _bpTouchModeIsBlueprint = false);
+                            await _persistBlueprintConfig();
+                            await _refreshAllOverlays(includeBlueprint: true);
                           },
                           icon: const Icon(Icons.map_outlined, size: 15),
                           label: const Text('지도이동',
@@ -1732,14 +2196,16 @@ if (photos.length > 0) {
                 const SizedBox(width: 8),
                 ElevatedButton.icon(
                   onPressed: () async {
-                    await _renderBlueprintOnMap(
-                        rebuildBitmap: true, fastQuality: false);
+                    setState(() {
+                      _bpEditMode = false;
+                      _isSliderManipulating = false;
+                    });
                     await _persistBlueprintConfig();
-                    setState(() => _bpEditMode = false);
+                    await _refreshAllOverlays(includeBlueprint: true);
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('도면이 영구 저장되었습니다!'),
+                          content: Text('모든 도면 설정이 영구 저장되었습니다!'),
                         ),
                       );
                     }
@@ -1760,8 +2226,8 @@ if (photos.length > 0) {
               padding: const EdgeInsets.symmetric(vertical: 3),
               child: Text(
                 _bpTouchModeIsBlueprint
-                    ? '💡 [도면이동 켜짐] 지도 위에서 한 손가락 끌기(이동), 두 손가락 벌리기(확대/축소) 및 즉시 회전이 가능합니다.'
-                    : '💡 [지도이동 켜짐] 도면은 고정된 채로 지도를 두 손가락으로 이동·확대할 수 있습니다.',
+                    ? '💡 [${bp.name} 이동 켜짐] 한 손가락 끌기(이동), 두 손가락 벌리기(확대/축소) 및 회전이 지연 없이 즉시 반영됩니다.'
+                    : '💡 [지도이동 켜짐] 도면은 고정된 채로 배경 지도를 이동·확대할 수 있습니다.',
                 style: TextStyle(
                   color: _bpTouchModeIsBlueprint
                       ? Colors.amberAccent
@@ -1779,13 +2245,16 @@ if (photos.length > 0) {
                     if (_mapCtrl == null) return;
                     final pos = await _mapCtrl!.getCameraPosition();
                     final rad80 = await _calcScreen80Radius();
+                    await _updateMapViewportInfo();
                     setState(() {
-                      _bpLat = pos.target.latitude;
-                      _bpLng = pos.target.longitude;
-                      _bpBaseRadius = rad80;
-                      _bpSizeSlider = 0.5;
+                      bp.centerLat = pos.target.latitude;
+                      bp.centerLng = pos.target.longitude;
+                      bp.baseRadius = rad80;
+                      bp.sizeSlider = 0.5;
                     });
-                    await _renderBlueprintOnMap(rebuildBitmap: false);
+                    if (!_useLiveActiveBpOverlay) {
+                      await _syncBlueprintsToMap();
+                    }
                     await _persistBlueprintConfig();
                   },
                   icon: const Icon(Icons.center_focus_strong, size: 14),
@@ -1854,49 +2323,61 @@ if (photos.length > 0) {
                 SizedBox(
                   width: 78,
                   child: Text(
-                    '크기:${_currentBpRadius.toStringAsFixed(1)}m',
+                    '크기:${bp.currentRadius.toStringAsFixed(1)}m',
                     style: const TextStyle(color: Colors.white, fontSize: 11),
                   ),
                 ),
                 _fineStepBtn('-5m', () {
                   setState(() {
-                    _setBpRadiusDirectly(_currentBpRadius - 5.0);
+                    bp.setRadiusDirectly(bp.currentRadius - 5.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: false);
+                  if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
                   _persistBlueprintConfig();
                 }),
                 _fineStepBtn('-0.5', () {
                   setState(() {
-                    _setBpRadiusDirectly(_currentBpRadius - 0.5);
+                    bp.setRadiusDirectly(bp.currentRadius - 0.5);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: false);
+                  if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
                   _persistBlueprintConfig();
                 }),
                 Expanded(
                   child: Slider(
-                    value: _bpSizeSlider.clamp(0.0, 1.0),
+                    value: bp.sizeSlider.clamp(0.0, 1.0),
                     min: 0.0,
                     max: 1.0,
                     activeColor: Colors.amber,
-                    onChanged: (val) {
-                      setState(() => _bpSizeSlider = val);
-                      _renderBlueprintOnMap(rebuildBitmap: false);
+                    onChangeStart: (_) async {
+                      if (!_bpTouchModeIsBlueprint) {
+                        await _updateMapViewportInfo();
+                        setState(() => _isSliderManipulating = true);
+                        await _refreshAllOverlays(includeBlueprint: true);
+                      }
                     },
-                    onChangeEnd: (_) => _persistBlueprintConfig(),
+                    onChanged: (val) {
+                      setState(() => bp.sizeSlider = val);
+                    },
+                    onChangeEnd: (_) async {
+                      if (_isSliderManipulating) {
+                        setState(() => _isSliderManipulating = false);
+                        await _refreshAllOverlays(includeBlueprint: true);
+                      }
+                      await _persistBlueprintConfig();
+                    },
                   ),
                 ),
                 _fineStepBtn('+0.5', () {
                   setState(() {
-                    _setBpRadiusDirectly(_currentBpRadius + 0.5);
+                    bp.setRadiusDirectly(bp.currentRadius + 0.5);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: false);
+                  if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
                   _persistBlueprintConfig();
                 }),
                 _fineStepBtn('+5m', () {
                   setState(() {
-                    _setBpRadiusDirectly(_currentBpRadius + 5.0);
+                    bp.setRadiusDirectly(bp.currentRadius + 5.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: false);
+                  if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
                   _persistBlueprintConfig();
                 }),
               ],
@@ -1906,54 +2387,61 @@ if (photos.length > 0) {
                 SizedBox(
                   width: 78,
                   child: Text(
-                    '회전:${_bpRotation.toStringAsFixed(1)}°',
+                    '회전:${bp.rotation.toStringAsFixed(1)}°',
                     style: const TextStyle(color: Colors.white, fontSize: 11),
                   ),
                 ),
-                _fineStepBtn('-2°', () {
+                _fineStepBtn('-2°', () async {
                   setState(() {
-                    _bpRotation = (_bpRotation - 2.0).clamp(-180.0, 180.0);
+                    bp.rotation = (bp.rotation - 2.0).clamp(-180.0, 180.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
+                  if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
                   _persistBlueprintConfig();
                 }),
-                _fineStepBtn('-0.2°', () {
+                _fineStepBtn('-0.2°', () async {
                   setState(() {
-                    _bpRotation = (_bpRotation - 0.2).clamp(-180.0, 180.0);
+                    bp.rotation = (bp.rotation - 0.2).clamp(-180.0, 180.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
+                  if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
                   _persistBlueprintConfig();
                 }),
                 Expanded(
                   child: Slider(
-                    value: _bpRotation.clamp(-180.0, 180.0),
+                    value: bp.rotation.clamp(-180.0, 180.0),
                     min: -180.0,
                     max: 180.0,
                     activeColor: Colors.amber,
-                    onChanged: (val) {
-                      setState(() => _bpRotation = val);
-                      _renderBlueprintOnMap(
-                          rebuildBitmap: true, fastQuality: true);
+                    onChangeStart: (_) async {
+                      if (!_bpTouchModeIsBlueprint) {
+                        await _updateMapViewportInfo();
+                        setState(() => _isSliderManipulating = true);
+                        await _refreshAllOverlays(includeBlueprint: true);
+                      }
                     },
-                    onChangeEnd: (_) {
-                      _renderBlueprintOnMap(
-                          rebuildBitmap: true, fastQuality: false);
-                      _persistBlueprintConfig();
+                    onChanged: (val) {
+                      setState(() => bp.rotation = val);
+                    },
+                    onChangeEnd: (_) async {
+                      if (_isSliderManipulating) {
+                        setState(() => _isSliderManipulating = false);
+                        await _refreshAllOverlays(includeBlueprint: true);
+                      }
+                      await _persistBlueprintConfig();
                     },
                   ),
                 ),
-                _fineStepBtn('+0.2°', () {
+                _fineStepBtn('+0.2°', () async {
                   setState(() {
-                    _bpRotation = (_bpRotation + 0.2).clamp(-180.0, 180.0);
+                    bp.rotation = (bp.rotation + 0.2).clamp(-180.0, 180.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
+                  if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
                   _persistBlueprintConfig();
                 }),
-                _fineStepBtn('+2°', () {
+                _fineStepBtn('+2°', () async {
                   setState(() {
-                    _bpRotation = (_bpRotation + 2.0).clamp(-180.0, 180.0);
+                    bp.rotation = (bp.rotation + 2.0).clamp(-180.0, 180.0);
                   });
-                  _renderBlueprintOnMap(rebuildBitmap: true, fastQuality: false);
+                  if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
                   _persistBlueprintConfig();
                 }),
               ],
@@ -1963,25 +2451,32 @@ if (photos.length > 0) {
                 SizedBox(
                   width: 78,
                   child: Text(
-                    '투명도:${(_bpOpacity * 100).toInt()}%',
+                    '투명도:${(bp.opacity * 100).toInt()}%',
                     style: const TextStyle(color: Colors.white, fontSize: 11),
                   ),
                 ),
                 Expanded(
                   child: Slider(
-                    value: _bpOpacity.clamp(0.1, 1.0),
+                    value: bp.opacity.clamp(0.1, 1.0),
                     min: 0.1,
                     max: 1.0,
                     activeColor: Colors.amber,
-                    onChanged: (val) {
-                      setState(() => _bpOpacity = val);
-                      _renderBlueprintOnMap(
-                          rebuildBitmap: true, fastQuality: true);
+                    onChangeStart: (_) async {
+                      if (!_bpTouchModeIsBlueprint) {
+                        await _updateMapViewportInfo();
+                        setState(() => _isSliderManipulating = true);
+                        await _refreshAllOverlays(includeBlueprint: true);
+                      }
                     },
-                    onChangeEnd: (_) {
-                      _renderBlueprintOnMap(
-                          rebuildBitmap: true, fastQuality: false);
-                      _persistBlueprintConfig();
+                    onChanged: (val) {
+                      setState(() => bp.opacity = val);
+                    },
+                    onChangeEnd: (_) async {
+                      if (_isSliderManipulating) {
+                        setState(() => _isSliderManipulating = false);
+                        await _refreshAllOverlays(includeBlueprint: true);
+                      }
+                      await _persistBlueprintConfig();
                     },
                   ),
                 ),
@@ -2004,12 +2499,13 @@ if (photos.length > 0) {
 
     final bool portrait =
         MediaQuery.of(context).orientation == Orientation.portrait;
-
     final double bottomSafe = MediaQuery.of(context).viewPadding.bottom;
 
     final PhotoItem? activePhoto = _visiblePhotos.isNotEmpty
         ? _visiblePhotos[_selectedIdx.clamp(0, _visiblePhotos.length - 1)]
         : null;
+
+    final List<String> cats = _allCategories;
 
     final Widget leftOrTopPane = _bpEditMode
         ? _buildBlueprintControlBox()
@@ -2030,45 +2526,115 @@ if (photos.length > 0) {
                             fit: BoxFit.contain),
                       ),
                     ),
+                    // 좌측 상단 카테고리 선택 박스 (아담한 가로폭 + 가나다순/미분류 최하단 + 개별 X 삭제)
                     Positioned(
                       top: 10,
                       left: 10,
                       child: Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 2),
+                            horizontal: 8, vertical: 3),
                         decoration: BoxDecoration(
                           color: Colors.black87,
                           borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.amber, width: 1.5),
+                          border: Border.all(color: Colors.amber, width: 1.2),
                         ),
                         child: DropdownButtonHideUnderline(
                           child: DropdownButton<String>(
-                            value: _allCategories.contains(activePhoto.category)
+                            value: cats.contains(activePhoto.category)
                                 ? activePhoto.category
                                 : '미분류',
-                            dropdownColor: Colors.black87,
-                            icon: const Icon(Icons.arrow_drop_down,
-                                color: Colors.amber),
+                            isDense: true,
+                            dropdownColor: Colors.grey[900],
+                            icon: const Padding(
+                              padding: EdgeInsets.only(left: 4),
+                              child: Icon(Icons.arrow_drop_down,
+                                  color: Colors.amber, size: 18),
+                            ),
                             style: const TextStyle(
                               color: Colors.amber,
                               fontWeight: FontWeight.bold,
-                              fontSize: 13,
+                              fontSize: 11.5,
                             ),
-                            items: [
-                              ..._allCategories.map(
-                                (c) => DropdownMenuItem(
-                                  value: c,
-                                  child: Text(c,
+                            selectedItemBuilder: (context) {
+                              return [
+                                ...cats.map(
+                                  (c) => Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Text(
+                                      c,
                                       style: const TextStyle(
-                                          color: Colors.white)),
+                                        color: Colors.white,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(
+                                    '+ 새 카테고리 입력',
+                                    style: TextStyle(
+                                      color: Colors.amberAccent,
+                                      fontSize: 11.5,
+                                    ),
+                                  ),
+                                ),
+                              ];
+                            },
+                            items: [
+                              ...cats.map(
+                                (c) => DropdownMenuItem<String>(
+                                  value: c,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      ConstrainedBox(
+                                        constraints: const BoxConstraints(
+                                            minWidth: 64, maxWidth: 115),
+                                        child: Text(
+                                          c,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: c == '미분류'
+                                                ? Colors.white70
+                                                : Colors.white,
+                                            fontSize: 11.5,
+                                          ),
+                                        ),
+                                      ),
+                                      if (c != '미분류')
+                                        InkWell(
+                                          onTap: () {
+                                            Navigator.of(context).pop();
+                                            _deleteCategory(c);
+                                          },
+                                          child: const Padding(
+                                            padding: EdgeInsets.only(
+                                                left: 6, top: 2, bottom: 2),
+                                            child: Icon(
+                                              Icons.close,
+                                              size: 14,
+                                              color: Colors.redAccent,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
                                 ),
                               ),
-                              const DropdownMenuItem(
+                              const DropdownMenuItem<String>(
                                 value: '__ADD_NEW__',
-                                child: Text('+ 새 카테고리 직접 입력',
-                                    style: TextStyle(
-                                        color: Colors.amberAccent,
-                                        fontWeight: FontWeight.bold)),
+                                child: Text(
+                                  '+ 새 카테고리 입력',
+                                  style: TextStyle(
+                                    color: Colors.amberAccent,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 11,
+                                  ),
+                                ),
                               ),
                             ],
                             onChanged: (val) {
@@ -2095,8 +2661,10 @@ if (photos.length > 0) {
                 ),
               ));
 
-    final double initLat = activePhoto?.lat ?? _bpLat ?? 37.4984;
-    final double initLng = activePhoto?.lng ?? _bpLng ?? 127.1324;
+    final double initLat =
+        activePhoto?.lat ?? _activeBp?.centerLat ?? 37.4984;
+    final double initLng =
+        activePhoto?.lng ?? _activeBp?.centerLng ?? 127.1324;
 
     final Widget mapPane = naverAuthErrorMsg != null
         ? Container(
@@ -2114,243 +2682,232 @@ if (photos.length > 0) {
               ),
             ),
           )
-        : Stack(
-            children: [
-              NaverMap(
-                options: NaverMapViewOptions(
-                  initialCameraPosition: NCameraPosition(
-                    target: NLatLng(initLat, initLng),
-                    zoom: 16,
+        : LayoutBuilder(
+            builder: (context, constraints) {
+              _mapWidgetSize =
+                  Size(constraints.maxWidth, constraints.maxHeight);
+              return Stack(
+                children: [
+                  NaverMap(
+                    options: NaverMapViewOptions(
+                      initialCameraPosition: NCameraPosition(
+                        target: NLatLng(initLat, initLng),
+                        zoom: 16,
+                      ),
+                    ),
+                    onMapReady: (ctrl) async {
+                      _mapCtrl = ctrl;
+                      await _restoreBlueprintConfig();
+                      await _updateMapViewportInfo();
+                      await _refreshAllOverlays(includeBlueprint: true);
+                    },
+                    onCameraIdle: () {
+                      _updateMapViewportInfo();
+                    },
                   ),
-                ),
-                onMapReady: (ctrl) async {
-                  _mapCtrl = ctrl;
-                  await _restoreBlueprintConfig();
-                  await _updateMetersPerPixel();
-                  await _refreshAllOverlays(includeBlueprint: true);
-                },
-                onCameraIdle: () {
-                  _updateMetersPerPixel();
-                },
-              ),
-              if (_bpEditMode && _bpPath != null && _bpTouchModeIsBlueprint)
-                Positioned.fill(
-                  child: Listener(
-                    behavior: HitTestBehavior.opaque,
-                    onPointerDown: (event) {
-                      _activePointers[event.pointer] = event.localPosition;
-                      _updateMetersPerPixel();
-                    },
-                    onPointerMove: _handleBlueprintPointerMove,
-                    onPointerUp: (event) {
-                      _activePointers.remove(event.pointer);
-                      if (_activePointers.isEmpty) {
-                        _renderBlueprintOnMap(
-                            rebuildBitmap: true, fastQuality: false);
-                        _persistBlueprintConfig();
-                      }
-                    },
-                    onPointerCancel: (event) {
-                      _activePointers.remove(event.pointer);
-                      if (_activePointers.isEmpty) {
-                        _renderBlueprintOnMap(
-                            rebuildBitmap: true, fastQuality: false);
-                        _persistBlueprintConfig();
-                      }
-                    },
-                    child: Container(color: Colors.transparent),
-                  ),
-                ),
-            ],
+                  if (_useLiveActiveBpOverlay)
+                    _buildLiveBlueprintOverlayWidget(_mapWidgetSize),
+                  if (_bpEditMode &&
+                      _activeBp != null &&
+                      _bpTouchModeIsBlueprint)
+                    Positioned.fill(
+                      child: Listener(
+                        behavior: HitTestBehavior.opaque,
+                        onPointerDown: (event) {
+                          _activePointers[event.pointer] = event.localPosition;
+                        },
+                        onPointerMove: _handleBlueprintPointerMove,
+                        onPointerUp: (event) {
+                          _activePointers.remove(event.pointer);
+                          if (_activePointers.isEmpty) {
+                            _persistBlueprintConfig();
+                          }
+                        },
+                        onPointerCancel: (event) {
+                          _activePointers.remove(event.pointer);
+                          if (_activePointers.isEmpty) {
+                            _persistBlueprintConfig();
+                          }
+                        },
+                        child: Container(color: Colors.transparent),
+                      ),
+                    ),
+                ],
+              );
+            },
           );
+
+    // 상단 바: 모든 항목 글씨 크기 12px 통일 및 좌우 균등 배분
+    const TextStyle unifiedTopTextStyle = TextStyle(
+      fontSize: 12,
+      fontWeight: FontWeight.bold,
+    );
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
         automaticallyImplyLeading: false,
-        titleSpacing: 4,
+        titleSpacing: 6,
         title: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             IconButton(
-              icon: const Icon(Icons.arrow_back, color: Colors.white, size: 22),
+              icon: const Icon(Icons.arrow_back, color: Colors.white, size: 20),
               padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 34, minHeight: 36),
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 34),
               onPressed: () => Navigator.pop(context),
             ),
-            const SizedBox(width: 4),
-            ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 98),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: _dateFilter,
-                  isDense: true,
-                  dropdownColor: Colors.black87,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  icon: const Icon(Icons.arrow_drop_down,
-                      color: Colors.white, size: 18),
-                  items: dateTabs
-                      .map(
-                        (d) => DropdownMenuItem(
-                          value: d,
-                          child: Text(
-                            d,
-                            softWrap: false,
-                            overflow: TextOverflow.visible,
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (val) {
-                    if (val == null) return;
-                    setState(() {
-                      _dateFilter = val;
-                      _selectedIdx = _visiblePhotos.isNotEmpty
-                          ? _visiblePhotos.length - 1
-                          : 0;
-                    });
-                    _refreshAllOverlays(includeBlueprint: true);
-                    if (_visiblePhotos.isNotEmpty) {
-                      final p = _visiblePhotos[_selectedIdx];
-                      _panMapKeepZoom(p.lat, p.lng);
-                    }
-                  },
-                ),
+            // 1. 날짜 선택
+            DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: _dateFilter,
+                isDense: true,
+                dropdownColor: Colors.black87,
+                style: unifiedTopTextStyle.copyWith(color: Colors.white),
+                icon: const Icon(Icons.arrow_drop_down,
+                    color: Colors.white, size: 16),
+                items: dateTabs
+                    .map(
+                      (d) => DropdownMenuItem(
+                        value: d,
+                        child: Text(d, style: unifiedTopTextStyle),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (val) {
+                  if (val == null) return;
+                  setState(() {
+                    _dateFilter = val;
+                    _selectedIdx = _visiblePhotos.isNotEmpty
+                        ? _visiblePhotos.length - 1
+                        : 0;
+                  });
+                  _refreshAllOverlays(includeBlueprint: true);
+                  if (_visiblePhotos.isNotEmpty) {
+                    final p = _visiblePhotos[_selectedIdx];
+                    _panMapKeepZoom(p.lat, p.lng);
+                  }
+                },
               ),
             ),
-            const SizedBox(width: 4),
-            ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 96),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: _allCategories.contains(_categoryFilter)
-                      ? _categoryFilter
-                      : '전체 카테고리',
-                  isDense: true,
-                  dropdownColor: Colors.black87,
-                  style: const TextStyle(
-                    color: Colors.amberAccent,
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  icon: const Icon(Icons.arrow_drop_down,
-                      color: Colors.amberAccent, size: 18),
-                  items: ['전체 카테고리', ..._allCategories]
-                      .map(
-                        (c) => DropdownMenuItem(
-                          value: c,
-                          child: Text(
-                            c,
-                            softWrap: false,
-                            overflow: TextOverflow.visible,
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (val) {
-                    if (val == null) return;
-                    setState(() {
-                      _categoryFilter = val;
-                      _selectedIdx = _visiblePhotos.isNotEmpty
-                          ? _visiblePhotos.length - 1
-                          : 0;
-                    });
-                    _refreshAllOverlays(includeBlueprint: true);
-                    if (_visiblePhotos.isNotEmpty) {
-                      final p = _visiblePhotos[_selectedIdx];
-                      _panMapKeepZoom(p.lat, p.lng);
-                    }
-                  },
-                ),
+            // 2. 카테고리 필터 (가나다순 + 미분류 최하단)
+            DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: cats.contains(_categoryFilter)
+                    ? _categoryFilter
+                    : '전체 카테고리',
+                isDense: true,
+                dropdownColor: Colors.black87,
+                style: unifiedTopTextStyle.copyWith(color: Colors.amberAccent),
+                icon: const Icon(Icons.arrow_drop_down,
+                    color: Colors.amberAccent, size: 16),
+                items: ['전체 카테고리', ...cats]
+                    .map(
+                      (c) => DropdownMenuItem(
+                        value: c,
+                        child: Text(c, style: unifiedTopTextStyle),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (val) {
+                  if (val == null) return;
+                  setState(() {
+                    _categoryFilter = val;
+                    _selectedIdx = _visiblePhotos.isNotEmpty
+                        ? _visiblePhotos.length - 1
+                        : 0;
+                  });
+                  _refreshAllOverlays(includeBlueprint: true);
+                  if (_visiblePhotos.isNotEmpty) {
+                    final p = _visiblePhotos[_selectedIdx];
+                    _panMapKeepZoom(p.lat, p.lng);
+                  }
+                },
               ),
             ),
-            const Spacer(),
+            // 3. 내보내기
             InkWell(
               onTap: _isExporting ? null : _showExportOptionsSheet,
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+              borderRadius: BorderRadius.circular(4),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.ios_share,
-                        color: Colors.lightBlueAccent, size: 15),
-                    SizedBox(width: 2),
+                    const Icon(Icons.ios_share,
+                        color: Colors.lightBlueAccent, size: 14),
+                    const SizedBox(width: 2),
                     Text(
                       '내보내기',
-                      style: TextStyle(
-                        color: Colors.lightBlueAccent,
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: unifiedTopTextStyle.copyWith(
+                          color: Colors.lightBlueAccent),
                     ),
                   ],
                 ),
               ),
             ),
+            // 4. 도면 추가
             InkWell(
               onTap: _importBlueprintFromGallery,
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+              borderRadius: BorderRadius.circular(4),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.add_photo_alternate,
-                        color: Colors.amber, size: 15),
-                    SizedBox(width: 2),
+                    const Icon(Icons.add_photo_alternate,
+                        color: Colors.amber, size: 14),
+                    const SizedBox(width: 2),
                     Text(
                       '도면',
-                      style: TextStyle(
-                        color: Colors.amber,
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: unifiedTopTextStyle.copyWith(color: Colors.amber),
                     ),
                   ],
                 ),
               ),
             ),
-            if (_bpPath != null) ...[
+            // 5. 도면이 있을 때 전체 레이어 토글 & 도면정렬 버튼
+            if (_blueprints.isNotEmpty) ...[
               IconButton(
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 26, minHeight: 34),
+                constraints: const BoxConstraints(minWidth: 24, minHeight: 32),
                 icon: Icon(
-                  _bpShow ? Icons.layers : Icons.layers_clear,
-                  color: _bpShow ? Colors.lightGreenAccent : Colors.grey,
-                  size: 18,
+                  _bpGlobalShow ? Icons.layers : Icons.layers_clear,
+                  color: _bpGlobalShow ? Colors.lightGreenAccent : Colors.grey,
+                  size: 17,
                 ),
                 onPressed: () async {
                   setState(() {
-                    _bpShow = !_bpShow;
-                    if (!_bpShow) _bpEditMode = false;
+                    _bpGlobalShow = !_bpGlobalShow;
+                    if (!_bpGlobalShow) _bpEditMode = false;
                   });
                   await _persistBlueprintConfig();
                   await _refreshAllOverlays(includeBlueprint: true);
                 },
               ),
               SizedBox(
-                height: 28,
+                height: 26,
                 child: ElevatedButton(
                   onPressed: () async {
+                    await _updateMapViewportInfo();
+                    setState(() {
+                      _bpEditMode = !_bpEditMode;
+                      if (_bpEditMode) _bpTouchModeIsBlueprint = true;
+                    });
                     await _persistBlueprintConfig();
-                    await _updateMetersPerPixel();
-                    setState(() => _bpEditMode = !_bpEditMode);
+                    await _refreshAllOverlays(includeBlueprint: true);
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor:
                         _bpEditMode ? Colors.amber : Colors.blueAccent,
-                    foregroundColor:
-                        _bpEditMode ? Colors.black : Colors.white,
+                    foregroundColor: _bpEditMode ? Colors.black : Colors.white,
                     padding: const EdgeInsets.symmetric(horizontal: 6),
                     minimumSize: Size.zero,
                   ),
                   child: Text(
                     _bpEditMode ? '고정저장' : '도면정렬',
-                    style: const TextStyle(
-                        fontSize: 10, fontWeight: FontWeight.bold),
+                    style: unifiedTopTextStyle.copyWith(fontSize: 11),
                   ),
                 ),
               ),
@@ -2451,8 +3008,8 @@ if (photos.length > 0) {
     if (_mapCtrl == null) return;
     await _mapCtrl!.clearOverlays();
 
-    if (includeBlueprint && _bpPath != null && _bpShow) {
-      await _renderBlueprintOnMap(rebuildBitmap: false);
+    if (includeBlueprint && _bpGlobalShow && _blueprints.isNotEmpty) {
+      await _syncBlueprintsToMap();
     }
 
     final List<int> order = [];
