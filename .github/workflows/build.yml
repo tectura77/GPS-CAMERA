@@ -22,14 +22,14 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.16.9'
+          flutter-version: '3.22.3' # Dart 3.3.0 이상을 요구하는 native_exif 호환을 위해 버전 상향
           channel: 'stable'
 
       - name: Create Flutter Project Structure
         run: |
-          cp pubspec.yaml pubspec.yaml.bak
-          cp lib/main.dart main.dart.bak
-          flutter create --org com.example --project-name gps_camera --platforms=android .
+          mv pubspec.yaml pubspec.yaml.bak
+          mv lib/main.dart main.dart.bak
+          flutter create --no-pub --org com.example --project-name gps_camera --platforms=android .
           mv pubspec.yaml.bak pubspec.yaml
           mv main.dart.bak lib/main.dart
 
@@ -152,6 +152,11 @@ jobs:
                           }
                           mp.prepare()
                           mp.start()
+                      } else {
+                          // wavBytes가 없을 때도 메모리 누수 방지를 위해 일정 시간 후 해제
+                          android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                              actionSound.release()
+                          }, 1000)
                       }
                   } catch (e: Exception) {
                       e.printStackTrace()
