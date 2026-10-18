@@ -22,154 +22,176 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.3' # Dart 3.3.0 이상을 요구하는 native_exif 호환을 위해 버전 상향
           channel: 'stable'
 
-      - name: Create Flutter Project Structure
+      - name: Create Clean V2 Flutter Project Structure
         run: |
+          rm -rf android
           mv pubspec.yaml pubspec.yaml.bak
           mv lib/main.dart main.dart.bak
-          flutter create --no-pub --org com.example --project-name gps_camera --platforms=android .
+          flutter create --org com.example --project-name my_app --platforms=android .
           mv pubspec.yaml.bak pubspec.yaml
           mv main.dart.bak lib/main.dart
 
-      - name: Configure Android Permissions & Naver Map & Gradle
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Configure Android V2 Embedding, Permissions, Naver Map & Shutter Sound
         run: |
           python3 - << 'EOF'
-          import glob, re
+          import os, re, glob, json
 
+          # 1. AndroidManifest.xml: 권한 + 네이버 지도 Client ID + V2 Embedding 강제 보장
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "r", encoding="utf-8") as f:
               content = f.read()
 
-          perms = """
-              <uses-permission android:name="android.permission.INTERNET"/>
-              <uses-permission android:name="android.permission.CAMERA"/>
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
-              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
-              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
-          """
+          content = content.replace("io.flutter.app.FlutterApplication", "${applicationName}")
+
+          perms = "\n".join([
+              '    <uses-permission android:name="android.permission.INTERNET"/>',
+              '    <uses-permission android:name="android.permission.CAMERA"/>',
+              '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>',
+              '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>',
+              '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>',
+              '    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>',
+              '    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>',
+          ])
           if "android.permission.CAMERA" not in content:
               content = content.replace("<application", perms + "\n    <application", 1)
 
-          meta = """
-                  <meta-data
-                      android:name="com.naver.maps.map.CLIENT_ID"
-                      android:value="b3agnvaern" />
-          """
+          naver_meta = "\n".join([
+              '        <meta-data',
+              '            android:name="com.naver.maps.map.CLIENT_ID"',
+              '            android:value="b3agnvaern" />',
+          ])
           if "com.naver.maps.map.CLIENT_ID" not in content:
-              content = content.replace("</activity>", "</activity>\n" + meta, 1)
+              content = content.replace("</application>", naver_meta + "\n    </application>", 1)
+
+          v2_meta = "\n".join([
+              '        <meta-data',
+              '            android:name="flutterEmbedding"',
+              '            android:value="2" />',
+          ])
+          if 'android:name="flutterEmbedding"' not in content:
+              content = content.replace("</application>", v2_meta + "\n    </application>", 1)
+          else:
+              content = re.sub(
+                  r'(<meta-data\s+android:name="flutterEmbedding"\s+android:value=")\d+(")',
+                  r'\g<1>2\g<2>',
+                  content,
+              )
 
           with open(manifest_path, "w", encoding="utf-8") as f:
               f.write(content)
 
+          # 2. .flutter-plugins-dependencies 내 모든 플러그인 V2 임베딩 플래그 보장
+          deps_file = ".flutter-plugins-dependencies"
+          if os.path.exists(deps_file):
+              with open(deps_file, "r", encoding="utf-8") as f:
+                  deps_data = json.load(f)
+              android_plugins = deps_data.get("plugins", {}).get("android", [])
+              for p in android_plugins:
+                  p["supports_android_v2_embedding"] = True
+                  p["supportsAndroidV2Embedding"] = True
+              with open(deps_file, "w", encoding="utf-8") as f:
+                  json.dump(deps_data, f, indent=2)
+
+          # 3. build.gradle / build.gradle.kts minSdk 23 설정
           for gpath in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
-              try:
+              if os.path.exists(gpath):
                   with open(gpath, "r", encoding="utf-8") as f:
                       g = f.read()
                   g = re.sub(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 23", g)
                   g = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", g)
                   with open(gpath, "w", encoding="utf-8") as f:
                       f.write(g)
-              except FileNotFoundError:
-                  pass
-          EOF
 
-      - name: Inject Shutter Sound into MainActivity.kt
-        run: |
-          python3 - << 'EOF'
-          import glob
-
-          kt_files = glob.glob("android/app/src/main/kotlin/**/MainActivity.kt", recursive=True)
+          # 4. MainActivity.kt 에 무음/진동 모드에서도 작동하는 셔터음 코드 주입
+          kt_files = glob.glob("android/app/src/main/**/MainActivity.kt", recursive=True)
           if kt_files:
               kt_path = kt_files[0]
               with open(kt_path, "r", encoding="utf-8") as f:
                   first_line = f.readline().strip()
-              pkg_line = first_line if first_line.startswith("package ") else "package com.example.gps_camera"
+              pkg_line = first_line if first_line.startswith("package ") else "package com.example.my_app"
 
-              kt_code = pkg_line + """
-
-          import android.content.Context
-          import android.media.AudioAttributes
-          import android.media.AudioManager
-          import android.media.MediaActionSound
-          import android.media.MediaPlayer
-          import io.flutter.embedding.android.FlutterActivity
-          import io.flutter.embedding.engine.FlutterEngine
-          import io.flutter.plugin.common.MethodChannel
-          import java.io.File
-          import java.io.FileOutputStream
-
-          class MainActivity: FlutterActivity() {
-              private val CHANNEL = "gps_camera/shutter"
-
-              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-                  super.configureFlutterEngine(flutterEngine)
-                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
-                      if (call.method == "playShutter") {
-                          val wavBytes = call.argument<ByteArray>("wav")
-                          playShutterOnAlarmStream(wavBytes)
-                          result.success(null)
-                      } else {
-                          result.notImplemented()
-                      }
-                  }
-              }
-
-              private fun playShutterOnAlarmStream(wavBytes: ByteArray?) {
-                  try {
-                      val actionSound = MediaActionSound()
-                      actionSound.play(MediaActionSound.SHUTTER_CLICK)
-
-                      if (wavBytes != null) {
-                          val tempFile = File(cacheDir, "shutter_click.wav")
-                          FileOutputStream(tempFile).use { it.write(wavBytes) }
-
-                          val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                          val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
-                          val curVol = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)
-                          if (curVol == 0) {
-                              audioManager.setStreamVolume(
-                                  AudioManager.STREAM_ALARM,
-                                  (maxVol * 0.65).toInt().coerceAtLeast(1),
-                                  0
-                              )
-                          }
-
-                          val mp = MediaPlayer()
-                          mp.setAudioAttributes(
-                              AudioAttributes.Builder()
-                                  .setUsage(AudioAttributes.USAGE_ALARM)
-                                  .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                                  .build()
-                          )
-                          mp.setDataSource(tempFile.absolutePath)
-                          mp.setOnCompletionListener {
-                              it.release()
-                              actionSound.release()
-                          }
-                          mp.prepare()
-                          mp.start()
-                      } else {
-                          // wavBytes가 없을 때도 메모리 누수 방지를 위해 일정 시간 후 해제
-                          android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                              actionSound.release()
-                          }, 1000)
-                      }
-                  } catch (e: Exception) {
-                      e.printStackTrace()
-                  }
-              }
-          }
-          """
+              kt_lines = [
+                  pkg_line,
+                  "",
+                  "import android.content.Context",
+                  "import android.media.AudioAttributes",
+                  "import android.media.AudioManager",
+                  "import android.media.MediaActionSound",
+                  "import android.media.MediaPlayer",
+                  "import io.flutter.embedding.android.FlutterActivity",
+                  "import io.flutter.embedding.engine.FlutterEngine",
+                  "import io.flutter.plugin.common.MethodChannel",
+                  "import java.io.File",
+                  "import java.io.FileOutputStream",
+                  "",
+                  "class MainActivity: FlutterActivity() {",
+                  '    private val CHANNEL = "gps_camera/shutter"',
+                  "",
+                  "    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {",
+                  "        super.configureFlutterEngine(flutterEngine)",
+                  "        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->",
+                  '            if (call.method == "playShutter") {',
+                  '                val wavBytes = call.argument<ByteArray>("wav")',
+                  "                playShutterOnAlarmStream(wavBytes)",
+                  "                result.success(null)",
+                  "            } else {",
+                  "                result.notImplemented()",
+                  "            }",
+                  "        }",
+                  "    }",
+                  "",
+                  "    private fun playShutterOnAlarmStream(wavBytes: ByteArray?) {",
+                  "        try {",
+                  "            val actionSound = MediaActionSound()",
+                  "            actionSound.play(MediaActionSound.SHUTTER_CLICK)",
+                  "",
+                  "            if (wavBytes != null) {",
+                  '                val tempFile = File(cacheDir, "shutter_click.wav")',
+                  "                FileOutputStream(tempFile).use { it.write(wavBytes) }",
+                  "",
+                  "                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager",
+                  "                val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)",
+                  "                val curVol = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)",
+                  "                if (curVol == 0) {",
+                  "                    val targetVol = (maxVol * 0.65).toInt().coerceAtLeast(1)",
+                  "                    audioManager.setStreamVolume(AudioManager.STREAM_ALARM, targetVol, 0)",
+                  "                }",
+                  "",
+                  "                val mp = MediaPlayer()",
+                  "                mp.setAudioAttributes(",
+                  "                    AudioAttributes.Builder()",
+                  "                        .setUsage(AudioAttributes.USAGE_ALARM)",
+                  "                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)",
+                  "                        .build()",
+                  "                )",
+                  "                mp.setDataSource(tempFile.absolutePath)",
+                  "                mp.setOnCompletionListener { player ->",
+                  "                    player.release()",
+                  "                    actionSound.release()",
+                  "                }",
+                  "                mp.setOnErrorListener { player, _, _ ->",
+                  "                    player.release()",
+                  "                    actionSound.release()",
+                  "                    true",
+                  "                }",
+                  "                mp.prepare()",
+                  "                mp.start()",
+                  "            }",
+                  "        } catch (e: Exception) {",
+                  "            e.printStackTrace()",
+                  "        }",
+                  "    }",
+                  "}",
+                  ""
+              ]
               with open(kt_path, "w", encoding="utf-8") as f:
-                  f.write(kt_code)
+                  f.write("\n".join(kt_lines))
           EOF
-
-      - name: Install Dependencies
-        run: flutter pub get
 
       - name: Build APK
         run: flutter build apk --release
