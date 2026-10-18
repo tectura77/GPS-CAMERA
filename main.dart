@@ -21,6 +21,39 @@ import 'package:archive/archive.dart';
 List<CameraDescription> appCameras = [];
 String? naverAuthErrorMsg;
 
+// 💡 마지막으로 설정하거나 변경한 카테고리를 기억하는 전역 변수 (다음 촬영 시 자동 적용)
+String currentDefaultCategory = '미분류';
+
+Future<void> saveDefaultCategory(String cat) async {
+  currentDefaultCategory = cat.trim().isEmpty ? '미분류' : cat.trim();
+  try {
+    final dir = await getApplicationDocumentsDirectory();
+    final f = File('${dir.path}/last_category.txt');
+    await f.writeAsString(currentDefaultCategory);
+  } catch (e) {
+    debugPrint('Save default category error: $e');
+  }
+}
+
+Future<void> loadDefaultCategory(List<PhotoItem> photos) async {
+  try {
+    final dir = await getApplicationDocumentsDirectory();
+    final f = File('${dir.path}/last_category.txt');
+    if (await f.exists()) {
+      final saved = (await f.readAsString()).trim();
+      if (saved.isNotEmpty) {
+        currentDefaultCategory = saved;
+        return;
+      }
+    }
+    if (photos.isNotEmpty && photos.last.category.isNotEmpty) {
+      currentDefaultCategory = photos.last.category;
+    }
+  } catch (e) {
+    debugPrint('Load default category error: $e');
+  }
+}
+
 // 대시보드 재진입 및 사진 전환 속도를 극대화하는 전역 오버레이 캐시
 final Map<String, NOverlayImage> globalMarkerIconCache = {};
 final Map<String, NOverlayImage> globalBpOverlayCache = {};
@@ -319,6 +352,8 @@ class _CameraScreenState extends State<CameraScreen> {
       Permission.photos,
     ].request();
     await _restorePhotos();
+    await loadDefaultCategory(_photoList);
+    if (mounted) setState(() {});
 
     _backCameraIndices = [];
     for (int i = 0; i < appCameras.length; i++) {
@@ -567,6 +602,9 @@ class _CameraScreenState extends State<CameraScreen> {
 
         await Gal.putImage(targetPath);
 
+        // 💡 마지막에 설정 또는 변경해 둔 카테고리로 자동 저장!
+        final String assignedCat = currentDefaultCategory;
+
         setState(() {
           _photoList.add(PhotoItem(
             path: targetPath,
@@ -577,7 +615,7 @@ class _CameraScreenState extends State<CameraScreen> {
             azimuth: _heading,
             pitch: _tiltPitch,
             timestamp: nowStr,
-            category: '미분류',
+            category: assignedCat,
           ));
         });
 
@@ -585,9 +623,9 @@ class _CameraScreenState extends State<CameraScreen> {
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('📸 찰칵! 사진이 저장되었습니다.'),
-              duration: Duration(milliseconds: 1100),
+            SnackBar(
+              content: Text('📸 찰칵! [$assignedCat] 카테고리로 저장되었습니다.'),
+              duration: const Duration(milliseconds: 1100),
             ),
           );
         }
@@ -717,6 +755,7 @@ class _CameraScreenState extends State<CameraScreen> {
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
+                  '카테고리: $currentDefaultCategory\n'
                   '$locInfo\n방위각: ${_heading.toStringAsFixed(1)}° ($dirKr)\n'
                   '피치각: ${_tiltPitch.toStringAsFixed(1)}° | 배율: ${_currentZoom.toStringAsFixed(1)}x\n'
                   '시간: ${DateTime.now().toString().substring(0, 16)}',
@@ -779,13 +818,15 @@ class _CameraScreenState extends State<CameraScreen> {
                 const SizedBox(width: 12),
                 FloatingActionButton(
                   heroTag: 'mapDashboardBtn',
-                  onPressed: () {
-                    Navigator.push(
+                  onPressed: () async {
+                    await Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (_) => GalleryMapDashboard(photos: _photoList),
                       ),
                     );
+                    // 대시보드에서 돌아왔을 때 변경된 기본 카테고리를 카메라 화면에 즉시 반영
+                    if (mounted) setState(() {});
                   },
                   backgroundColor: Colors.blueAccent,
                   child: const Icon(Icons.map, color: Colors.white),
@@ -939,6 +980,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         _categoryFilter = '전체 카테고리';
       }
     });
+    if (currentDefaultCategory == targetCat) {
+      await saveDefaultCategory('미분류');
+    }
     await _persistCategories();
     await _persistPhotoMetadata();
     await _refreshAllOverlays(includeBlueprint: true);
@@ -1028,7 +1072,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 💡 상단 바 [도면] 버튼 클릭 시 '도면 추가' / '도면 수정' 선택 팝업
   Future<void> _showBlueprintActionMenuDialog() async {
     await showDialog(
       context: context,
@@ -1077,7 +1120,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                   icon: const Icon(Icons.add_photo_alternate, size: 18),
                   label: const Text(
                     '도면 추가 (사진에서 가져오기)',
-                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold),
+                    style:
+                        TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold),
                   ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.amber,
@@ -1121,8 +1165,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                         fontSize: 12.5, fontWeight: FontWeight.bold),
                   ),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        _blueprints.isEmpty ? Colors.white12 : Colors.blueAccent,
+                    backgroundColor: _blueprints.isEmpty
+                        ? Colors.white12
+                        : Colors.blueAccent,
                     foregroundColor:
                         _blueprints.isEmpty ? Colors.white54 : Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 11),
@@ -1543,6 +1588,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                             }
                             photo.category = newCat;
                           });
+                          // 💡 새 카테고리로 설정 시 다음 사진도 이 카테고리로 자동 저장되도록 갱신
+                          saveDefaultCategory(newCat);
                           _persistCategories();
                           _persistPhotoMetadata();
                         }
@@ -3328,6 +3375,8 @@ if (photos.length > 0) {
                                 setState(() {
                                   activePhoto.category = val;
                                 });
+                                // 💡 어떤 사진이든 카테고리를 변경하면 다음 촬영 카테고리로 즉시 연동!
+                                saveDefaultCategory(val);
                                 _persistPhotoMetadata();
                               }
                             },
@@ -3529,7 +3578,6 @@ if (photos.length > 0) {
                 ),
               ),
             ),
-            // 💡 [도면] 버튼 클릭 시 '도면 추가'와 '도면 수정' 중 선택하는 팝업 호출
             InkWell(
               onTap: _showBlueprintActionMenuDialog,
               borderRadius: BorderRadius.circular(4),
