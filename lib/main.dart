@@ -1987,6 +1987,36 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     return icon;
   }
 
+  // 현재 지도 확대 배율(화면 픽셀당 미터)을 계산해, 화면상 동그라미(28dp)가 실제로 겹치는 거리(m)만 반환
+  Future<double> _getMarkerOverlapThresholdMeters() async {
+    double mPerPx = _metersPerPixel;
+    if (_mapCtrl != null) {
+      try {
+        final camPos = await _mapCtrl!.getCameraPosition();
+        final double latRad = camPos.target.latitude * pi / 180.0;
+        final double zoomMPerPx =
+            (156543.03392 * cos(latRad).abs()) / pow(2.0, camPos.zoom);
+
+        final bounds = await _mapCtrl!.getContentBounds();
+        final double widthMeters = Geolocator.distanceBetween(
+          bounds.southWest.latitude,
+          bounds.southWest.longitude,
+          bounds.southWest.latitude,
+          bounds.northEast.longitude,
+        );
+        if (_mapWidgetSize.width > 10 && widthMeters > 0) {
+          final double boundsMPerPx = widthMeters / _mapWidgetSize.width;
+          mPerPx = min(zoomMPerPx, boundsMPerPx);
+        } else {
+          mPerPx = zoomMPerPx;
+        }
+        _metersPerPixel = mPerPx;
+      } catch (_) {}
+    }
+    // 마커 아이콘 지름(28dp) 기준, 화면상 중심 거리가 20dp 이하로 겹쳐 보일 때만 순환
+    return (mPerPx * 20.0).clamp(0.1, 5000.0);
+  }
+
   NMarker _buildPhotoMarker(int idx, PhotoItem item, NOverlayImage icon) {
     final marker = NMarker(
       id: 'photo_marker_$idx',
@@ -1995,6 +2025,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
 
     marker.setOnTapListener((_) async {
+      final double overlapMeters = await _getMarkerOverlapThresholdMeters();
       final List<int> nearby = [];
       for (int j = 0; j < _visiblePhotos.length; j++) {
         final double dist = Geolocator.distanceBetween(
@@ -2003,7 +2034,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           _visiblePhotos[j].lat,
           _visiblePhotos[j].lng,
         );
-        if (dist <= 20.0) nearby.add(j);
+        if (dist <= overlapMeters) nearby.add(j);
       }
 
       int nextIdx = idx;
@@ -2416,10 +2447,12 @@ function renderMarkers() {
     });
     const m = L.marker([p.lat, p.lng], { icon: htmlIcon, zIndexOffset: zIdx }).addTo(markersLayer);
     m.on('click', () => {
+      const clickedPt = map.latLngToContainerPoint([p.lat, p.lng]);
       const nearby = [];
       for (let j = 0; j < photos.length; j++) {
-        const dist = getDistanceMeters(p.lat, p.lng, photos[j].lat, photos[j].lng);
-        if (dist <= 20.0) nearby.push(j);
+        const targetPt = map.latLngToContainerPoint([photos[j].lat, photos[j].lng]);
+        const pxDist = Math.hypot(clickedPt.x - targetPt.x, clickedPt.y - targetPt.y);
+        if (pxDist <= 20.0) nearby.push(j);
       }
       let nextIdx = i;
       if (nearby.length > 1 && nearby.includes(selectedIdx)) {
