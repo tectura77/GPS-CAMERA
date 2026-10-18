@@ -41,12 +41,19 @@ jobs:
           python3 - << 'EOF'
           import os, re, glob, json
 
-          # 1. AndroidManifest.xml: 권한 + 네이버 지도 Client ID + V2 Embedding 강제 보장
+          # 1. AndroidManifest.xml: tools 네임스페이스 + 권한 + 네이버 지도 Client ID + V2 Embedding 설정
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           with open(manifest_path, "r", encoding="utf-8") as f:
               content = f.read()
 
           content = content.replace("io.flutter.app.FlutterApplication", "${applicationName}")
+
+          if "xmlns:tools=" not in content:
+              content = content.replace(
+                  'xmlns:android="http://schemas.android.com/apk/res/android"',
+                  'xmlns:android="http://schemas.android.com/apk/res/android"\n    xmlns:tools="http://schemas.android.com/tools"',
+                  1,
+              )
 
           perms = "\n".join([
               '    <uses-permission android:name="android.permission.INTERNET"/>',
@@ -54,7 +61,7 @@ jobs:
               '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>',
               '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>',
               '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>',
-              '    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>',
+              '    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" tools:replace="android:maxSdkVersion"/>',
               '    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>',
           ])
           if "android.permission.CAMERA" not in content:
