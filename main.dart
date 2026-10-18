@@ -21,7 +21,7 @@ import 'package:archive/archive.dart';
 List<CameraDescription> appCameras = [];
 String? naverAuthErrorMsg;
 
-// 💡 마지막으로 설정하거나 변경한 카테고리를 기억하는 전역 변수 (다음 촬영 시 자동 적용)
+// 마지막으로 설정하거나 변경한 카테고리를 기억하는 전역 변수 (다음 촬영 시 자동 적용)
 String currentDefaultCategory = '미분류';
 
 Future<void> saveDefaultCategory(String cat) async {
@@ -178,7 +178,7 @@ class BlueprintItem {
   }
 
   String get cacheKey =>
-      '${id}_${rotation.toStringAsFixed(1)}_${opacity.toStringAsFixed(2)}';
+      '${id}_hq_${rotation.toStringAsFixed(1)}_${opacity.toStringAsFixed(2)}';
 
   bool get needsBake =>
       cachedOverlayImg == null ||
@@ -602,7 +602,6 @@ class _CameraScreenState extends State<CameraScreen> {
 
         await Gal.putImage(targetPath);
 
-        // 💡 마지막에 설정 또는 변경해 둔 카테고리로 자동 저장!
         final String assignedCat = currentDefaultCategory;
 
         setState(() {
@@ -825,7 +824,6 @@ class _CameraScreenState extends State<CameraScreen> {
                         builder: (_) => GalleryMapDashboard(photos: _photoList),
                       ),
                     );
-                    // 대시보드에서 돌아왔을 때 변경된 기본 카테고리를 카메라 화면에 즉시 반영
                     if (mounted) setState(() {});
                   },
                   backgroundColor: Colors.blueAccent,
@@ -1588,7 +1586,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
                             }
                             photo.category = newCat;
                           });
-                          // 💡 새 카테고리로 설정 시 다음 사진도 이 카테고리로 자동 저장되도록 갱신
                           saveDefaultCategory(newCat);
                           _persistCategories();
                           _persistPhotoMetadata();
@@ -1611,6 +1608,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
+  // [수정 1] 키보드가 올라올 때 세로 폭이 줄어드는 영향을 받지 않도록 지도 가로 폭(widthMeters) 기준으로 화면의 약 60% 크기(반지름 0.32배) 산출
   Future<double> _calcScreen80Radius() async {
     if (_mapCtrl == null) return 200.0;
     try {
@@ -1621,14 +1619,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         bounds.southWest.latitude,
         bounds.northEast.longitude,
       );
-      final double heightMeters = Geolocator.distanceBetween(
-        bounds.southWest.latitude,
-        bounds.southWest.longitude,
-        bounds.northEast.latitude,
-        bounds.southWest.longitude,
-      );
-      final double minSpan = min(widthMeters, heightMeters);
-      return (minSpan * 0.44).clamp(30.0, 1500.0);
+      return (widthMeters * 0.32).clamp(15.0, 3000.0);
     } catch (_) {
       return 200.0;
     }
@@ -1652,20 +1643,22 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
+  // [수정 2] 도면 이미지 리사이징 해상도를 480px -> 1600px로 높여 확대 시 선명도 확보 및 버벅임 방지
   Future<void> _prepareFastBlueprintBytes(BlueprintItem item) async {
     try {
-      final File fastCacheFile = File('${item.imagePath}.fast.png');
+      final File fastCacheFile = File('${item.imagePath}.fast_hq.png');
       if (await fastCacheFile.exists()) {
         item.fastBytes = await fastCacheFile.readAsBytes();
       } else {
         final raw = await File(item.imagePath).readAsBytes();
         final decoded = img.decodeImage(raw);
         if (decoded != null) {
-          final resized = (decoded.width > 480 || decoded.height > 480)
+          final resized = (decoded.width > 1600 || decoded.height > 1600)
               ? img.copyResize(
                   decoded,
-                  width: decoded.width >= decoded.height ? 480 : null,
-                  height: decoded.height > decoded.width ? 480 : null,
+                  width: decoded.width >= decoded.height ? 1600 : null,
+                  height: decoded.height > decoded.width ? 1600 : null,
+                  interpolation: img.Interpolation.average,
                 )
               : decoded;
           item.fastBytes = Uint8List.fromList(img.encodePng(resized, level: 1));
@@ -1689,19 +1682,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       if (picked == null) return;
       if (!mounted) return;
 
-      final String defaultName = '도면 ${_blueprints.length + 1}';
-      final String? chosenName = await _promptBlueprintNameDialog(
-        defaultName: defaultName,
-        title: '새 도면 이름 설정',
-      );
-      if (chosenName == null) return;
-
-      final dir = await getApplicationDocumentsDirectory();
-      final String ext = picked.path.split('.').last;
-      final int nowMs = DateTime.now().millisecondsSinceEpoch;
-      final String destPath = '${dir.path}/bp_saved_$nowMs.$ext';
-      await File(picked.path).copy(destPath);
-
+      // 이름 입력 다이얼로그(키보드)가 뜨기 전에 현재 지도 화면 기준 60% 반지름과 중심 좌표를 먼저 계산
       double centerLat = _visiblePhotos.isNotEmpty
           ? _visiblePhotos[_selectedIdx].lat
           : 37.4984;
@@ -1715,8 +1696,21 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         centerLng = camPos.target.longitude;
       }
 
-      final double screen80Rad = await _calcScreen80Radius();
+      final double screen60Rad = await _calcScreen80Radius();
       await _updateMapViewportInfo();
+
+      final String defaultName = '도면 ${_blueprints.length + 1}';
+      final String? chosenName = await _promptBlueprintNameDialog(
+        defaultName: defaultName,
+        title: '새 도면 이름 설정',
+      );
+      if (chosenName == null) return;
+
+      final dir = await getApplicationDocumentsDirectory();
+      final String ext = picked.path.split('.').last;
+      final int nowMs = DateTime.now().millisecondsSinceEpoch;
+      final String destPath = '${dir.path}/bp_saved_$nowMs.$ext';
+      await File(picked.path).copy(destPath);
 
       final newBp = BlueprintItem(
         id: 'bp_$nowMs',
@@ -1724,7 +1718,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         imagePath: destPath,
         centerLat: centerLat,
         centerLng: centerLng,
-        baseRadius: screen80Rad,
+        baseRadius: screen60Rad,
         sizeSlider: 0.5,
         rotation: 0.0,
         opacity: 0.5,
@@ -1766,11 +1760,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       if (await f.exists()) await f.delete();
       final fastF = File('${removed.imagePath}.fast.png');
       if (await fastF.exists()) await fastF.delete();
+      final fastHqF = File('${removed.imagePath}.fast_hq.png');
+      if (await fastHqF.exists()) await fastHqF.delete();
     } catch (_) {}
     await _persistBlueprintConfig();
     await _refreshAllOverlays(includeBlueprint: true);
   }
 
+  // [수정 3] 네이버 지도 오버레이 이미지 굽기 해상도를 360 -> 900 (여백 16 -> 40)으로 상향
   Future<void> _bakeSingleBlueprintOverlay(BlueprintItem bp) async {
     if (!mounted) return;
     final String key = bp.cacheKey;
@@ -1781,18 +1778,20 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       return;
     }
 
-    const double boxSize = 360.0;
-    const double padSize = 16.0;
+    const double boxSize = 900.0;
+    const double padSize = 40.0;
 
     final Widget imgWidget = bp.fastBytes != null
         ? Image.memory(
             bp.fastBytes!,
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
           )
         : Image.file(
             File(bp.imagePath),
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
           );
 
@@ -1990,6 +1989,36 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     return icon;
   }
 
+  // 현재 지도 확대 배율(화면 픽셀당 미터)을 계산해, 화면상 동그라미(28dp)가 실제로 겹치는 거리(m)만 반환
+  Future<double> _getMarkerOverlapThresholdMeters() async {
+    double mPerPx = _metersPerPixel;
+    if (_mapCtrl != null) {
+      try {
+        final camPos = await _mapCtrl!.getCameraPosition();
+        final double latRad = camPos.target.latitude * pi / 180.0;
+        final double zoomMPerPx =
+            (156543.03392 * cos(latRad).abs()) / pow(2.0, camPos.zoom);
+
+        final bounds = await _mapCtrl!.getContentBounds();
+        final double widthMeters = Geolocator.distanceBetween(
+          bounds.southWest.latitude,
+          bounds.southWest.longitude,
+          bounds.southWest.latitude,
+          bounds.northEast.longitude,
+        );
+        if (_mapWidgetSize.width > 10 && widthMeters > 0) {
+          final double boundsMPerPx = widthMeters / _mapWidgetSize.width;
+          mPerPx = min(zoomMPerPx, boundsMPerPx);
+        } else {
+          mPerPx = zoomMPerPx;
+        }
+        _metersPerPixel = mPerPx;
+      } catch (_) {}
+    }
+    // 마커 아이콘 지름(28dp) 기준, 화면상 중심 거리가 20dp 이하로 겹쳐 보일 때만 순환
+    return (mPerPx * 20.0).clamp(0.1, 5000.0);
+  }
+
   NMarker _buildPhotoMarker(int idx, PhotoItem item, NOverlayImage icon) {
     final marker = NMarker(
       id: 'photo_marker_$idx',
@@ -1998,6 +2027,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
 
     marker.setOnTapListener((_) async {
+      final double overlapMeters = await _getMarkerOverlapThresholdMeters();
       final List<int> nearby = [];
       for (int j = 0; j < _visiblePhotos.length; j++) {
         final double dist = Geolocator.distanceBetween(
@@ -2006,7 +2036,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           _visiblePhotos[j].lat,
           _visiblePhotos[j].lng,
         );
-        if (dist <= 20.0) nearby.add(j);
+        if (dist <= overlapMeters) nearby.add(j);
       }
 
       int nextIdx = idx;
@@ -2333,8 +2363,8 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 bps.forEach((bp) => {
   const bpImg = new Image();
   bpImg.onload = () => {
-    const size = 720;
-    const pad = 32;
+    const size = 900;
+    const pad = 40;
     const inner = size - pad * 2;
     const canvas = document.createElement('canvas');
     canvas.width = size;
@@ -2419,10 +2449,12 @@ function renderMarkers() {
     });
     const m = L.marker([p.lat, p.lng], { icon: htmlIcon, zIndexOffset: zIdx }).addTo(markersLayer);
     m.on('click', () => {
+      const clickedPt = map.latLngToContainerPoint([p.lat, p.lng]);
       const nearby = [];
       for (let j = 0; j < photos.length; j++) {
-        const dist = getDistanceMeters(p.lat, p.lng, photos[j].lat, photos[j].lng);
-        if (dist <= 20.0) nearby.push(j);
+        const targetPt = map.latLngToContainerPoint([photos[j].lat, photos[j].lng]);
+        const pxDist = Math.hypot(clickedPt.x - targetPt.x, clickedPt.y - targetPt.y);
+        if (pxDist <= 20.0) nearby.push(j);
       }
       let nextIdx = i;
       if (nearby.length > 1 && nearby.includes(selectedIdx)) {
@@ -2685,11 +2717,13 @@ if (photos.length > 0) {
         ? Image.memory(
             bp.fastBytes!,
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
           )
         : Image.file(
             File(bp.imagePath),
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
           );
 
@@ -2705,8 +2739,8 @@ if (photos.length > 0) {
             angle: bp.rotation * (pi / 180.0),
             child: Padding(
               padding: EdgeInsets.symmetric(
-                horizontal: boxW * (16.0 / 360.0),
-                vertical: boxH * (16.0 / 360.0),
+                horizontal: boxW * (40.0 / 900.0),
+                vertical: boxH * (40.0 / 900.0),
               ),
               child: imgWidget,
             ),
@@ -2973,12 +3007,12 @@ if (photos.length > 0) {
                   onPressed: () async {
                     if (_mapCtrl == null) return;
                     final pos = await _mapCtrl!.getCameraPosition();
-                    final rad80 = await _calcScreen80Radius();
+                    final rad60 = await _calcScreen80Radius();
                     await _updateMapViewportInfo();
                     setState(() {
                       bp.centerLat = pos.target.latitude;
                       bp.centerLng = pos.target.longitude;
-                      bp.baseRadius = rad80;
+                      bp.baseRadius = rad60;
                       bp.sizeSlider = 0.5;
                     });
                     if (!_useLiveActiveBpOverlay) {
@@ -3375,7 +3409,6 @@ if (photos.length > 0) {
                                 setState(() {
                                   activePhoto.category = val;
                                 });
-                                // 💡 어떤 사진이든 카테고리를 변경하면 다음 촬영 카테고리로 즉시 연동!
                                 saveDefaultCategory(val);
                                 _persistPhotoMetadata();
                               }
