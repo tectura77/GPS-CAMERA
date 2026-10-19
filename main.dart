@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -201,7 +202,7 @@ class BlueprintItem {
   factory BlueprintItem.fromMap(Map<String, dynamic> m, int idx) =>
       BlueprintItem(
         id: m['id'] as String? ??
-            'bp_${DateTime.now().millisecondsSinceEpoch}_$idx',
+            'bp_${DateTime.now().millisecondsMillisecondsSinceEpoch}_$idx',
         name: m['name'] as String? ?? '도면 ${idx + 1}',
         imagePath: m['imagePath'] as String,
         centerLat: (m['centerLat'] as num?)?.toDouble() ?? 37.4984,
@@ -872,6 +873,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   bool _isExporting = false;
   Future<void>? _bpLoadFuture;
 
+  // 내 위치 표시 상태 및 위치 스트림 변수
+  bool _showMyLocation = false;
+  Position? _myCurrentPos;
+  StreamSubscription<Position>? _myLocStreamSub;
+
   BlueprintItem? get _activeBp =>
       (_blueprints.isNotEmpty &&
               _activeBpIdx >= 0 &&
@@ -920,6 +926,12 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     if (_visiblePhotos.isNotEmpty) {
       _selectedIdx = _visiblePhotos.length - 1;
     }
+  }
+
+  @override
+  void dispose() {
+    _myLocStreamSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _restoreCategories() async {
@@ -1068,6 +1080,127 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     } catch (e) {
       debugPrint('Photo meta save error: $e');
     }
+  }
+
+  // 현재 선택된 사진 삭제 (파일 + 목록 + 지도 마커 갱신)
+  Future<void> _deletePhoto(PhotoItem targetPhoto) async {
+    try {
+      final file = File(targetPhoto.path);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (e) {
+      debugPrint('Delete photo file error: $e');
+    }
+
+    setState(() {
+      widget.photos.remove(targetPhoto);
+      if (_visiblePhotos.isEmpty) {
+        _selectedIdx = 0;
+      } else if (_selectedIdx >= _visiblePhotos.length) {
+        _selectedIdx = _visiblePhotos.length - 1;
+      }
+    });
+
+    await _persistPhotoMetadata();
+    await _refreshAllOverlays(includeBlueprint: true);
+
+    if (_visiblePhotos.isNotEmpty) {
+      final current = _visiblePhotos[_selectedIdx];
+      _panMapKeepZoom(current.lat, current.lng);
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🗑️ 사진이 삭제되었습니다.'),
+          duration: Duration(milliseconds: 1000),
+        ),
+      );
+    }
+  }
+
+  // 내 위치 표시용 초록색 원형 마커 아이콘 생성 (캐시 사용)
+  Future<NOverlayImage> _getMyLocationIcon() async {
+    const String key = 'my_loc_dot_icon';
+    if (globalMarkerIconCache.containsKey(key)) {
+      return globalMarkerIconCache[key]!;
+    }
+    final icon = await NOverlayImage.fromWidget(
+      widget: Container(
+        width: 26,
+        height: 26,
+        decoration: BoxDecoration(
+          color: Colors.greenAccent.withOpacity(0.35),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2.5),
+        ),
+        alignment: Alignment.center,
+        child: Container(
+          width: 12,
+          height: 12,
+          decoration: const BoxDecoration(
+            color: Colors.greenAccent,
+            shape: BoxShape.circle,
+          ),
+        ),
+      ),
+      size: const Size(26, 26),
+      context: context,
+    );
+    globalMarkerIconCache[key] = icon;
+    return icon;
+  }
+
+  // 지도 위에 내 위치 마커만 단독 갱신
+  Future<void> _updateMyLocationMarkerOnly() async {
+    if (_mapCtrl == null || !_showMyLocation || _myCurrentPos == null) return;
+    try {
+      final icon = await _getMyLocationIcon();
+      final myMarker = NMarker(
+        id: 'my_current_location_marker',
+        position: NLatLng(_myCurrentPos!.latitude, _myCurrentPos!.longitude),
+        icon: icon,
+      );
+      await _mapCtrl!.addOverlay(myMarker);
+    } catch (e) {
+      debugPrint('My location marker error: $e');
+    }
+  }
+
+  // 내 위치 표기 버튼 ON / OFF 토글
+  Future<void> _toggleMyLocation() async {
+    if (_showMyLocation) {
+      await _myLocStreamSub?.cancel();
+      _myLocStreamSub = null;
+      setState(() => _showMyLocation = false);
+      await _refreshAllOverlays(includeBlueprint: true);
+      return;
+    }
+
+    setState(() => _showMyLocation = true);
+    try {
+      final pos = await Geolocator.getLastKnownPosition() ??
+          await Geolocator.getCurrentPosition(
+            locationSettings:
+                const LocationSettings(accuracy: LocationAccuracy.high),
+          );
+      if (!mounted || !_showMyLocation) return;
+      setState(() => _myCurrentPos = pos);
+      _panMapKeepZoom(pos.latitude, pos.longitude);
+      await _updateMyLocationMarkerOnly();
+    } catch (e) {
+      debugPrint('Get current pos error: $e');
+    }
+
+    await _myLocStreamSub?.cancel();
+    _myLocStreamSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+    ).listen((Position p) {
+      if (!mounted || !_showMyLocation) return;
+      _myCurrentPos = p;
+      _updateMyLocationMarkerOnly();
+    });
   }
 
   Future<void> _showBlueprintActionMenuDialog() async {
@@ -1608,7 +1741,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
-  // [수정 1] 키보드가 올라올 때 세로 폭이 줄어드는 영향을 받지 않도록 지도 가로 폭(widthMeters) 기준으로 화면의 약 60% 크기(반지름 0.32배) 산출
+  // 키보드가 올라올 때 세로 폭이 줄어드는 영향을 받지 않도록 지도 가로 폭(widthMeters) 기준으로 화면의 약 60% 크기(반지름 0.32배) 산출
   Future<double> _calcScreen80Radius() async {
     if (_mapCtrl == null) return 200.0;
     try {
@@ -1643,7 +1776,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // [수정 2] 도면 이미지 리사이징 해상도를 480px -> 1600px로 높여 확대 시 선명도 확보 및 버벅임 방지
+  // 도면 이미지 리사이징 해상도를 1600px로 높여 확대 시 선명도 확보 및 버벅임 방지
   Future<void> _prepareFastBlueprintBytes(BlueprintItem item) async {
     try {
       final File fastCacheFile = File('${item.imagePath}.fast_hq.png');
@@ -1767,7 +1900,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     await _refreshAllOverlays(includeBlueprint: true);
   }
 
-  // [수정 3] 네이버 지도 오버레이 이미지 굽기 해상도를 360 -> 900 (여백 16 -> 40)으로 상향
+  // 네이버 지도 오버레이 이미지 굽기 해상도를 900 (여백 40)으로 유지
   Future<void> _bakeSingleBlueprintOverlay(BlueprintItem bp) async {
     if (!mounted) return;
     final String key = bp.cacheKey;
@@ -3417,6 +3550,29 @@ if (photos.length > 0) {
                         ),
                       ),
                     ),
+                    // 사진 우측 상단 X 삭제 버튼
+                    Positioned(
+                      top: 10,
+                      right: 10,
+                      child: InkWell(
+                        onTap: () => _deletePhoto(activePhoto),
+                        borderRadius: BorderRadius.circular(20),
+                        child: Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: Colors.black87,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                                color: Colors.redAccent, width: 1.5),
+                          ),
+                          child: const Icon(
+                            Icons.close,
+                            color: Colors.redAccent,
+                            size: 20,
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               )
@@ -3500,6 +3656,55 @@ if (photos.length > 0) {
                         child: Container(color: Colors.transparent),
                       ),
                     ),
+                  // 지도 우측 상단 '내 위치 표기' 켜기/끄기 버튼
+                  Positioned(
+                    top: 10,
+                    right: 10,
+                    child: InkWell(
+                      onTap: _toggleMyLocation,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 7),
+                        decoration: BoxDecoration(
+                          color:
+                              _showMyLocation ? Colors.amber : Colors.black87,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _showMyLocation
+                                ? Colors.amber
+                                : Colors.white54,
+                            width: 1.2,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _showMyLocation
+                                  ? Icons.my_location
+                                  : Icons.location_searching,
+                              color: _showMyLocation
+                                  ? Colors.black
+                                  : Colors.white,
+                              size: 16,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _showMyLocation ? '내 위치 ON' : '내 위치 표기',
+                              style: TextStyle(
+                                color: _showMyLocation
+                                    ? Colors.black
+                                    : Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
               );
             },
@@ -3761,6 +3966,11 @@ if (photos.length > 0) {
 
     if (markerBatch.isNotEmpty) {
       await _mapCtrl!.addOverlayAll(markerBatch.toSet());
+    }
+
+    // 내 위치 표기가 켜져 있으면 마커 유지
+    if (_showMyLocation && _myCurrentPos != null) {
+      await _updateMyLocationMarkerOnly();
     }
   }
 }
