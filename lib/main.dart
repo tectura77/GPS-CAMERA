@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -178,7 +179,7 @@ class BlueprintItem {
   }
 
   String get cacheKey =>
-      '${id}_${rotation.toStringAsFixed(1)}_${opacity.toStringAsFixed(2)}';
+      '${id}_hq_${rotation.toStringAsFixed(1)}_${opacity.toStringAsFixed(2)}';
 
   bool get needsBake =>
       cachedOverlayImg == null ||
@@ -201,7 +202,7 @@ class BlueprintItem {
   factory BlueprintItem.fromMap(Map<String, dynamic> m, int idx) =>
       BlueprintItem(
         id: m['id'] as String? ??
-            'bp_${DateTime.now().millisecondsSinceEpoch}_$idx',
+            'bp_${DateTime.now().millisecondsMillisecondsSinceEpoch}_$idx',
         name: m['name'] as String? ?? '도면 ${idx + 1}',
         imagePath: m['imagePath'] as String,
         centerLat: (m['centerLat'] as num?)?.toDouble() ?? 37.4984,
@@ -872,6 +873,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   bool _isExporting = false;
   Future<void>? _bpLoadFuture;
 
+  // 내 위치 표시 상태 및 위치 스트림 변수
+  bool _showMyLocation = false;
+  Position? _myCurrentPos;
+  StreamSubscription<Position>? _myLocStreamSub;
+
   BlueprintItem? get _activeBp =>
       (_blueprints.isNotEmpty &&
               _activeBpIdx >= 0 &&
@@ -920,6 +926,12 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     if (_visiblePhotos.isNotEmpty) {
       _selectedIdx = _visiblePhotos.length - 1;
     }
+  }
+
+  @override
+  void dispose() {
+    _myLocStreamSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _restoreCategories() async {
@@ -1068,6 +1080,127 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     } catch (e) {
       debugPrint('Photo meta save error: $e');
     }
+  }
+
+  // 현재 선택된 사진 삭제 (파일 + 목록 + 지도 마커 갱신)
+  Future<void> _deletePhoto(PhotoItem targetPhoto) async {
+    try {
+      final file = File(targetPhoto.path);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (e) {
+      debugPrint('Delete photo file error: $e');
+    }
+
+    setState(() {
+      widget.photos.remove(targetPhoto);
+      if (_visiblePhotos.isEmpty) {
+        _selectedIdx = 0;
+      } else if (_selectedIdx >= _visiblePhotos.length) {
+        _selectedIdx = _visiblePhotos.length - 1;
+      }
+    });
+
+    await _persistPhotoMetadata();
+    await _refreshAllOverlays(includeBlueprint: true);
+
+    if (_visiblePhotos.isNotEmpty) {
+      final current = _visiblePhotos[_selectedIdx];
+      _panMapKeepZoom(current.lat, current.lng);
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🗑️ 사진이 삭제되었습니다.'),
+          duration: Duration(milliseconds: 1000),
+        ),
+      );
+    }
+  }
+
+  // 내 위치 표시용 초록색 원형 마커 아이콘 생성 (캐시 사용)
+  Future<NOverlayImage> _getMyLocationIcon() async {
+    const String key = 'my_loc_dot_icon';
+    if (globalMarkerIconCache.containsKey(key)) {
+      return globalMarkerIconCache[key]!;
+    }
+    final icon = await NOverlayImage.fromWidget(
+      widget: Container(
+        width: 26,
+        height: 26,
+        decoration: BoxDecoration(
+          color: Colors.greenAccent.withOpacity(0.35),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2.5),
+        ),
+        alignment: Alignment.center,
+        child: Container(
+          width: 12,
+          height: 12,
+          decoration: const BoxDecoration(
+            color: Colors.greenAccent,
+            shape: BoxShape.circle,
+          ),
+        ),
+      ),
+      size: const Size(26, 26),
+      context: context,
+    );
+    globalMarkerIconCache[key] = icon;
+    return icon;
+  }
+
+  // 지도 위에 내 위치 마커만 단독 갱신
+  Future<void> _updateMyLocationMarkerOnly() async {
+    if (_mapCtrl == null || !_showMyLocation || _myCurrentPos == null) return;
+    try {
+      final icon = await _getMyLocationIcon();
+      final myMarker = NMarker(
+        id: 'my_current_location_marker',
+        position: NLatLng(_myCurrentPos!.latitude, _myCurrentPos!.longitude),
+        icon: icon,
+      );
+      await _mapCtrl!.addOverlay(myMarker);
+    } catch (e) {
+      debugPrint('My location marker error: $e');
+    }
+  }
+
+  // 내 위치 표기 버튼 ON / OFF 토글
+  Future<void> _toggleMyLocation() async {
+    if (_showMyLocation) {
+      await _myLocStreamSub?.cancel();
+      _myLocStreamSub = null;
+      setState(() => _showMyLocation = false);
+      await _refreshAllOverlays(includeBlueprint: true);
+      return;
+    }
+
+    setState(() => _showMyLocation = true);
+    try {
+      final pos = await Geolocator.getLastKnownPosition() ??
+          await Geolocator.getCurrentPosition(
+            locationSettings:
+                const LocationSettings(accuracy: LocationAccuracy.high),
+          );
+      if (!mounted || !_showMyLocation) return;
+      setState(() => _myCurrentPos = pos);
+      _panMapKeepZoom(pos.latitude, pos.longitude);
+      await _updateMyLocationMarkerOnly();
+    } catch (e) {
+      debugPrint('Get current pos error: $e');
+    }
+
+    await _myLocStreamSub?.cancel();
+    _myLocStreamSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+    ).listen((Position p) {
+      if (!mounted || !_showMyLocation) return;
+      _myCurrentPos = p;
+      _updateMyLocationMarkerOnly();
+    });
   }
 
   Future<void> _showBlueprintActionMenuDialog() async {
@@ -1608,6 +1741,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     );
   }
 
+  // 키보드가 올라올 때 세로 폭이 줄어드는 영향을 받지 않도록 지도 가로 폭(widthMeters) 기준으로 화면의 약 60% 크기(반지름 0.32배) 산출
   Future<double> _calcScreen80Radius() async {
     if (_mapCtrl == null) return 200.0;
     try {
@@ -1618,14 +1752,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         bounds.southWest.latitude,
         bounds.northEast.longitude,
       );
-      final double heightMeters = Geolocator.distanceBetween(
-        bounds.southWest.latitude,
-        bounds.southWest.longitude,
-        bounds.northEast.latitude,
-        bounds.southWest.longitude,
-      );
-      final double minSpan = min(widthMeters, heightMeters);
-      return (minSpan * 0.44).clamp(30.0, 1500.0);
+      return (widthMeters * 0.32).clamp(15.0, 3000.0);
     } catch (_) {
       return 200.0;
     }
@@ -1649,20 +1776,22 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
+  // 도면 이미지 리사이징 해상도를 1600px로 높여 확대 시 선명도 확보 및 버벅임 방지
   Future<void> _prepareFastBlueprintBytes(BlueprintItem item) async {
     try {
-      final File fastCacheFile = File('${item.imagePath}.fast.png');
+      final File fastCacheFile = File('${item.imagePath}.fast_hq.png');
       if (await fastCacheFile.exists()) {
         item.fastBytes = await fastCacheFile.readAsBytes();
       } else {
         final raw = await File(item.imagePath).readAsBytes();
         final decoded = img.decodeImage(raw);
         if (decoded != null) {
-          final resized = (decoded.width > 480 || decoded.height > 480)
+          final resized = (decoded.width > 1600 || decoded.height > 1600)
               ? img.copyResize(
                   decoded,
-                  width: decoded.width >= decoded.height ? 480 : null,
-                  height: decoded.height > decoded.width ? 480 : null,
+                  width: decoded.width >= decoded.height ? 1600 : null,
+                  height: decoded.height > decoded.width ? 1600 : null,
+                  interpolation: img.Interpolation.average,
                 )
               : decoded;
           item.fastBytes = Uint8List.fromList(img.encodePng(resized, level: 1));
@@ -1686,19 +1815,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       if (picked == null) return;
       if (!mounted) return;
 
-      final String defaultName = '도면 ${_blueprints.length + 1}';
-      final String? chosenName = await _promptBlueprintNameDialog(
-        defaultName: defaultName,
-        title: '새 도면 이름 설정',
-      );
-      if (chosenName == null) return;
-
-      final dir = await getApplicationDocumentsDirectory();
-      final String ext = picked.path.split('.').last;
-      final int nowMs = DateTime.now().millisecondsSinceEpoch;
-      final String destPath = '${dir.path}/bp_saved_$nowMs.$ext';
-      await File(picked.path).copy(destPath);
-
+      // 이름 입력 다이얼로그(키보드)가 뜨기 전에 현재 지도 화면 기준 60% 반지름과 중심 좌표를 먼저 계산
       double centerLat = _visiblePhotos.isNotEmpty
           ? _visiblePhotos[_selectedIdx].lat
           : 37.4984;
@@ -1712,8 +1829,21 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         centerLng = camPos.target.longitude;
       }
 
-      final double screen80Rad = await _calcScreen80Radius();
+      final double screen60Rad = await _calcScreen80Radius();
       await _updateMapViewportInfo();
+
+      final String defaultName = '도면 ${_blueprints.length + 1}';
+      final String? chosenName = await _promptBlueprintNameDialog(
+        defaultName: defaultName,
+        title: '새 도면 이름 설정',
+      );
+      if (chosenName == null) return;
+
+      final dir = await getApplicationDocumentsDirectory();
+      final String ext = picked.path.split('.').last;
+      final int nowMs = DateTime.now().millisecondsSinceEpoch;
+      final String destPath = '${dir.path}/bp_saved_$nowMs.$ext';
+      await File(picked.path).copy(destPath);
 
       final newBp = BlueprintItem(
         id: 'bp_$nowMs',
@@ -1721,7 +1851,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
         imagePath: destPath,
         centerLat: centerLat,
         centerLng: centerLng,
-        baseRadius: screen80Rad,
+        baseRadius: screen60Rad,
         sizeSlider: 0.5,
         rotation: 0.0,
         opacity: 0.5,
@@ -1763,11 +1893,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       if (await f.exists()) await f.delete();
       final fastF = File('${removed.imagePath}.fast.png');
       if (await fastF.exists()) await fastF.delete();
+      final fastHqF = File('${removed.imagePath}.fast_hq.png');
+      if (await fastHqF.exists()) await fastHqF.delete();
     } catch (_) {}
     await _persistBlueprintConfig();
     await _refreshAllOverlays(includeBlueprint: true);
   }
 
+  // 네이버 지도 오버레이 이미지 굽기 해상도를 900 (여백 40)으로 유지
   Future<void> _bakeSingleBlueprintOverlay(BlueprintItem bp) async {
     if (!mounted) return;
     final String key = bp.cacheKey;
@@ -1778,18 +1911,20 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       return;
     }
 
-    const double boxSize = 360.0;
-    const double padSize = 16.0;
+    const double boxSize = 900.0;
+    const double padSize = 40.0;
 
     final Widget imgWidget = bp.fastBytes != null
         ? Image.memory(
             bp.fastBytes!,
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
           )
         : Image.file(
             File(bp.imagePath),
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
           );
 
@@ -2361,8 +2496,8 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 bps.forEach((bp) => {
   const bpImg = new Image();
   bpImg.onload = () => {
-    const size = 720;
-    const pad = 32;
+    const size = 900;
+    const pad = 40;
     const inner = size - pad * 2;
     const canvas = document.createElement('canvas');
     canvas.width = size;
@@ -2715,11 +2850,13 @@ if (photos.length > 0) {
         ? Image.memory(
             bp.fastBytes!,
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
           )
         : Image.file(
             File(bp.imagePath),
             fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
           );
 
@@ -2735,8 +2872,8 @@ if (photos.length > 0) {
             angle: bp.rotation * (pi / 180.0),
             child: Padding(
               padding: EdgeInsets.symmetric(
-                horizontal: boxW * (16.0 / 360.0),
-                vertical: boxH * (16.0 / 360.0),
+                horizontal: boxW * (40.0 / 900.0),
+                vertical: boxH * (40.0 / 900.0),
               ),
               child: imgWidget,
             ),
@@ -3003,12 +3140,12 @@ if (photos.length > 0) {
                   onPressed: () async {
                     if (_mapCtrl == null) return;
                     final pos = await _mapCtrl!.getCameraPosition();
-                    final rad80 = await _calcScreen80Radius();
+                    final rad60 = await _calcScreen80Radius();
                     await _updateMapViewportInfo();
                     setState(() {
                       bp.centerLat = pos.target.latitude;
                       bp.centerLng = pos.target.longitude;
-                      bp.baseRadius = rad80;
+                      bp.baseRadius = rad60;
                       bp.sizeSlider = 0.5;
                     });
                     if (!_useLiveActiveBpOverlay) {
@@ -3413,6 +3550,29 @@ if (photos.length > 0) {
                         ),
                       ),
                     ),
+                    // 사진 우측 상단 X 삭제 버튼
+                    Positioned(
+                      top: 10,
+                      right: 10,
+                      child: InkWell(
+                        onTap: () => _deletePhoto(activePhoto),
+                        borderRadius: BorderRadius.circular(20),
+                        child: Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: Colors.black87,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                                color: Colors.redAccent, width: 1.5),
+                          ),
+                          child: const Icon(
+                            Icons.close,
+                            color: Colors.redAccent,
+                            size: 20,
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               )
@@ -3496,6 +3656,55 @@ if (photos.length > 0) {
                         child: Container(color: Colors.transparent),
                       ),
                     ),
+                  // 지도 우측 상단 '내 위치 표기' 켜기/끄기 버튼
+                  Positioned(
+                    top: 10,
+                    right: 10,
+                    child: InkWell(
+                      onTap: _toggleMyLocation,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 7),
+                        decoration: BoxDecoration(
+                          color:
+                              _showMyLocation ? Colors.amber : Colors.black87,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _showMyLocation
+                                ? Colors.amber
+                                : Colors.white54,
+                            width: 1.2,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _showMyLocation
+                                  ? Icons.my_location
+                                  : Icons.location_searching,
+                              color: _showMyLocation
+                                  ? Colors.black
+                                  : Colors.white,
+                              size: 16,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _showMyLocation ? '내 위치 ON' : '내 위치 표기',
+                              style: TextStyle(
+                                color: _showMyLocation
+                                    ? Colors.black
+                                    : Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
               );
             },
@@ -3757,6 +3966,11 @@ if (photos.length > 0) {
 
     if (markerBatch.isNotEmpty) {
       await _mapCtrl!.addOverlayAll(markerBatch.toSet());
+    }
+
+    // 내 위치 표기가 켜져 있으면 마커 유지
+    if (_showMyLocation && _myCurrentPos != null) {
+      await _updateMyLocationMarkerOnly();
     }
   }
 }
