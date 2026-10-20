@@ -202,7 +202,7 @@ class BlueprintItem {
   factory BlueprintItem.fromMap(Map<String, dynamic> m, int idx) =>
       BlueprintItem(
         id: m['id'] as String? ??
-            'bp_${DateTime.now().millisecondsMillisecondsSinceEpoch}_$idx',
+            'bp_${DateTime.now().millisecondsSinceEpoch}_$idx',
         name: m['name'] as String? ?? '도면 ${idx + 1}',
         imagePath: m['imagePath'] as String,
         centerLat: (m['centerLat'] as num?)?.toDouble() ?? 37.4984,
