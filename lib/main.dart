@@ -3628,6 +3628,12 @@ Positioned(
                   ],
                 ),
               )
+            : const Center(
+                child: Text(
+                  '저장된 사진이 없습니다.',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ));
     final double initLat =
         activePhoto?.lat ?? _activeBp?.centerLat ?? 37.4984;
     final double initLng =
