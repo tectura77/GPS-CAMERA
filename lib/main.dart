@@ -3407,6 +3407,35 @@ if (photos.length > 0) {
 
     final List<String> cats = _allCategories;
 
+// 👇 사진 하단 메모(내용) 입력용 컨트롤러 및 자동 동기화 변수
+  final TextEditingController _memoCtrl = TextEditingController();
+  PhotoItem? _lastSyncedPhoto;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<String> dateTabs = ['전체 보기'];
+    final Set<String> days =
+        widget.photos.map((p) => p.timestamp.substring(0, 10)).toSet();
+    final List<String> sortedDays = days.toList()
+      ..sort((a, b) => b.compareTo(a));
+    dateTabs.addAll(sortedDays);
+
+    final bool portrait =
+        MediaQuery.of(context).orientation == Orientation.portrait;
+    final double bottomSafe = MediaQuery.of(context).viewPadding.bottom;
+
+    final PhotoItem? activePhoto = _visiblePhotos.isNotEmpty
+        ? _visiblePhotos[_selectedIdx.clamp(0, _visiblePhotos.length - 1)]
+        : null;
+
+    // 사진 선택이 바뀌거나 삭제·필터링될 때 해당 사진의 메모를 자동으로 입력창에 반영
+    if (_lastSyncedPhoto != activePhoto) {
+      _lastSyncedPhoto = activePhoto;
+      _memoCtrl.text = activePhoto?.memo ?? '';
+    }
+
+    final List<String> cats = _allCategories;
+
     final Widget leftOrTopPane = _bpEditMode
         ? _buildBlueprintControlBox()
         : (activePhoto != null
@@ -3414,164 +3443,216 @@ if (photos.length > 0) {
                 color: Colors.black,
                 width: double.infinity,
                 height: double.infinity,
-                child: Stack(
+                child: Column(
                   children: [
-                    InteractiveViewer(
-                      panEnabled: true,
-                      boundaryMargin: const EdgeInsets.all(20),
-                      minScale: 0.5,
-                      maxScale: 4.0,
-                      child: Center(
-                        child: Image.file(
-                          File(activePhoto.path),
-                          fit: BoxFit.contain,
-                          gaplessPlayback: true,
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      top: 10,
-                      left: 10,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.black87,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.amber, width: 1.2),
-                        ),
-                        child: DropdownButtonHideUnderline(
-                          child: DropdownButton<String>(
-                            value: cats.contains(activePhoto.category)
-                                ? activePhoto.category
-                                : '미분류',
-                            isDense: true,
-                            dropdownColor: Colors.grey[900],
-                            icon: const Padding(
-                              padding: EdgeInsets.only(left: 4),
-                              child: Icon(Icons.arrow_drop_down,
-                                  color: Colors.amber, size: 18),
+                    // 1. 상단: 사진 뷰어 + 좌측 상단 카테고리 + 우측 상단 삭제 버튼
+                    Expanded(
+                      child: Stack(
+                        children: [
+                          InteractiveViewer(
+                            panEnabled: true,
+                            boundaryMargin: const EdgeInsets.all(20),
+                            minScale: 0.5,
+                            maxScale: 4.0,
+                            child: Center(
+                              child: Image.file(
+                                File(activePhoto.path),
+                                fit: BoxFit.contain,
+                                gaplessPlayback: true,
+                              ),
                             ),
-                            style: const TextStyle(
-                              color: Colors.amber,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 11.5,
-                            ),
-                            selectedItemBuilder: (context) {
-                              return [
-                                ...cats.map(
-                                  (c) => Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: Text(
-                                      c,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 11.5,
-                                        fontWeight: FontWeight.bold,
+                          ),
+                          Positioned(
+                            top: 10,
+                            left: 10,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: Colors.black87,
+                                borderRadius: BorderRadius.circular(8),
+                                border:
+                                    Border.all(color: Colors.amber, width: 1.2),
+                              ),
+                              child: DropdownButtonHideUnderline(
+                                child: DropdownButton<String>(
+                                  value: cats.contains(activePhoto.category)
+                                      ? activePhoto.category
+                                      : '미분류',
+                                  isDense: true,
+                                  dropdownColor: Colors.grey[900],
+                                  icon: const Padding(
+                                    padding: EdgeInsets.only(left: 4),
+                                    child: Icon(Icons.arrow_drop_down,
+                                        color: Colors.amber, size: 18),
+                                  ),
+                                  style: const TextStyle(
+                                    color: Colors.amber,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 11.5,
+                                  ),
+                                  selectedItemBuilder: (context) {
+                                    return [
+                                      ...cats.map(
+                                        (c) => Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: Text(
+                                            c,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 11.5,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
                                       ),
-                                    ),
-                                  ),
-                                ),
-                                const Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Text(
-                                    '+ 새 카테고리 입력',
-                                    style: TextStyle(
-                                      color: Colors.amberAccent,
-                                      fontSize: 11.5,
-                                    ),
-                                  ),
-                                ),
-                              ];
-                            },
-                            items: [
-                              ...cats.map(
-                                (c) => DropdownMenuItem<String>(
-                                  value: c,
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      ConstrainedBox(
-                                        constraints: const BoxConstraints(
-                                            minWidth: 64, maxWidth: 115),
+                                      const Align(
+                                        alignment: Alignment.centerLeft,
                                         child: Text(
-                                          c,
-                                          overflow: TextOverflow.ellipsis,
+                                          '+ 새 카테고리 입력',
                                           style: TextStyle(
-                                            color: c == '미분류'
-                                                ? Colors.white70
-                                                : Colors.white,
+                                            color: Colors.amberAccent,
                                             fontSize: 11.5,
                                           ),
                                         ),
                                       ),
-                                      if (c != '미분류')
-                                        InkWell(
-                                          onTap: () {
-                                            Navigator.of(context).pop();
-                                            _deleteCategory(c);
-                                          },
-                                          child: const Padding(
-                                            padding: EdgeInsets.only(
-                                                left: 6, top: 2, bottom: 2),
-                                            child: Icon(
-                                              Icons.close,
-                                              size: 14,
-                                              color: Colors.redAccent,
+                                    ];
+                                  },
+                                  items: [
+                                    ...cats.map(
+                                      (c) => DropdownMenuItem<String>(
+                                        value: c,
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            ConstrainedBox(
+                                              constraints: const BoxConstraints(
+                                                  minWidth: 64, maxWidth: 115),
+                                              child: Text(
+                                                c,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  color: c == '미분류'
+                                                      ? Colors.white70
+                                                      : Colors.white,
+                                                  fontSize: 11.5,
+                                                ),
+                                              ),
                                             ),
-                                          ),
+                                            if (c != '미분류')
+                                              InkWell(
+                                                onTap: () {
+                                                  Navigator.of(context).pop();
+                                                  _deleteCategory(c);
+                                                },
+                                                child: const Padding(
+                                                  padding: EdgeInsets.only(
+                                                      left: 6,
+                                                      top: 2,
+                                                      bottom: 2),
+                                                  child: Icon(
+                                                    Icons.close,
+                                                    size: 14,
+                                                    color: Colors.redAccent,
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
                                         ),
-                                    ],
-                                  ),
+                                      ),
+                                    ),
+                                    const DropdownMenuItem<String>(
+                                      value: '__ADD_NEW__',
+                                      child: Text(
+                                        '+ 새 카테고리 입력',
+                                        style: TextStyle(
+                                          color: Colors.amberAccent,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                  onChanged: (val) {
+                                    if (val == '__ADD_NEW__') {
+                                      _showAddCategoryDialog(activePhoto);
+                                    } else if (val != null) {
+                                      setState(() {
+                                        activePhoto.category = val;
+                                      });
+                                      saveDefaultCategory(val);
+                                      _persistPhotoMetadata();
+                                    }
+                                  },
                                 ),
                               ),
-                              const DropdownMenuItem<String>(
-                                value: '__ADD_NEW__',
-                                child: Text(
-                                  '+ 새 카테고리 입력',
-                                  style: TextStyle(
-                                    color: Colors.amberAccent,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 11,
-                                  ),
-                                ),
-                              ),
-                            ],
-                            onChanged: (val) {
-                              if (val == '__ADD_NEW__') {
-                                _showAddCategoryDialog(activePhoto);
-                              } else if (val != null) {
-                                setState(() {
-                                  activePhoto.category = val;
-                                });
-                                saveDefaultCategory(val);
-                                _persistPhotoMetadata();
-                              }
-                            },
+                            ),
                           ),
-                        ),
+                          Positioned(
+                            top: 10,
+                            right: 10,
+                            child: InkWell(
+                              onTap: () => _deletePhoto(activePhoto),
+                              borderRadius: BorderRadius.circular(20),
+                              child: Container(
+                                padding: const EdgeInsets.all(6),
+                                decoration: BoxDecoration(
+                                  color: Colors.black87,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                      color: Colors.redAccent, width: 1.5),
+                                ),
+                                child: const Icon(
+                                  Icons.close,
+                                  color: Colors.redAccent,
+                                  size: 20,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    Positioned(
-                      top: 10,
-                      right: 10,
-                      child: InkWell(
-                        onTap: () => _deletePhoto(activePhoto),
-                        borderRadius: BorderRadius.circular(20),
-                        child: Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: BoxDecoration(
-                            color: Colors.black87,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                                color: Colors.redAccent, width: 1.5),
+                    // 2. 하단 (보라색 칸 영역): 사진 내용(메모) 입력창
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.fromLTRB(10, 4, 10, 6),
+                      color: Colors.black,
+                      child: TextField(
+                        controller: _memoCtrl,
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 13),
+                        textInputAction: TextInputAction.done,
+                        onTapOutside: (_) => FocusScope.of(context).unfocus(),
+                        onChanged: (val) {
+                          activePhoto.memo = val;
+                          _persistPhotoMetadata();
+                        },
+                        onSubmitted: (_) => FocusScope.of(context).unfocus(),
+                        decoration: InputDecoration(
+                          isDense: true,
+                          filled: true,
+                          fillColor: Colors.grey[900],
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 9),
+                          hintText: '사진에 대한 내용을 입력하세요...',
+                          hintStyle: const TextStyle(
+                              color: Colors.white38, fontSize: 12),
+                          prefixIcon: const Icon(Icons.edit_note,
+                              color: Colors.amber, size: 18),
+                          prefixIconConstraints:
+                              const BoxConstraints(minWidth: 34),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(
+                                color: Colors.white24, width: 1.0),
                           ),
-                          child: const Icon(
-                            Icons.close,
-                            color: Colors.redAccent,
-                            size: 20,
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(
+                                color: Colors.amber, width: 1.5),
                           ),
                         ),
                       ),
@@ -3584,7 +3665,8 @@ if (photos.length > 0) {
                   '저장된 사진이 없습니다.',
                   style: TextStyle(color: Colors.white),
                 ),
-              ));  
+              ));
+
     final double initLat =
         activePhoto?.lat ?? _activeBp?.centerLat ?? 37.4984;
     final double initLng =
@@ -3669,8 +3751,9 @@ if (photos.length > 0) {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 7),
                         decoration: BoxDecoration(
-                          color:
-                              _showMyLocation ? Colors.amber : Colors.black87,
+                          color: _showMyLocation
+                              ? Colors.amber
+                              : Colors.black87,
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
                             color: _showMyLocation
@@ -3719,6 +3802,7 @@ if (photos.length > 0) {
 
     return Scaffold(
       backgroundColor: Colors.black,
+      resizeToAvoidBottomInset: false, // 키보드가 올라와도 사진·지도 화면 비율 유지
       appBar: AppBar(
         backgroundColor: Colors.black,
         automaticallyImplyLeading: false,
@@ -3802,7 +3886,8 @@ if (photos.length > 0) {
               onTap: _isExporting ? null : _showExportOptionsSheet,
               borderRadius: BorderRadius.circular(4),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -3822,7 +3907,8 @@ if (photos.length > 0) {
               onTap: _showBlueprintActionMenuDialog,
               borderRadius: BorderRadius.circular(4),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
