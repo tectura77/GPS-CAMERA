@@ -3388,30 +3388,7 @@ if (photos.length > 0) {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final List<String> dateTabs = ['전체 보기'];
-    final Set<String> days =
-        widget.photos.map((p) => p.timestamp.substring(0, 10)).toSet();
-    final List<String> sortedDays = days.toList()
-      ..sort((a, b) => b.compareTo(a));
-    dateTabs.addAll(sortedDays);
-
-    final bool portrait =
-        MediaQuery.of(context).orientation == Orientation.portrait;
-    final double bottomSafe = MediaQuery.of(context).viewPadding.bottom;
-
-    final PhotoItem? activePhoto = _visiblePhotos.isNotEmpty
-        ? _visiblePhotos[_selectedIdx.clamp(0, _visiblePhotos.length - 1)]
-        : null;
-
-    final List<String> cats = _allCategories;
-
-// 👇 사진 하단 메모(내용) 입력용 컨트롤러 및 자동 동기화 변수
-  final TextEditingController _memoCtrl = TextEditingController();
-  PhotoItem? _lastSyncedPhoto;
-
-  @override
+@override
   Widget build(BuildContext context) {
     final List<String> dateTabs = ['전체 보기'];
     final Set<String> days =
