@@ -95,6 +95,7 @@ class PhotoItem {
   final double pitch;
   final String timestamp;
   String category;
+  String memo;
 
   PhotoItem({
     required this.path,
@@ -106,6 +107,7 @@ class PhotoItem {
     required this.pitch,
     required this.timestamp,
     this.category = '미분류',
+    this.memo = '',
   });
 
   Map<String, dynamic> toMap() => {
@@ -118,6 +120,7 @@ class PhotoItem {
         'pitch': pitch,
         'time': timestamp,
         'category': category,
+        'memo': memo,
       };
 
   factory PhotoItem.fromMap(Map<String, dynamic> m) => PhotoItem(
@@ -130,6 +133,7 @@ class PhotoItem {
         pitch: (m['pitch'] as num).toDouble(),
         timestamp: m['time'] as String,
         category: m['category'] as String? ?? '미분류',
+        memo: m['memo'] as String? ?? '',
       );
 }
 
@@ -3551,7 +3555,14 @@ if (photos.length > 0) {
                       ),
                     ),
                     // 사진 우측 상단 X 삭제 버튼
-                    Positioned(
+
+            : const Center(
+                child: Text(
+                  '저장된 사진이 없습니다.',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ));
+Positioned(
                       top: 10,
                       right: 10,
                       child: InkWell(
@@ -3573,16 +3584,50 @@ if (photos.length > 0) {
                         ),
                       ),
                     ),
+                    Positioned(
+                      bottom: 6,
+                      left: 10,
+                      right: 10,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.black87,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white38, width: 1.0),
+                        ),
+                        child: TextFormField(
+                          key: ValueKey(activePhoto.path),
+                          initialValue: activePhoto.memo,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12.5,
+                          ),
+                          maxLines: 2,
+                          minLines: 1,
+                          textInputAction: TextInputAction.done,
+                          onTapOutside: (_) =>
+                              FocusScope.of(context).unfocus(),
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: InputBorder.none,
+                            contentPadding: EdgeInsets.symmetric(vertical: 6),
+                            hintText: '사진 내용을 입력하세요...',
+                            hintStyle: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 12,
+                            ),
+                          ),
+                          onChanged: (val) {
+                            activePhoto.memo = val;
+                            _persistPhotoMetadata();
+                          },
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               )
-            : const Center(
-                child: Text(
-                  '저장된 사진이 없습니다.',
-                  style: TextStyle(color: Colors.white),
-                ),
-              ));
-
     final double initLat =
         activePhoto?.lat ?? _activeBp?.centerLat ?? 37.4984;
     final double initLng =
