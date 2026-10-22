@@ -28,7 +28,8 @@ String currentDefaultCategory = '미분류';
 
 // 내 위치 표기 유지 및 강제 이동 좌표 전역 변수 (null이면 실시간 GPS 사용)
 bool globalShowMyLocation = false;
-NLatLng? forcedUserLocation;
+double? forcedUserLat;
+double? forcedUserLng;
 
 Future<void> saveDefaultCategory(String cat) async {
   currentDefaultCategory = cat.trim().isEmpty ? '미분류' : cat.trim();
@@ -525,13 +526,16 @@ class _CameraScreenState extends State<CameraScreen> {
       final Uint8List rawBytes = await rawFile.readAsBytes();
       img.Image? decodedImg = img.decodeImage(rawBytes);
 
-      final double? useLat = forcedUserLocation?.latitude ?? _pos?.latitude;
-      final double? useLng = forcedUserLocation?.longitude ?? _pos?.longitude;
-      final double useAlt = _pos?.altitude ?? 0.0;
-      final double useAcc =
-          forcedUserLocation != null ? 1.0 : (_pos?.accuracy ?? 5.0);
+      final bool hasForcedLoc =
+          forcedUserLat != null && forcedUserLng != null;
+      if (decodedImg != null && (hasForcedLoc || _pos != null)) {
+        final double useLat =
+            hasForcedLoc ? forcedUserLat! : _pos!.latitude;
+        final double useLng =
+            hasForcedLoc ? forcedUserLng! : _pos!.longitude;
+        final double useAlt = _pos != null ? _pos!.altitude : 0.0;
+        final double hAcc = hasForcedLoc ? 1.0 : _pos!.accuracy;
 
-      if (decodedImg != null && useLat != null && useLng != null) {
         decodedImg = img.bakeOrientation(decodedImg);
 
         final int w = decodedImg.width;
@@ -569,7 +573,6 @@ class _CameraScreenState extends State<CameraScreen> {
         final String nowStr = DateTime.now().toString().substring(0, 16);
         final String folderDate = nowStr.substring(0, 10);
         final String dirEn = _compassLabel(_heading, korean: false);
-        final double hAcc = useAcc;
         final double vAcc = hAcc * 1.5;
 
         final String stamp =
@@ -667,11 +670,11 @@ class _CameraScreenState extends State<CameraScreen> {
 
     final String dirKr = _compassLabel(_heading, korean: true);
     String locInfo = '위치 정보 수신 중...';
-    if (forcedUserLocation != null) {
-      final double altVal = _pos?.altitude ?? 0.0;
+    if (forcedUserLat != null && forcedUserLng != null) {
+      final double altVal = _pos != null ? _pos!.altitude : 0.0;
       locInfo =
-          '위도: ${forcedUserLocation!.latitude.toStringAsFixed(6)} (📌강제위치)\n'
-          '경도: ${forcedUserLocation!.longitude.toStringAsFixed(6)} (📌강제위치)\n'
+          '위도: ${forcedUserLat!.toStringAsFixed(6)} (강제지정)\n'
+          '경도: ${forcedUserLng!.toStringAsFixed(6)} (강제지정)\n'
           '표고: ${altVal.toStringAsFixed(1)}m';
     } else if (_pos != null) {
       final double acc = _pos!.accuracy;
@@ -771,15 +774,18 @@ class _CameraScreenState extends State<CameraScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (forcedUserLocation != null)
+                if (forcedUserLat != null && forcedUserLng != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 6),
                     child: InkWell(
                       onTap: () {
-                        setState(() => forcedUserLocation = null);
+                        setState(() {
+                          forcedUserLat = null;
+                          forcedUserLng = null;
+                        });
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
-                            content: Text('🛰️ 실시간 GPS 위치 모드로 복귀했습니다.'),
+                            content: Text('실시간 GPS 위치 모드로 복귀했습니다.'),
                             duration: Duration(milliseconds: 1100),
                           ),
                         );
@@ -794,7 +800,8 @@ class _CameraScreenState extends State<CameraScreen> {
                         child: const Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.push_pin, size: 14, color: Colors.black),
+                            Icon(Icons.my_location,
+                                size: 14, color: Colors.black),
                             SizedBox(width: 4),
                             Text(
                               '강제 이동 위치 적용 중 (터치 시 GPS 복귀)',
@@ -942,6 +949,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   bool _showMyLocation = false;
   Position? _myCurrentPos;
   StreamSubscription<Position>? _myLocStreamSub;
+  Offset? _mapTapDownPos;
+  int _mapTapDownMs = 0;
 
   BlueprintItem? get _activeBp =>
       (_blueprints.isNotEmpty &&
@@ -986,7 +995,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   @override
   void initState() {
     super.initState();
-    _showMyLocation = globalShowMyLocation || forcedUserLocation != null;
+    _showMyLocation =
+        globalShowMyLocation || (forcedUserLat != null && forcedUserLng != null);
     if (_showMyLocation) {
       _startMyLocationStream();
     }
@@ -1221,19 +1231,21 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     return icon;
   }
 
-  // 지도 위에 내 위치 마커만 단독 갱신 (강제 이동 위치가 있으면 해당 위치 우선 표시)
+  // 지도 위에 내 위치 마커만 단독 갱신 (강제 지정 위치가 있으면 우선 표시)
   Future<void> _updateMyLocationMarkerOnly() async {
     if (_mapCtrl == null || !_showMyLocation) return;
-    final NLatLng? targetLatLng = forcedUserLocation ??
-        (_myCurrentPos != null
-            ? NLatLng(_myCurrentPos!.latitude, _myCurrentPos!.longitude)
-            : null);
-    if (targetLatLng == null) return;
+    double? lat = forcedUserLat;
+    double? lng = forcedUserLng;
+    if (lat == null || lng == null) {
+      if (_myCurrentPos == null) return;
+      lat = _myCurrentPos!.latitude;
+      lng = _myCurrentPos!.longitude;
+    }
     try {
       final icon = await _getMyLocationIcon();
       final myMarker = NMarker(
         id: 'my_current_location_marker',
-        position: targetLatLng,
+        position: NLatLng(lat, lng),
         icon: icon,
       );
       await _mapCtrl!.addOverlay(myMarker);
@@ -1274,7 +1286,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       setState(() {
         _showMyLocation = false;
         globalShowMyLocation = false;
-        forcedUserLocation = null;
+        forcedUserLat = null;
+        forcedUserLng = null;
       });
       await _refreshAllOverlays(includeBlueprint: true);
       return;
@@ -1285,12 +1298,58 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       globalShowMyLocation = true;
     });
     await _startMyLocationStream();
-    final NLatLng? target = forcedUserLocation ??
-        (_myCurrentPos != null
-            ? NLatLng(_myCurrentPos!.latitude, _myCurrentPos!.longitude)
-            : null);
-    if (target != null) {
-      _panMapKeepZoom(target.latitude, target.longitude);
+    final double? targetLat = forcedUserLat ?? _myCurrentPos?.latitude;
+    final double? targetLng = forcedUserLng ?? _myCurrentPos?.longitude;
+    if (targetLat != null && targetLng != null) {
+      _panMapKeepZoom(targetLat, targetLng);
+    }
+  }
+
+  // 지도 화면을 짧게 터치했을 때 내 위치를 해당 지점으로 강제 이동
+  Future<void> _handleMapTapForForcedLocation(Offset localPos) async {
+    if (!_showMyLocation || _bpEditMode || _mapCtrl == null) return;
+    if (_mapWidgetSize.width <= 10 || _mapWidgetSize.height <= 10) return;
+
+    try {
+      final NLatLngBounds bounds =
+          _currentMapBounds ?? await _mapCtrl!.getContentBounds();
+      final double latSpan =
+          bounds.northEast.latitude - bounds.southWest.latitude;
+      final double lngSpan =
+          bounds.northEast.longitude - bounds.southWest.longitude;
+      if (latSpan.abs() < 1e-9 || lngSpan.abs() < 1e-9) return;
+
+      final double tapLat = bounds.northEast.latitude -
+          (localPos.dy / _mapWidgetSize.height) * latSpan;
+      final double tapLng = bounds.southWest.longitude +
+          (localPos.dx / _mapWidgetSize.width) * lngSpan;
+
+      // 기존 사진 마커를 누른 경우에는 사진 선택이 동작하도록 내 위치 강제 이동 생략
+      final double overlapMeters = await _getMarkerOverlapThresholdMeters();
+      for (final p in _visiblePhotos) {
+        final double dist =
+            Geolocator.distanceBetween(tapLat, tapLng, p.lat, p.lng);
+        if (dist <= overlapMeters) return;
+      }
+
+      setState(() {
+        forcedUserLat = tapLat;
+        forcedUserLng = tapLng;
+      });
+      await _updateMyLocationMarkerOnly();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              '내 위치가 터치한 지점으로 강제 이동되었습니다. 이제 촬영하면 이 좌표로 저장됩니다!',
+            ),
+            duration: Duration(milliseconds: 1300),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Force location tap error: $e');
     }
   }
 
@@ -2862,8 +2921,9 @@ if (photos.length > 0) {
 
       await Share.shareXFiles(
         [XFile(outFile.path)],
-        text:
-            '🖼️ 현장 사진 & 도면 위치 합본 [카테고리: ${currentPhoto.category}] (${currentPhoto.timestamp})\n위도: ${currentPhoto.lat.toStringAsFixed(6)}, 경도: ${currentPhoto.lng.toStringAsFixed(6)}${currentPhoto.memo.trim().isNotEmpty ? "\n내용: ${currentPhoto.memo.trim()}" : ""}',
+        text: currentPhoto.memo.trim().isNotEmpty
+            ? '🖼️ 현장 사진 & 도면 위치 합본 [카테고리: ${currentPhoto.category}] (${currentPhoto.timestamp})\n위도: ${currentPhoto.lat.toStringAsFixed(6)}, 경도: ${currentPhoto.lng.toStringAsFixed(6)}\n내용: ${currentPhoto.memo.trim()}'
+            : '🖼️ 현장 사진 & 도면 위치 합본 [카테고리: ${currentPhoto.category}] (${currentPhoto.timestamp})\n위도: ${currentPhoto.lat.toStringAsFixed(6)}, 경도: ${currentPhoto.lng.toStringAsFixed(6)}',
       );
     } catch (e) {
       if (mounted) {
@@ -3754,42 +3814,43 @@ if (photos.length > 0) {
                   Size(constraints.maxWidth, constraints.maxHeight);
               return Stack(
                 children: [
-                  NaverMap(
-                    options: NaverMapViewOptions(
-                      initialCameraPosition: NCameraPosition(
-                        target: NLatLng(initLat, initLng),
-                        zoom: 16,
-                      ),
-                    ),
-                    onMapReady: (ctrl) async {
-                      _mapCtrl = ctrl;
-                      if (_bpLoadFuture != null) {
-                        await _bpLoadFuture;
-                      }
-                      await _updateMapViewportInfo();
-                      await _refreshAllOverlays(includeBlueprint: true);
+                  Listener(
+                    behavior: HitTestBehavior.translucent,
+                    onPointerDown: (event) {
+                      _mapTapDownPos = event.localPosition;
+                      _mapTapDownMs = DateTime.now().millisecondsSinceEpoch;
                     },
-                    onCameraIdle: () {
-                      _updateMapViewportInfo();
-                    },
-                    onMapTapped: (point, latLng) async {
+                    onPointerUp: (event) {
                       if (!_showMyLocation || _bpEditMode) return;
-                      setState(() {
-                        forcedUserLocation = latLng;
-                      });
-                      await _updateMyLocationMarkerOnly();
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              '📌 내 위치가 터치한 지점으로 강제 이동되었습니다. 이제 촬영하면 이 좌표로 저장됩니다!',
-                            ),
-                            duration: Duration(milliseconds: 1400),
-                          ),
-                        );
+                      final Offset? downPos = _mapTapDownPos;
+                      if (downPos == null) return;
+                      final int elapsed =
+                          DateTime.now().millisecondsSinceEpoch - _mapTapDownMs;
+                      final double dist =
+                          (event.localPosition - downPos).distance;
+                      if (elapsed < 280 && dist < 10.0) {
+                        _handleMapTapForForcedLocation(event.localPosition);
                       }
                     },
+                    child: NaverMap(
+                      options: NaverMapViewOptions(
+                        initialCameraPosition: NCameraPosition(
+                          target: NLatLng(initLat, initLng),
+                          zoom: 16,
+                        ),
+                      ),
+                      onMapReady: (ctrl) async {
+                        _mapCtrl = ctrl;
+                        if (_bpLoadFuture != null) {
+                          await _bpLoadFuture;
+                        }
+                        await _updateMapViewportInfo();
+                        await _refreshAllOverlays(includeBlueprint: true);
+                      },
+                      onCameraIdle: () {
+                        _updateMapViewportInfo();
+                      },
+                    ),
                   ),
                   if (_useLiveActiveBpOverlay)
                     _buildLiveBlueprintOverlayWidget(_mapWidgetSize),
@@ -3829,13 +3890,16 @@ if (photos.length > 0) {
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            if (_showMyLocation && forcedUserLocation != null)
+                            if (_showMyLocation &&
+                                forcedUserLat != null &&
+                                forcedUserLng != null)
                               Padding(
                                 padding: const EdgeInsets.only(right: 6),
                                 child: InkWell(
                                   onTap: () async {
                                     setState(() {
-                                      forcedUserLocation = null;
+                                      forcedUserLat = null;
+                                      forcedUserLng = null;
                                     });
                                     await _updateMyLocationMarkerOnly();
                                     if (_myCurrentPos != null) {
@@ -3844,12 +3908,10 @@ if (photos.length > 0) {
                                     }
                                     if (mounted) {
                                       ScaffoldMessenger.of(context)
-                                          .hideCurrentSnackBar();
-                                      ScaffoldMessenger.of(context)
                                           .showSnackBar(
                                         const SnackBar(
                                           content:
-                                              Text('🛰️ 실시간 GPS 위치로 복귀했습니다.'),
+                                              Text('실시간 GPS 위치로 복귀했습니다.'),
                                           duration:
                                               Duration(milliseconds: 1100),
                                         ),
@@ -3901,9 +3963,7 @@ if (photos.length > 0) {
                                   children: [
                                     Icon(
                                       _showMyLocation
-                                          ? (forcedUserLocation != null
-                                              ? Icons.push_pin
-                                              : Icons.my_location)
+                                          ? Icons.my_location
                                           : Icons.location_searching,
                                       color: _showMyLocation
                                           ? Colors.black
@@ -3913,7 +3973,8 @@ if (photos.length > 0) {
                                     const SizedBox(width: 4),
                                     Text(
                                       _showMyLocation
-                                          ? (forcedUserLocation != null
+                                          ? ((forcedUserLat != null &&
+                                                  forcedUserLng != null)
                                               ? '강제위치 ON'
                                               : '내 위치 ON')
                                           : '내 위치 표기',
@@ -3941,7 +4002,7 @@ if (photos.length > 0) {
                               borderRadius: BorderRadius.circular(6),
                             ),
                             child: const Text(
-                              '💡 지도/도면을 터치하면 내 위치가 강제 이동됩니다',
+                              '지도/도면을 터치하면 내 위치가 강제 이동됩니다',
                               style: TextStyle(
                                 color: Colors.amberAccent,
                                 fontSize: 10.5,
@@ -4217,7 +4278,8 @@ if (photos.length > 0) {
 
     // 내 위치 표기가 켜져 있으면 마커 유지
     if (_showMyLocation &&
-        (_myCurrentPos != null || forcedUserLocation != null)) {
+        (_myCurrentPos != null ||
+            (forcedUserLat != null && forcedUserLng != null))) {
       await _updateMyLocationMarkerOnly();
     }
   }
