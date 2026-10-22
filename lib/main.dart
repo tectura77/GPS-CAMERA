@@ -594,19 +594,29 @@ class _CameraScreenState extends State<CameraScreen> {
       '${dayDir.path}/photo_${DateTime.now().millisecondsSinceEpoch}.jpg';
     await File(targetPath).writeAsBytes(jpgBytes);
 
+    String toDmsRational(double degVal) {
+     final double absVal = degVal.abs();
+     final int d = absVal.floor();
+     final double minFull = (absVal - d) * 60.0;
+     final int m = minFull.floor();
+     final int s10000 = ((minFull - m) * 60.0 * 10000.0).round();
+     return '$d/1,$m/1,$s10000/10000';
+    }
+
     final int azRational = (_heading.clamp(0.0, 360.0) * 100).round();
     final int altRational = (_pos!.altitude.abs() * 100).round();
 
     final exif = await Exif.fromPath(targetPath);
     await exif.writeAttributes({
-     'GPSLatitude': useLat.abs().toString(),
+     'GPSLatitude': toDmsRational(useLat),
      'GPSLatitudeRef': useLat >= 0 ? 'N' : 'S',
-     'GPSLongitude': useLng.abs().toString(),
+     'GPSLongitude': toDmsRational(useLng),
      'GPSLongitudeRef': useLng >= 0 ? 'E' : 'W',
      'GPSAltitude': '$altRational/100',
      'GPSAltitudeRef': _pos!.altitude >= 0 ? '0' : '1',
      'GPSImgDirection': '$azRational/100',
      'GPSImgDirectionRef': 'T',
+     'UserComment': 'GPS:${useLat.toStringAsFixed(6)},${useLng.toStringAsFixed(6)},${_pos!.altitude.toStringAsFixed(1)},${_heading.toStringAsFixed(1)}',
     });
     await exif.close();
 
@@ -1111,10 +1121,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
  double? _parseExifCoord(Object? raw, String? ref) {
   if (raw == null) return null;
-  final String s =
-    raw.toString().replaceAll('[', '').replaceAll(']', '').trim();
+  String s = raw.toString().replaceAll('[', '').replaceAll(']', '').trim();
   if (s.isEmpty) return null;
-  final List<String> parts = s.split(',');
+  final List<String> parts =
+    s.contains(',') ? s.split(',') : s.split(RegExp(r'\s+'));
   double? deg;
   if (parts.length >= 3) {
    final double? d = _parseRationalToken(parts[0]);
@@ -1126,29 +1136,364 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   } else {
    deg = _parseRationalToken(parts[0]);
   }
-  if (deg == null || deg.isNaN) return null;
+  if (deg == null || deg.isNaN || deg == 0.0) return null;
   final String r = (ref ?? '').trim().toUpperCase();
   if (r == 'S' || r == 'W' || s.startsWith('-')) return -deg.abs();
   return deg.abs();
  }
 
- // 갤러리에서 기존 사진(외부 카메라 촬영본 포함)을 불러와 EXIF 메타데이터 위치에 표시
- Future<void> _importPhotosFromGallery() async {
+ // 순수 Dart 바이너리 JPEG EXIF 파서 (패키지 호환성 문제 없이 0xFFE1 APP1 세그먼트에서 직접 GPS/날짜 추출)
+ Map<String, dynamic> _parseBinaryExifFromBytes(Uint8List bytes) {
+  final Map<String, dynamic> res = {};
+  if (bytes.length < 14 || bytes[0] != 0xFF || bytes[1] != 0xD8) return res;
+
+  int offset = 2;
+  while (offset + 4 < bytes.length) {
+   if (bytes[offset] != 0xFF) break;
+   final int marker = bytes[offset + 1];
+   if (marker == 0xDA || marker == 0xD9) break;
+   final int segLen = (bytes[offset + 2] << 8) | bytes[offset + 3];
+   if (segLen < 2 || offset + 2 + segLen > bytes.length) break;
+
+   if (marker == 0xE1 && segLen >= 14) {
+    if (bytes[offset + 4] == 0x45 &&
+      bytes[offset + 5] == 0x78 &&
+      bytes[offset + 6] == 0x69 &&
+      bytes[offset + 7] == 0x66 &&
+      bytes[offset + 8] == 0x00 &&
+      bytes[offset + 9] == 0x00) {
+     final int tiffStart = offset + 10;
+     final int segEnd = offset + 2 + segLen;
+     if (tiffStart + 8 <= segEnd) {
+      final bool little =
+        bytes[tiffStart] == 0x49 && bytes[tiffStart + 1] == 0x49;
+
+      int u16(int pos) {
+       if (pos + 2 > segEnd) return 0;
+       return little
+         ? (bytes[pos] | (bytes[pos + 1] << 8))
+         : ((bytes[pos] << 8) | bytes[pos + 1]);
+      }
+
+      int u32(int pos) {
+       if (pos + 4 > segEnd) return 0;
+       return little
+         ? (bytes[pos] |
+           (bytes[pos + 1] << 8) |
+           (bytes[pos + 2] << 16) |
+           (bytes[pos + 3] << 24))
+         : ((bytes[pos] << 24) |
+           (bytes[pos + 1] << 16) |
+           (bytes[pos + 2] << 8) |
+           bytes[pos + 3]);
+      }
+
+      double? readRational(int pos) {
+       if (pos + 8 > segEnd) return null;
+       final int numVal = u32(pos);
+       final int denVal = u32(pos + 4);
+       if (denVal == 0) return null;
+       return numVal / denVal;
+      }
+
+      String readAscii(int pos, int count) {
+       if (pos < tiffStart || pos + count > segEnd) return '';
+       final List<int> chars = [];
+       for (int k = 0; k < count; k++) {
+        final int c = bytes[pos + k];
+        if (c == 0) break;
+        chars.add(c);
+       }
+       return String.fromCharCodes(chars).trim();
+      }
+
+      final int ifd0Rel = u32(tiffStart + 4);
+      final int ifd0Pos = tiffStart + ifd0Rel;
+      if (ifd0Pos + 2 <= segEnd) {
+       final int n0 = u16(ifd0Pos);
+       int? gpsIfdRel;
+       int? exifIfdRel;
+       for (int i = 0; i < n0; i++) {
+        final int ePos = ifd0Pos + 2 + i * 12;
+        if (ePos + 12 > segEnd) break;
+        final int tag = u16(ePos);
+        final int cnt = u32(ePos + 4);
+        final int valOff = u32(ePos + 8);
+        if (tag == 0x8825) {
+         gpsIfdRel = valOff;
+        } else if (tag == 0x8769) {
+         exifIfdRel = valOff;
+        } else if (tag == 0x0132 && cnt >= 10) {
+         final String dt = readAscii(tiffStart + valOff, cnt);
+         if (dt.isNotEmpty) res['dateTime'] = dt;
+        }
+       }
+
+       if (exifIfdRel != null) {
+        final int exifPos = tiffStart + exifIfdRel;
+        if (exifPos + 2 <= segEnd) {
+         final int ne = u16(exifPos);
+         for (int i = 0; i < ne; i++) {
+          final int ePos = exifPos + 2 + i * 12;
+          if (ePos + 12 > segEnd) break;
+          final int tag = u16(ePos);
+          final int cnt = u32(ePos + 4);
+          final int valOff = u32(ePos + 8);
+          if ((tag == 0x9003 || tag == 0x9004) && cnt >= 10) {
+           final String dt = readAscii(tiffStart + valOff, cnt);
+           if (dt.isNotEmpty) res['dateTime'] = dt;
+          }
+         }
+        }
+       }
+
+       if (gpsIfdRel != null) {
+        final int gpsPos = tiffStart + gpsIfdRel;
+        if (gpsPos + 2 <= segEnd) {
+         final int ng = u16(gpsPos);
+         String latRef = 'N';
+         String lngRef = 'E';
+         int altRef = 0;
+         double? latAbs;
+         double? lngAbs;
+         double? altVal;
+         double? azVal;
+
+         for (int i = 0; i < ng; i++) {
+          final int ePos = gpsPos + 2 + i * 12;
+          if (ePos + 12 > segEnd) break;
+          final int tag = u16(ePos);
+          final int cnt = u32(ePos + 4);
+          final int valOff = u32(ePos + 8);
+
+          if (tag == 0x0001) {
+           final int c = bytes[ePos + 8];
+           if (c == 0x53 || c == 0x73) latRef = 'S';
+          } else if (tag == 0x0003) {
+           final int c = bytes[ePos + 8];
+           if (c == 0x57 || c == 0x77) lngRef = 'W';
+          } else if (tag == 0x0005) {
+           altRef = bytes[ePos + 8];
+          } else if (tag == 0x0002 && cnt >= 3) {
+           final int rPos = tiffStart + valOff;
+           final double? d = readRational(rPos);
+           final double? m = readRational(rPos + 8);
+           final double? s = readRational(rPos + 16);
+           if (d != null && m != null && s != null) {
+            latAbs = d + (m / 60.0) + (s / 3600.0);
+           }
+          } else if (tag == 0x0004 && cnt >= 3) {
+           final int rPos = tiffStart + valOff;
+           final double? d = readRational(rPos);
+           final double? m = readRational(rPos + 8);
+           final double? s = readRational(rPos + 16);
+           if (d != null && m != null && s != null) {
+            lngAbs = d + (m / 60.0) + (s / 3600.0);
+           }
+          } else if (tag == 0x0006 && cnt >= 1) {
+           altVal = readRational(tiffStart + valOff);
+          } else if (tag == 0x0011 && cnt >= 1) {
+           azVal = readRational(tiffStart + valOff);
+          }
+         }
+
+         if (latAbs != null &&
+           lngAbs != null &&
+           (latAbs > 0.0001 || lngAbs > 0.0001)) {
+          res['lat'] = (latRef == 'S') ? -latAbs : latAbs;
+          res['lng'] = (lngRef == 'W') ? -lngAbs : lngAbs;
+         }
+         if (altVal != null) {
+          res['alt'] = (altRef == 1) ? -altVal.abs() : altVal;
+         }
+         if (azVal != null && !azVal.isNaN) {
+          res['azimuth'] = (azVal % 360 + 360) % 360;
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+   offset += 2 + segLen;
+  }
+  return res;
+ }
+
+ // 파일 경로에서 바이너리 EXIF + native_exif 이중 추출
+ Future<Map<String, dynamic>> _extractPhotoMetaFromPath(String path) async {
+  final Map<String, dynamic> out = {};
   try {
+   final Uint8List rawBytes = await File(path).readAsBytes();
+   out.addAll(_parseBinaryExifFromBytes(rawBytes));
+  } catch (_) {}
+
+  try {
+   final Exif exif = await Exif.fromPath(path);
    try {
-    await Permission.accessMediaLocation.request();
+    final dynamic latLong = await exif.getLatLong();
+    if (latLong != null && (out['lat'] == null || out['lng'] == null)) {
+     double? la;
+     double? lo;
+     try {
+      la = (latLong.latitude as num?)?.toDouble();
+      lo = (latLong.longitude as num?)?.toDouble();
+     } catch (_) {}
+     if (la == null || lo == null) {
+      final RegExp numRe = RegExp(r'-?\d+\.\d+');
+      final List<RegExpMatch> m =
+        numRe.allMatches(latLong.toString()).toList();
+      if (m.length >= 2) {
+       la = double.tryParse(m[0].group(0)!);
+       lo = double.tryParse(m[1].group(0)!);
+      }
+     }
+     if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
+      out['lat'] = la;
+      out['lng'] = lo;
+     }
+    }
    } catch (_) {}
 
+   final Map<String, Object>? attrs = await exif.getAttributes();
+   if (attrs != null) {
+    if (out['lat'] == null || out['lng'] == null) {
+     final double? la = _parseExifCoord(
+       attrs['GPSLatitude'], attrs['GPSLatitudeRef']?.toString());
+     final double? lo = _parseExifCoord(
+       attrs['GPSLongitude'], attrs['GPSLongitudeRef']?.toString());
+     if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
+      out['lat'] = la;
+      out['lng'] = lo;
+     }
+    }
+    if (out['lat'] == null && attrs['UserComment'] != null) {
+     final String uc = attrs['UserComment'].toString();
+     if (uc.startsWith('GPS:')) {
+      final List<String> sp = uc.substring(4).split(',');
+      if (sp.length >= 2) {
+       final double? la = double.tryParse(sp[0]);
+       final double? lo = double.tryParse(sp[1]);
+       if (la != null && lo != null) {
+        out['lat'] = la;
+        out['lng'] = lo;
+       }
+      }
+     }
+    }
+    if (out['alt'] == null && attrs['GPSAltitude'] != null) {
+     final double? a = _parseRationalToken(attrs['GPSAltitude'].toString());
+     if (a != null) out['alt'] = a;
+    }
+    if (out['azimuth'] == null && attrs['GPSImgDirection'] != null) {
+     final double? az =
+       _parseRationalToken(attrs['GPSImgDirection'].toString());
+     if (az != null && !az.isNaN) out['azimuth'] = (az % 360 + 360) % 360;
+    }
+    if (out['dateTime'] == null) {
+     final String? rawDt =
+       (attrs['DateTimeOriginal'] ?? attrs['DateTime'])?.toString();
+     if (rawDt != null && rawDt.trim().isNotEmpty) {
+      out['dateTime'] = rawDt.trim();
+     }
+    }
+   }
+
+   if (out['dateTime'] == null) {
+    try {
+     final DateTime? origDt = await exif.getOriginalDate();
+     if (origDt != null) out['dateTime'] = origDt.toString();
+    } catch (_) {}
+   }
+   await exif.close();
+  } catch (_) {}
+
+  return out;
+ }
+
+ // Android 포토 피커가 임시 캐시 파일의 GPS를 지웠을 때 실제 카메라 폴더(DCIM 등)에서 원본 파일을 찾아 GPS 복원
+ Future<Map<String, dynamic>> _recoverGpsFromOriginalStorage(
+   XFile picked, String? rawDateTime) async {
+  String? timePattern;
+  if (rawDateTime != null && rawDateTime.length >= 19) {
+   final String digits = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
+   if (digits.length >= 14) {
+    timePattern = '${digits.substring(0, 8)}_${digits.substring(8, 14)}';
+   }
+  }
+  final String pickedName = picked.name;
+  int pickedSize = 0;
+  try {
+   pickedSize = await File(picked.path).length();
+  } catch (_) {}
+
+  final List<String> searchDirs = [
+   '/storage/emulated/0/DCIM/Camera',
+   '/storage/emulated/0/Pictures',
+   '/storage/emulated/0/DCIM',
+   '/storage/emulated/0/Download',
+  ];
+
+  for (final String dirPath in searchDirs) {
+   try {
+    final Directory d = Directory(dirPath);
+    if (!d.existsSync()) continue;
+    if (timePattern != null) {
+     final File directFile = File('$dirPath/$timePattern.jpg');
+     if (directFile.existsSync()) {
+      final Map<String, dynamic> m =
+        await _extractPhotoMetaFromPath(directFile.path);
+      if (m['lat'] != null && m['lng'] != null) return m;
+     }
+    }
+    final List<FileSystemEntity> entities = d.listSync(recursive: false);
+    for (final FileSystemEntity ent in entities) {
+     if (ent is! File) continue;
+     final String fname = ent.path.split('/').last;
+     bool match = false;
+     if (fname == pickedName) {
+      match = true;
+     } else if (timePattern != null &&
+       fname.contains(timePattern.substring(0, 13))) {
+      match = true;
+     } else if (pickedSize > 0) {
+      try {
+       if (ent.lengthSync() == pickedSize) match = true;
+      } catch (_) {}
+     }
+     if (match) {
+      final Map<String, dynamic> m = await _extractPhotoMetaFromPath(ent.path);
+      if (m['lat'] != null && m['lng'] != null) return m;
+     }
+    }
+   } catch (_) {}
+  }
+  return {};
+ }
+
+ // 갤러리에서 기존 사진(1장 또는 여러 장)을 불러와 EXIF 메타데이터 위치에 표시
+ Future<void> _importPhotosFromGallery() async {
+  try {
+   await [
+    Permission.photos,
+    Permission.storage,
+    Permission.accessMediaLocation,
+   ].request();
+
    final ImagePicker picker = ImagePicker();
-   final List<XFile> pickedFiles = await picker.pickMultiImage();
-   if (pickedFiles.isEmpty) return;
+   // pickImage(source: ImageSource.gallery)는 Android에서 기본 파일 선택기를 우선 사용하여 EXIF GPS 손실을 최소화함
+   final XFile? singlePicked = await picker.pickImage(
+    source: ImageSource.gallery,
+    requestFullMetadata: true,
+   );
+   if (singlePicked == null) return;
+   final List<XFile> pickedFiles = [singlePicked];
 
    setState(() => _isExporting = true);
 
    final Directory docDir = await getApplicationDocumentsDirectory();
    int addedCount = 0;
    int exifGpsCount = 0;
-   int fallbackCount = 0;
 
    double defaultLat = forcedUserLat ?? _myCurrentPos?.latitude ?? 37.4984;
    double defaultLng = forcedUserLng ?? _myCurrentPos?.longitude ?? 127.1324;
@@ -1162,67 +1507,27 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
    for (int i = 0; i < pickedFiles.length; i++) {
     final XFile picked = pickedFiles[i];
-    double? lat;
-    double? lng;
-    double alt = 0.0;
-    double azimuth = -1.0;
-    String? timeStr;
+    Map<String, dynamic> meta = await _extractPhotoMetaFromPath(picked.path);
 
-    try {
-     final Exif exif = await Exif.fromPath(picked.path);
-     try {
-      final dynamic latLong = await exif.getLatLong();
-      if (latLong != null) {
-       lat = (latLong.latitude as num).toDouble();
-       lng = (latLong.longitude as num).toDouble();
-      }
-     } catch (_) {}
-
-     final Map<String, Object>? attrs = await exif.getAttributes();
-     if ((lat == null || lng == null || (lat == 0.0 && lng == 0.0)) &&
-       attrs != null) {
-      lat = _parseExifCoord(
-        attrs['GPSLatitude'], attrs['GPSLatitudeRef']?.toString());
-      lng = _parseExifCoord(
-        attrs['GPSLongitude'], attrs['GPSLongitudeRef']?.toString());
+    if (meta['lat'] == null || meta['lng'] == null) {
+     final Map<String, dynamic> recovered = await _recoverGpsFromOriginalStorage(
+       picked, meta['dateTime'] as String?);
+     if (recovered['lat'] != null && recovered['lng'] != null) {
+      meta = {...meta, ...recovered};
      }
-
-     if (attrs != null) {
-      final double? parsedAlt =
-        _parseRationalToken(attrs['GPSAltitude']?.toString() ?? '');
-      if (parsedAlt != null) {
-       final String altRef =
-         attrs['GPSAltitudeRef']?.toString().trim() ?? '0';
-       alt = (altRef == '1') ? -parsedAlt.abs() : parsedAlt;
-      }
-      final double? parsedAz =
-        _parseRationalToken(attrs['GPSImgDirection']?.toString() ?? '');
-      if (parsedAz != null && !parsedAz.isNaN) {
-       azimuth = (parsedAz % 360 + 360) % 360;
-      }
-     }
-
-     try {
-      final DateTime? origDt = await exif.getOriginalDate();
-      if (origDt != null) {
-       timeStr = origDt.toString().substring(0, 16);
-      }
-     } catch (_) {}
-
-     if (timeStr == null && attrs != null) {
-      final String? rawDt =
-        (attrs['DateTimeOriginal'] ?? attrs['DateTime'])?.toString();
-      if (rawDt != null && rawDt.trim().length >= 16) {
-       final String cleanDt = rawDt.trim().substring(0, 16);
-       timeStr = cleanDt.replaceFirst(':', '-').replaceFirst(':', '-');
-      }
-     }
-
-     await exif.close();
-    } catch (e) {
-     debugPrint('EXIF read error: $e');
     }
 
+    final double? lat = meta['lat'] as double?;
+    final double? lng = meta['lng'] as double?;
+    final double alt = (meta['alt'] as double?) ?? 0.0;
+    final double azimuth = (meta['azimuth'] as double?) ?? -1.0;
+
+    String? timeStr;
+    final String? rawDt = meta['dateTime'] as String?;
+    if (rawDt != null && rawDt.length >= 16) {
+     final String sub = rawDt.substring(0, 16);
+     timeStr = sub.replaceFirst(':', '-').replaceFirst(':', '-');
+    }
     if (timeStr == null || timeStr.length < 10) {
      try {
       final DateTime modDt = await File(picked.path).lastModified();
@@ -1234,13 +1539,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
     final bool hasValidExifGps =
       lat != null && lng != null && (lat.abs() > 0.0001 || lng.abs() > 0.0001);
-    final double finalLat = hasValidExifGps ? lat! : defaultLat;
-    final double finalLng = hasValidExifGps ? lng! : defaultLng;
-    if (hasValidExifGps) {
-     exifGpsCount++;
-    } else {
-     fallbackCount++;
-    }
+    final double finalLat = hasValidExifGps ? lat : defaultLat;
+    final double finalLng = hasValidExifGps ? lng : defaultLng;
+    if (hasValidExifGps) exifGpsCount++;
 
     final String folderDate = timeStr.substring(0, 10);
     final Directory dayDir = Directory('${docDir.path}/$folderDate');
@@ -1277,17 +1578,17 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     if (_visiblePhotos.isNotEmpty) {
      final PhotoItem lastAdded = _visiblePhotos[_selectedIdx];
      _panMapKeepZoom(lastAdded.lat, lastAdded.lng);
-    }
-    if (mounted) {
-     final String msg = fallbackCount == 0
-       ? '📸 사진 ${addedCount}장의 EXIF 위치를 읽어 지도에 동그라미로 표시했습니다!'
-       : '📸 사진 ${addedCount}장 불러오기 완료 (EXIF 좌표 ${exifGpsCount}장 / 현재 위치 대체 ${fallbackCount}장)';
-     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-       content: Text(msg),
-       duration: const Duration(seconds: 2),
-      ),
-     );
+     if (mounted) {
+      final String msg = exifGpsCount > 0
+        ? '📍 사진 메타데이터 위치(${lastAdded.lat.toStringAsFixed(5)}, ${lastAdded.lng.toStringAsFixed(5)})에 동그라미로 표시했습니다!'
+        : '⚠️ 이 사진에는 GPS 메타데이터가 없어 현재 지도 위치에 배치되었습니다.';
+      ScaffoldMessenger.of(context).showSnackBar(
+       SnackBar(
+        content: Text(msg),
+        duration: const Duration(seconds: 2),
+       ),
+      );
+     }
     }
    }
   } catch (e) {
@@ -2781,7 +3082,7 @@ function selectPhoto(idx) {
  const p = photos[idx];
  mainImg.src = p.b64;
  document.getElementById('info-txt').innerText =
-  `[\${p.category}] 위도: \${p.lat.toFixed(6)} | 경도: \${p.lng.toFixed(6)} | \${p.azimuth >= 0 ? "방위각: " + p.azimuth.toFixed(1) + "° | " : ""}` + `\${p.time}` + (p.memo ? ` | 메모: \${p.memo}` : '');
+  `[\${p.category}] 위도: \${p.lat.toFixed(6)} | 경도: \${p.lng.toFixed(6)} | 방위각: \${p.azimuth.toFixed(1)}° | \${p.time}` + (p.memo ? ` | 메모: \${p.memo}` : '');
  renderThumbnails();
  renderMarkers();
  map.panTo([p.lat, p.lng]);
@@ -3884,7 +4185,7 @@ if (photos.length > 0) {
            onPressed: _isExporting ? null : _importPhotosFromGallery,
            icon: const Icon(Icons.photo_library, size: 17),
            label: const Text(
-            '기존 사진 불러오기 (EXIF 위치 표시)',
+            '갤러리에서 기존 사진 불러오기',
             style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
            ),
            style: ElevatedButton.styleFrom(
@@ -4072,7 +4373,7 @@ if (photos.length > 0) {
      );
 
   const TextStyle unifiedTopTextStyle = TextStyle(
-   fontSize: 12,
+   fontSize: 11,
    fontWeight: FontWeight.bold,
   );
 
@@ -4082,95 +4383,149 @@ if (photos.length > 0) {
    appBar: AppBar(
     backgroundColor: Colors.black,
     automaticallyImplyLeading: false,
-    titleSpacing: 8,
+    titleSpacing: 4,
+    toolbarHeight: 48,
     title: Row(
-     mainAxisAlignment: MainAxisAlignment.spaceBetween,
      children: [
       IconButton(
-       icon: const Icon(Icons.arrow_back, color: Colors.white, size: 20),
+       icon: const Icon(Icons.arrow_back, color: Colors.white, size: 19),
        padding: EdgeInsets.zero,
-       constraints: const BoxConstraints(minWidth: 28, minHeight: 34),
+       constraints: const BoxConstraints(minWidth: 26, minHeight: 34),
        onPressed: () => Navigator.pop(context),
       ),
-      DropdownButtonHideUnderline(
-       child: DropdownButton<String>(
-        value: _dateFilter,
-        isDense: true,
-        dropdownColor: Colors.black87,
-        style: unifiedTopTextStyle.copyWith(color: Colors.white),
-        icon: const Icon(Icons.arrow_drop_down,
-          color: Colors.white, size: 16),
-        items: dateTabs
-          .map(
-           (d) => DropdownMenuItem(
-            value: d,
-            child: Text(d, style: unifiedTopTextStyle),
-           ),
-          )
-          .toList(),
-        onChanged: (val) {
-         if (val == null) return;
-         setState(() {
-          _dateFilter = val;
-          _selectedIdx = _visiblePhotos.isNotEmpty
-            ? _visiblePhotos.length - 1
-            : 0;
-         });
-         _refreshAllOverlays(includeBlueprint: true);
-         if (_visiblePhotos.isNotEmpty) {
-          final p = _visiblePhotos[_selectedIdx];
-          _panMapKeepZoom(p.lat, p.lng);
-         }
-        },
+      const SizedBox(width: 2),
+      // 날짜 필터 (상단 바에는 '전체날짜' 또는 'MM-DD'로 짧게 표시하여 공간 확보)
+      Container(
+       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+       decoration: BoxDecoration(
+        color: Colors.white10,
+        borderRadius: BorderRadius.circular(6),
+       ),
+       child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+         value: _dateFilter,
+         isDense: true,
+         dropdownColor: Colors.grey[900],
+         style: unifiedTopTextStyle.copyWith(color: Colors.white),
+         icon: const Icon(Icons.arrow_drop_down,
+           color: Colors.white70, size: 15),
+         selectedItemBuilder: (context) {
+          return dateTabs.map((d) {
+           final String shortLabel =
+             (d == '전체 보기') ? '전체날짜' : (d.length >= 10 ? d.substring(5) : d);
+           return Align(
+            alignment: Alignment.centerLeft,
+            child: Text(shortLabel, style: unifiedTopTextStyle),
+           );
+          }).toList();
+         },
+         items: dateTabs
+           .map(
+            (d) => DropdownMenuItem(
+             value: d,
+             child: Text(
+              d == '전체 보기' ? '전체 날짜 보기' : d,
+              style: unifiedTopTextStyle,
+             ),
+            ),
+           )
+           .toList(),
+         onChanged: (val) {
+          if (val == null) return;
+          setState(() {
+           _dateFilter = val;
+           _selectedIdx = _visiblePhotos.isNotEmpty
+             ? _visiblePhotos.length - 1
+             : 0;
+          });
+          _refreshAllOverlays(includeBlueprint: true);
+          if (_visiblePhotos.isNotEmpty) {
+           final p = _visiblePhotos[_selectedIdx];
+           _panMapKeepZoom(p.lat, p.lng);
+          }
+         },
+        ),
        ),
       ),
-      DropdownButtonHideUnderline(
-       child: DropdownButton<String>(
-        value: cats.contains(_categoryFilter)
-          ? _categoryFilter
-          : '전체 카테고리',
-        isDense: true,
-        dropdownColor: Colors.black87,
-        style: unifiedTopTextStyle.copyWith(color: Colors.amberAccent),
-        icon: const Icon(Icons.arrow_drop_down,
-          color: Colors.amberAccent, size: 16),
-        items: ['전체 카테고리', ...cats]
-          .map(
-           (c) => DropdownMenuItem(
-            value: c,
-            child: Text(c, style: unifiedTopTextStyle),
-           ),
-          )
-          .toList(),
-        onChanged: (val) {
-         if (val == null) return;
-         setState(() {
-          _categoryFilter = val;
-          _selectedIdx = _visiblePhotos.isNotEmpty
-            ? _visiblePhotos.length - 1
-            : 0;
-         });
-         _refreshAllOverlays(includeBlueprint: true);
-         if (_visiblePhotos.isNotEmpty) {
-          final p = _visiblePhotos[_selectedIdx];
-          _panMapKeepZoom(p.lat, p.lng);
-         }
-        },
+      const SizedBox(width: 4),
+      // 카테고리 필터 (상단 바에는 '전체분류'로 짧게 표시하고 최대 너비 제한)
+      Flexible(
+       child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+        decoration: BoxDecoration(
+         color: Colors.white10,
+         borderRadius: BorderRadius.circular(6),
+        ),
+        child: DropdownButtonHideUnderline(
+         child: DropdownButton<String>(
+          value: cats.contains(_categoryFilter)
+            ? _categoryFilter
+            : '전체 카테고리',
+          isDense: true,
+          isExpanded: true,
+          dropdownColor: Colors.grey[900],
+          style: unifiedTopTextStyle.copyWith(color: Colors.amberAccent),
+          icon: const Icon(Icons.arrow_drop_down,
+            color: Colors.amberAccent, size: 15),
+          selectedItemBuilder: (context) {
+           return ['전체 카테고리', ...cats].map((c) {
+            final String shortCat = (c == '전체 카테고리') ? '전체분류' : c;
+            return Align(
+             alignment: Alignment.centerLeft,
+             child: Text(
+              shortCat,
+              overflow: TextOverflow.ellipsis,
+              style: unifiedTopTextStyle.copyWith(color: Colors.amberAccent),
+             ),
+            );
+           }).toList();
+          },
+          items: ['전체 카테고리', ...cats]
+            .map(
+             (c) => DropdownMenuItem(
+              value: c,
+              child: Text(c, style: unifiedTopTextStyle),
+             ),
+            )
+            .toList(),
+          onChanged: (val) {
+           if (val == null) return;
+           setState(() {
+            _categoryFilter = val;
+            _selectedIdx = _visiblePhotos.isNotEmpty
+              ? _visiblePhotos.length - 1
+              : 0;
+           });
+           _refreshAllOverlays(includeBlueprint: true);
+           if (_visiblePhotos.isNotEmpty) {
+            final p = _visiblePhotos[_selectedIdx];
+            _panMapKeepZoom(p.lat, p.lng);
+           }
+          },
+         ),
+        ),
        ),
       ),
+      const SizedBox(width: 4),
+      // 사진추가 버튼
       InkWell(
        onTap: _isExporting ? null : _importPhotosFromGallery,
-       borderRadius: BorderRadius.circular(4),
-       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
+       borderRadius: BorderRadius.circular(6),
+       child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        decoration: BoxDecoration(
+         color: Colors.lightGreenAccent.withOpacity(0.12),
+         borderRadius: BorderRadius.circular(6),
+         border: Border.all(color: Colors.lightGreenAccent.withOpacity(0.6)),
+        ),
         child: Row(
          mainAxisSize: MainAxisSize.min,
          children: [
-          const Icon(Icons.photo_library,
-            color: Colors.lightGreenAccent, size: 14),
-          const SizedBox(width: 2),
+          const Icon(Icons.add_a_photo,
+            color: Colors.lightGreenAccent, size: 13),
+          const SizedBox(width: 3),
           Text(
-           '사진추가',
+           '사진',
            style: unifiedTopTextStyle.copyWith(
              color: Colors.lightGreenAccent),
           ),
@@ -4178,19 +4533,26 @@ if (photos.length > 0) {
         ),
        ),
       ),
+      const SizedBox(width: 4),
+      // 공유(내보내기) 버튼
       InkWell(
        onTap: _isExporting ? null : _showExportOptionsSheet,
-       borderRadius: BorderRadius.circular(4),
-       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
+       borderRadius: BorderRadius.circular(6),
+       child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        decoration: BoxDecoration(
+         color: Colors.lightBlueAccent.withOpacity(0.12),
+         borderRadius: BorderRadius.circular(6),
+         border: Border.all(color: Colors.lightBlueAccent.withOpacity(0.6)),
+        ),
         child: Row(
          mainAxisSize: MainAxisSize.min,
          children: [
           const Icon(Icons.ios_share,
-            color: Colors.lightBlueAccent, size: 14),
+            color: Colors.lightBlueAccent, size: 13),
           const SizedBox(width: 2),
           Text(
-           '내보내기',
+           '공유',
            style: unifiedTopTextStyle.copyWith(
              color: Colors.lightBlueAccent),
           ),
@@ -4198,16 +4560,22 @@ if (photos.length > 0) {
         ),
        ),
       ),
+      const SizedBox(width: 4),
+      // 도면 추가/수정 버튼
       InkWell(
        onTap: _showBlueprintActionMenuDialog,
-       borderRadius: BorderRadius.circular(4),
-       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+       borderRadius: BorderRadius.circular(6),
+       child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        decoration: BoxDecoration(
+         color: Colors.amber.withOpacity(0.14),
+         borderRadius: BorderRadius.circular(6),
+         border: Border.all(color: Colors.amber.withOpacity(0.7)),
+        ),
         child: Row(
          mainAxisSize: MainAxisSize.min,
          children: [
-          const Icon(Icons.add_photo_alternate,
-            color: Colors.amber, size: 14),
+          const Icon(Icons.map, color: Colors.amber, size: 13),
           const SizedBox(width: 2),
           Text(
            '도면',
@@ -4217,20 +4585,32 @@ if (photos.length > 0) {
         ),
        ),
       ),
-      if (_blueprints.isNotEmpty)
-       IconButton(
-        padding: EdgeInsets.zero,
-        constraints: const BoxConstraints(minWidth: 28, minHeight: 34),
-        tooltip: '도면 선택 및 켜기/끄기',
-        icon: Icon(
-         _hasAnyVisibleBlueprint ? Icons.layers : Icons.layers_clear,
-         color: _hasAnyVisibleBlueprint
-           ? Colors.lightGreenAccent
-           : Colors.grey,
-         size: 19,
+      if (_blueprints.isNotEmpty) ...[
+       const SizedBox(width: 3),
+       InkWell(
+        onTap: _showBlueprintLayerSelectorDialog,
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+         decoration: BoxDecoration(
+          color: Colors.white10,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+           color: _hasAnyVisibleBlueprint
+             ? Colors.lightGreenAccent
+             : Colors.white38,
+          ),
+         ),
+         child: Icon(
+          _hasAnyVisibleBlueprint ? Icons.layers : Icons.layers_clear,
+          color: _hasAnyVisibleBlueprint
+            ? Colors.lightGreenAccent
+            : Colors.grey,
+          size: 15,
+         ),
         ),
-        onPressed: _showBlueprintLayerSelectorDialog,
        ),
+      ],
      ],
     ),
    ),
