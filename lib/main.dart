@@ -96,31 +96,31 @@ PhotoItem({
  required this.pitch,
  required this.timestamp,
  this.category = '미분류',
-  this.memo = '',
- });
- Map<String, dynamic> toMap() => {
-    'path': path,
-    'latitude': lat,
-    'longitude': lng,
-    'altitude': alt,
-    'accuracy': acc,
-    'azimuth': azimuth,
-    'pitch': pitch,
-    'time': timestamp,
-    'category': category,
-    'memo': memo,
-   };
- factory PhotoItem.fromMap(Map<String, dynamic> m) => PhotoItem(
-    path: m['path'] as String,
-    lat: (m['latitude'] as num).toDouble(),
-    lng: (m['longitude'] as num).toDouble(),
-    alt: (m['altitude'] as num).toDouble(),
-    acc: (m['accuracy'] as num).toDouble(),
-    azimuth: (m['azimuth'] as num).toDouble(),
-    pitch: (m['pitch'] as num).toDouble(),
-    timestamp: m['time'] as String,
-    category: m['category'] as String? ?? '미분류',
-    memo: m['memo'] as String? ?? '',
+ this.memo = '',
+});
+Map<String, dynamic> toMap() => {
+  'path': path,
+  'latitude': lat,
+  'longitude': lng,
+  'altitude': alt,
+  'accuracy': acc,
+  'azimuth': azimuth,
+  'pitch': pitch,
+  'time': timestamp,
+  'category': category,
+  'memo': memo,
+ };
+factory PhotoItem.fromMap(Map<String, dynamic> m) => PhotoItem(
+  path: m['path'] as String,
+  lat: (m['latitude'] as num).toDouble(),
+  lng: (m['longitude'] as num).toDouble(),
+  alt: (m['altitude'] as num).toDouble(),
+  acc: (m['accuracy'] as num).toDouble(),
+  azimuth: (m['azimuth'] as num).toDouble(),
+  pitch: (m['pitch'] as num).toDouble(),
+  timestamp: m['time'] as String,
+  category: m['category'] as String? ?? '미분류',
+  memo: m['memo'] as String? ?? '',
  );
 }
 class BlueprintItem {
@@ -309,10 +309,12 @@ Future<void> _setupApp() async {
  await [
  Permission.camera,
  Permission.location,
- Permission.storage,
- Permission.photos,
- Permission.accessMediaLocation,
  ].request();
+ try {
+ await Permission.photos.request();
+ await Permission.storage.request();
+ await Permission.accessMediaLocation.request();
+ } catch (_) {}
  await _restorePhotos();
  await loadDefaultCategory(_photoList);
  if (mounted) setState(() {});
@@ -1012,9 +1014,9 @@ double? _parseRationalToken(String token) {
 }
 double? _parseExifCoord(Object? raw, String? ref) {
  if (raw == null) return null;
-  String s = raw.toString().replaceAll('[', '').replaceAll(']', '').trim();
-  if (s.isEmpty) return null;
-  String inferredRef = (ref ?? '').trim().toUpperCase();
+ String s = raw.toString().replaceAll('[', '').replaceAll(']', '').trim();
+ if (s.isEmpty) return null;
+ String inferredRef = (ref ?? '').trim().toUpperCase();
  if (s.endsWith('N') || s.endsWith('S') || s.endsWith('E') || s.endsWith('W')) {
  inferredRef = s.substring(s.length - 1).toUpperCase();
  s = s.substring(0, s.length - 1).trim();
@@ -1139,386 +1141,630 @@ Map<String, dynamic> _parseBinaryExifFromBytes(Uint8List bytes) {
   return numVal / denVal;
   }
   String readAscii(int p, int count) {
-     if (p < tiffStart || p + count > segEnd) return '';
-     final List<int> chars = [];
-     for (int k = 0; k < count; k++) {
-      final int c = bytes[p + k];
-      if (c == 0) break;
-      chars.add(c);
-     }
-     return String.fromCharCodes(chars).trim();
-    }
-    final int ifd0Rel = u32(tiffStart + 4);
-    final int ifd0Pos = tiffStart + ifd0Rel;
-    if (ifd0Pos + 2 > segEnd) continue;
-    final int n0 = u16(ifd0Pos);
-    if (n0 <= 0 || n0 > 500) continue;
-    int? gpsIfdRel;
-    int? exifIfdRel;
-    for (int i = 0; i < n0; i++) {
-     final int ePos = ifd0Pos + 2 + i * 12;
-     if (ePos + 12 > segEnd) break;
-     final int tag = u16(ePos);
-     final int type = u16(ePos + 2);
-     final int cnt = u32(ePos + 4);
-     final int valOff = readPtr(ePos, type);
-     if (tag == 0x8825) {
-      gpsIfdRel = valOff;
-     } else if (tag == 0x8769) {
-      exifIfdRel = valOff;
-     } else if (tag == 0x0132 && cnt >= 10) {
-      final String dt = readAscii(tiffStart + u32(ePos + 8), cnt);
-      if (dt.isNotEmpty) res['dateTime'] ??= dt;
-     }
-    }
-    if (exifIfdRel != null) {
-     final int exifPos = tiffStart + exifIfdRel;
-     if (exifPos + 2 <= segEnd) {
-      final int ne = u16(exifPos);
-      if (ne > 0 && ne <= 500) {
-       for (int i = 0; i < ne; i++) {
-        final int ePos = exifPos + 2 + i * 12;
-        if (ePos + 12 > segEnd) break;
-        final int tag = u16(ePos);
-        final int cnt = u32(ePos + 4);
-        final int valOff = u32(ePos + 8);
-        if ((tag == 0x9003 || tag == 0x9004) && cnt >= 10) {
-         final String dt = readAscii(tiffStart + valOff, cnt);
-         if (dt.isNotEmpty) res['dateTime'] = dt;
-        }
-       }
-      }
-     }
-    }
-    if (gpsIfdRel != null) {
-     final int gpsPos = tiffStart + gpsIfdRel;
-     if (gpsPos + 2 <= segEnd) {
-      final int ng = u16(gpsPos);
-      if (ng > 0 && ng <= 200) {
-       String latRef = 'N';
-       String lngRef = 'E';
-       int altRef = 0;
-       double? latAbs;
-       double? lngAbs;
-       double? altVal;
-       double? azVal;
-       for (int i = 0; i < ng; i++) {
-        final int ePos = gpsPos + 2 + i * 12;
-        if (ePos + 12 > segEnd) break;
-        final int tag = u16(ePos);
-        final int type = u16(ePos + 2);
-        final int cnt = u32(ePos + 4);
-        final int valOff = u32(ePos + 8);
-        if (tag == 0x0001) {
-         final int c = bytes[ePos + 8];
-         if (c == 0x53 || c == 0x73) latRef = 'S';
-        } else if (tag == 0x0003) {
-         final int c = bytes[ePos + 8];
-         if (c == 0x57 || c == 0x77) lngRef = 'W';
-        } else if (tag == 0x0005) {
-         altRef = bytes[ePos + 8];
-        } else if (tag == 0x0002 && cnt >= 3) {
-         final int rPos = tiffStart + valOff;
-         if (rPos + 24 <= segEnd) {
-          final int d0 = u32(rPos + 4);
-          final int d1 = u32(rPos + 12);
-          final int d2 = u32(rPos + 20);
-          if (d0 == 0 && d1 == 0 && d2 == 0) {
-           res['redacted'] = true;
-          } else {
-           final double? d = readRational(rPos, type);
-           final double? m = readRational(rPos + 8, type);
-           final double? s = readRational(rPos + 16, type);
-           if (d != null) {
-            latAbs =
-              d.abs() + ((m ?? 0.0).abs() / 60.0) + ((s ?? 0.0).abs() / 3600.0);
-           }
-          }
-         }
-        } else if (tag == 0x0004 && cnt >= 3) {
-         final int rPos = tiffStart + valOff;
-         if (rPos + 24 <= segEnd) {
-          final int d0 = u32(rPos + 4);
-          final int d1 = u32(rPos + 12);
-          final int d2 = u32(rPos + 20);
-          if (d0 == 0 && d1 == 0 && d2 == 0) {
-           res['redacted'] = true;
-          } else {
-           final double? d = readRational(rPos, type);
-           final double? m = readRational(rPos + 8, type);
-           final double? s = readRational(rPos + 16, type);
-           if (d != null) {
-            lngAbs =
-              d.abs() + ((m ?? 0.0).abs() / 60.0) + ((s ?? 0.0).abs() / 3600.0);
-           }
-          }
-         }
-        } else if (tag == 0x0006 && cnt >= 1) {
-         altVal = readRational(tiffStart + valOff, type);
-        } else if (tag == 0x0011 && cnt >= 1) {
-         azVal = readRational(tiffStart + valOff, type);
-        }
-       }
-       if (latAbs != null &&
-         lngAbs != null &&
-         (latAbs > 0.0001 || lngAbs > 0.0001)) {
-        res['lat'] = (latRef == 'S') ? -latAbs : latAbs;
-        res['lng'] = (lngRef == 'W') ? -lngAbs : lngAbs;
-       }
-       if (altVal != null) {
-        res['alt'] = (altRef == 1) ? -altVal.abs() : altVal;
-       }
-       if (azVal != null && !azVal.isNaN) {
-        res['azimuth'] = (azVal % 360 + 360) % 360;
-       }
-      }
-     }
-    }
-    if (res['lat'] != null && res['lng'] != null) break;
-   }
+  if (p < tiffStart || p + count > segEnd) return '';
+  final List<int> chars = [];
+  for (int k = 0; k < count; k++) {
+   final int c = bytes[p + k];
+   if (c == 0) break;
+   chars.add(c);
   }
-  return res;
- }
- Future<Map<String, dynamic>> _extractPhotoMetaFromPath(String path) async {
-  final Map<String, dynamic> out = {};
-  try {
-   final Uint8List rawBytes = await File(path).readAsBytes();
-   out.addAll(_parseBinaryExifFromBytes(rawBytes));
-  } catch (_) {}
-  try {
-   final Exif exif = await Exif.fromPath(path);
-   try {
-    final dynamic latLong = await exif.getLatLong();
-    if (latLong != null && (out['lat'] == null || out['lng'] == null)) {
-     double? la;
-     double? lo;
-     try {
-      la = (latLong.latitude as num?)?.toDouble();
-      lo = (latLong.longitude as num?)?.toDouble();
-     } catch (_) {}
-     if (la == null || lo == null) {
-      final RegExp numRe = RegExp(r'-?\d+\.\d+');
-      final List<RegExpMatch> m =
-        numRe.allMatches(latLong.toString()).toList();
-      if (m.length >= 2) {
-       la = double.tryParse(m[0].group(0)!);
-       lo = double.tryParse(m[1].group(0)!);
-      }
-     }
-     if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
-      out['lat'] = la;
-      out['lng'] = lo;
-     }
-    }
-   } catch (_) {}
-   final Map<String, Object>? attrs = await exif.getAttributes();
-   if (attrs != null) {
-    if (out['lat'] == null || out['lng'] == null) {
-     final String? rawLatStr = attrs['GPSLatitude']?.toString();
-     if (rawLatStr != null && rawLatStr.contains('0/0')) {
-      out['redacted'] = true;
-     }
-     final double? la = _parseExifCoord(
-       attrs['GPSLatitude'], attrs['GPSLatitudeRef']?.toString());
-     final double? lo = _parseExifCoord(
-       attrs['GPSLongitude'], attrs['GPSLongitudeRef']?.toString());
-     if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
-      out['lat'] = la;
-      out['lng'] = lo;
-     }
-    }
-    for (final String k in ['UserComment', 'ImageDescription']) {
-     if (out['lat'] == null && attrs[k] != null) {
-      final String uc = attrs[k].toString();
-      if (uc.contains('GPSCAM:') || uc.contains('GPS:')) {
-       final String clean =
-         uc.contains('GPSCAM:') ? uc.split('GPSCAM:').last : uc.split('GPS:').last;
-       final List<String> sp = clean.split(',');
-       if (sp.length >= 2) {
-        final double? la = double.tryParse(sp[0]);
-        final double? lo = double.tryParse(sp[1]);
-        if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
-         out['lat'] = la;
-         out['lng'] = lo;
-        }
-       }
-      }
-     }
-    }
-    if (out['alt'] == null && attrs['GPSAltitude'] != null) {
-     final double? a = _parseRationalToken(attrs['GPSAltitude'].toString());
-     if (a != null) out['alt'] = a;
-    }
-    if (out['azimuth'] == null && attrs['GPSImgDirection'] != null) {
-     final double? az =
-       _parseRationalToken(attrs['GPSImgDirection'].toString());
-     if (az != null && !az.isNaN) out['azimuth'] = (az % 360 + 360) % 360;
-    }
-    if (out['dateTime'] == null) {
-     final String? rawDt =
-       (attrs['DateTimeOriginal'] ?? attrs['DateTime'])?.toString();
-     if (rawDt != null && rawDt.trim().isNotEmpty) {
-      out['dateTime'] = rawDt.trim();
-     }
-    }
-   }
-   if (out['dateTime'] == null) {
-    try {
-     final DateTime? origDt = await exif.getOriginalDate();
-     if (origDt != null) out['dateTime'] = origDt.toString();
-    } catch (_) {}
-   }
-   await exif.close();
-  } catch (_) {}
-  return out;
- }
- Future<Map<String, dynamic>> _recoverGpsFromOriginalStorage(
-   XFile picked, String? rawDateTime) async {
-  final List<String> timeCandidates = [];
-  String? minutePrefix;
-  if (rawDateTime != null) {
-   final String digits = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
- if (digits.length >= 14) {
-  minutePrefix = '${digits.substring(0, 8)}_${digits.substring(8, 12)}';
-  final int? yr = int.tryParse(digits.substring(0, 4));
-  final int? mo = int.tryParse(digits.substring(4, 6));
-  final int? dy = int.tryParse(digits.substring(6, 8));
-  final int? hr = int.tryParse(digits.substring(8, 10));
-  final int? mn = int.tryParse(digits.substring(10, 12));
-  final int? sc = int.tryParse(digits.substring(12, 14));
-  if (yr != null && mo != null && dy != null && hr != null && mn != null && sc != null) {
-  final DateTime baseDt = DateTime(yr, mo, dy, hr, mn, sc);
-  for (final int deltaSec in [0, 1, -1, 2, -2, 3, -3, 4, 5, 6, 7, 8]) {
-   final DateTime d = baseDt.add(Duration(seconds: deltaSec));
-   final String s =
-    '${d.year.toString().padLeft(4, '0')}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}_'
-    '${d.hour.toString().padLeft(2, '0')}${d.minute.toString().padLeft(2, '0')}${d.second.toString().padLeft(2, '0')}';
-   timeCandidates.add(s);
+  return String.fromCharCodes(chars).trim();
+  }
+  final int ifd0Rel = u32(tiffStart + 4);
+  final int ifd0Pos = tiffStart + ifd0Rel;
+  if (ifd0Pos + 2 > segEnd) continue;
+  final int n0 = u16(ifd0Pos);
+  if (n0 <= 0 || n0 > 500) continue;
+  int? gpsIfdRel;
+  int? exifIfdRel;
+  for (int i = 0; i < n0; i++) {
+  final int ePos = ifd0Pos + 2 + i * 12;
+  if (ePos + 12 > segEnd) break;
+  final int tag = u16(ePos);
+  final int type = u16(ePos + 2);
+  final int cnt = u32(ePos + 4);
+  final int valOff = readPtr(ePos, type);
+  if (tag == 0x8825) {
+   gpsIfdRel = valOff;
+  } else if (tag == 0x8769) {
+   exifIfdRel = valOff;
+  } else if (tag == 0x0132 && cnt >= 10) {
+   final String dt = readAscii(tiffStart + u32(ePos + 8), cnt);
+   if (dt.isNotEmpty) res['dateTime'] ??= dt;
   }
   }
+  if (exifIfdRel != null) {
+  final int exifPos = tiffStart + exifIfdRel;
+  if (exifPos + 2 <= segEnd) {
+   final int ne = u16(exifPos);
+   if (ne > 0 && ne <= 500) {
+   for (int i = 0; i < ne; i++) {
+    final int ePos = exifPos + 2 + i * 12;
+    if (ePos + 12 > segEnd) break;
+    final int tag = u16(ePos);
+    final int cnt = u32(ePos + 4);
+    final int valOff = u32(ePos + 8);
+    if ((tag == 0x9003 || tag == 0x9004) && cnt >= 10) {
+    final String dt = readAscii(tiffStart + valOff, cnt);
+    if (dt.isNotEmpty) res['dateTime'] = dt;
+    }
+   }
+   }
+  }
+  }
+  if (gpsIfdRel != null) {
+  final int gpsPos = tiffStart + gpsIfdRel;
+  if (gpsPos + 2 <= segEnd) {
+   final int ng = u16(gpsPos);
+   if (ng > 0 && ng <= 200) {
+   String latRef = 'N';
+   String lngRef = 'E';
+   int altRef = 0;
+   double? latAbs;
+   double? lngAbs;
+   double? altVal;
+   double? azVal;
+   for (int i = 0; i < ng; i++) {
+    final int ePos = gpsPos + 2 + i * 12;
+    if (ePos + 12 > segEnd) break;
+    final int tag = u16(ePos);
+    final int type = u16(ePos + 2);
+    final int cnt = u32(ePos + 4);
+    final int valOff = u32(ePos + 8);
+    if (tag == 0x0001) {
+    final int c = bytes[ePos + 8];
+    if (c == 0x53 || c == 0x73) latRef = 'S';
+    } else if (tag == 0x0003) {
+    final int c = bytes[ePos + 8];
+    if (c == 0x57 || c == 0x77) lngRef = 'W';
+    } else if (tag == 0x0005) {
+    altRef = bytes[ePos + 8];
+    } else if (tag == 0x0002 && cnt >= 3) {
+    final int rPos = tiffStart + valOff;
+    if (rPos + 24 <= segEnd) {
+     final int d0 = u32(rPos + 4);
+     final int d1 = u32(rPos + 12);
+     final int d2 = u32(rPos + 20);
+     if (d0 == 0 && d1 == 0 && d2 == 0) {
+     res['redacted'] = true;
+     } else {
+     final double? d = readRational(rPos, type);
+     final double? m = readRational(rPos + 8, type);
+     final double? s = readRational(rPos + 16, type);
+     if (d != null) {
+      latAbs =
+       d.abs() + ((m ?? 0.0).abs() / 60.0) + ((s ?? 0.0).abs() / 3600.0);
+     }
+     }
+    }
+    } else if (tag == 0x0004 && cnt >= 3) {
+    final int rPos = tiffStart + valOff;
+    if (rPos + 24 <= segEnd) {
+     final int d0 = u32(rPos + 4);
+     final int d1 = u32(rPos + 12);
+     final int d2 = u32(rPos + 20);
+     if (d0 == 0 && d1 == 0 && d2 == 0) {
+     res['redacted'] = true;
+     } else {
+     final double? d = readRational(rPos, type);
+     final double? m = readRational(rPos + 8, type);
+     final double? s = readRational(rPos + 16, type);
+     if (d != null) {
+      lngAbs =
+       d.abs() + ((m ?? 0.0).abs() / 60.0) + ((s ?? 0.0).abs() / 3600.0);
+     }
+     }
+    }
+    } else if (tag == 0x0006 && cnt >= 1) {
+    altVal = readRational(tiffStart + valOff, type);
+    } else if (tag == 0x0011 && cnt >= 1) {
+    azVal = readRational(tiffStart + valOff, type);
+    }
+   }
+   if (latAbs != null &&
+    lngAbs != null &&
+    (latAbs > 0.0001 || lngAbs > 0.0001)) {
+    res['lat'] = (latRef == 'S') ? -latAbs : latAbs;
+    res['lng'] = (lngRef == 'W') ? -lngAbs : lngAbs;
+   }
+   if (altVal != null) {
+    res['alt'] = (altRef == 1) ? -altVal.abs() : altVal;
+   }
+   if (azVal != null && !azVal.isNaN) {
+    res['azimuth'] = (azVal % 360 + 360) % 360;
+   }
+   }
+  }
+  }
+  if (res['lat'] != null && res['lng'] != null) break;
  }
  }
- final String pickedName = picked.name;
- int pickedSize = 0;
- Uint8List? pickedTail;
+ return res;
+}
+Map<String, dynamic> _fastReadExifHeadSync(File f) {
  try {
- final File pf = File(picked.path);
- pickedSize = await pf.length();
- if (pickedSize >= 256) {
-  final RandomAccessFile raf = await pf.open();
-  await raf.setPosition(pickedSize - 128);
-  pickedTail = await raf.read(128);
-  await raf.close();
+ final int len = f.lengthSync();
+ if (len < 32) return {};
+ final RandomAccessFile raf = f.openSync();
+ final Uint8List head = raf.readSync(min(len, 65536));
+ raf.closeSync();
+ return _parseBinaryExifFromBytes(head);
+ } catch (_) {
+ return {};
  }
+}
+Future<Map<String, dynamic>> _extractPhotoMetaFromPath(String path) async {
+ final Map<String, dynamic> out = {};
+ try {
+ final Uint8List rawBytes = await File(path).readAsBytes();
+ out.addAll(_parseBinaryExifFromBytes(rawBytes));
  } catch (_) {}
- final List<String> baseDirs = [
+ try {
+ final Exif exif = await Exif.fromPath(path);
+ try {
+  final dynamic latLong = await exif.getLatLong();
+  if (latLong != null && (out['lat'] == null || out['lng'] == null)) {
+  double? la;
+  double? lo;
+  try {
+   la = (latLong.latitude as num?)?.toDouble();
+   lo = (latLong.longitude as num?)?.toDouble();
+  } catch (_) {}
+  if (la == null || lo == null) {
+   final RegExp numRe = RegExp(r'-?\d+\.\d+');
+   final List<RegExpMatch> m =
+    numRe.allMatches(latLong.toString()).toList();
+   if (m.length >= 2) {
+   la = double.tryParse(m[0].group(0)!);
+   lo = double.tryParse(m[1].group(0)!);
+   }
+  }
+  if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
+   out['lat'] = la;
+   out['lng'] = lo;
+  }
+  }
+ } catch (_) {}
+ final Map<String, Object>? attrs = await exif.getAttributes();
+ if (attrs != null) {
+  if (out['lat'] == null || out['lng'] == null) {
+  final String? rawLatStr = attrs['GPSLatitude']?.toString();
+  if (rawLatStr != null && rawLatStr.contains('0/0')) {
+   out['redacted'] = true;
+  }
+  final double? la = _parseExifCoord(
+   attrs['GPSLatitude'], attrs['GPSLatitudeRef']?.toString());
+  final double? lo = _parseExifCoord(
+   attrs['GPSLongitude'], attrs['GPSLongitudeRef']?.toString());
+  if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
+   out['lat'] = la;
+   out['lng'] = lo;
+  }
+  }
+  for (final String k in ['UserComment', 'ImageDescription']) {
+  if (out['lat'] == null && attrs[k] != null) {
+   final String uc = attrs[k].toString();
+   if (uc.contains('GPSCAM:') || uc.contains('GPS:')) {
+   final String clean =
+    uc.contains('GPSCAM:') ? uc.split('GPSCAM:').last : uc.split('GPS:').last;
+   final List<String> sp = clean.split(',');
+   if (sp.length >= 2) {
+    final double? la = double.tryParse(sp[0]);
+    final double? lo = double.tryParse(sp[1]);
+    if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
+    out['lat'] = la;
+    out['lng'] = lo;
+    }
+   }
+   }
+  }
+  }
+  if (out['alt'] == null && attrs['GPSAltitude'] != null) {
+  final double? a = _parseRationalToken(attrs['GPSAltitude'].toString());
+  if (a != null) out['alt'] = a;
+  }
+  if (out['azimuth'] == null && attrs['GPSImgDirection'] != null) {
+  final double? az =
+   _parseRationalToken(attrs['GPSImgDirection'].toString());
+  if (az != null && !az.isNaN) out['azimuth'] = (az % 360 + 360) % 360;
+  }
+  if (out['dateTime'] == null) {
+  final String? rawDt =
+   (attrs['DateTimeOriginal'] ?? attrs['DateTime'])?.toString();
+  if (rawDt != null && rawDt.trim().isNotEmpty) {
+   out['dateTime'] = rawDt.trim();
+  }
+  }
+ }
+ if (out['dateTime'] == null) {
+  try {
+  final DateTime? origDt = await exif.getOriginalDate();
+  if (origDt != null) out['dateTime'] = origDt.toString();
+  } catch (_) {}
+ }
+ await exif.close();
+ } catch (_) {}
+ return out;
+}
+Future<List<File>> _collectDeviceGalleryFiles() async {
+ final List<String> roots = [
  '/storage/emulated/0/DCIM/Camera',
  '/storage/emulated/0/DCIM',
  '/storage/emulated/0/Pictures',
  '/storage/emulated/0/Pictures/KakaoTalk',
  '/storage/emulated/0/Download',
+ '/storage/emulated/0/Documents',
  ];
+ final Set<String> visitedDirs = {};
+ final Set<String> seenFiles = {};
+ final List<File> result = [];
+ void scanDir(String path, int depth) {
+ if (depth > 2 || visitedDirs.contains(path)) return;
+ visitedDirs.add(path);
  try {
- final Directory appDoc = await getApplicationDocumentsDirectory();
- baseDirs.add(appDoc.path);
- } catch (_) {}
- final Set<String> allDirs = {...baseDirs};
- for (final String bd in baseDirs) {
- try {
-  final Directory d = Directory(bd);
-  if (!d.existsSync()) continue;
-  for (final FileSystemEntity sub in d.listSync(recursive: false)) {
-  if (sub is Directory) allDirs.add(sub.path);
-  }
- } catch (_) {}
- }
- for (final String dirPath in allDirs) {
- for (final String tc in timeCandidates) {
-  for (final String candidatePath in [
-  '$dirPath/$tc.jpg',
-  '$dirPath/IMG_$tc.jpg',
-  '$dirPath/$tc.heic',
-  '$dirPath/$tc.jpeg',
-  ]) {
-  try {
-   final File f = File(candidatePath);
-   if (f.existsSync()) {
-   final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
-   if (m['lat'] != null && m['lng'] != null) return m;
+  final Directory d = Directory(path);
+  if (!d.existsSync()) return;
+  final List<FileSystemEntity> list = d.listSync(recursive: false);
+  for (final FileSystemEntity ent in list) {
+  if (ent is Directory) {
+   final String subName = ent.path.split('/').last;
+   if (!subName.startsWith('.')) {
+   scanDir(ent.path, depth + 1);
    }
-  } catch (_) {}
-  }
- }
- }
- for (final String dirPath in allDirs) {
- try {
-  final Directory d = Directory(dirPath);
-  if (!d.existsSync()) continue;
-  final List<FileSystemEntity> entities = d.listSync(recursive: false);
-  for (final FileSystemEntity ent in entities) {
-  if (ent is! File) continue;
-  final String pathLower = ent.path.toLowerCase();
-  if (!pathLower.endsWith('.jpg') &&
-   !pathLower.endsWith('.jpeg') &&
-   !pathLower.endsWith('.heic') &&
-   !pathLower.endsWith('.png')) {
-   continue;
-  }
-  final String fname = ent.path.split('/').last;
-  bool isCandidate = false;
-  if (fname == pickedName) {
-   isCandidate = true;
-  } else if (minutePrefix != null && fname.contains(minutePrefix)) {
-   isCandidate = true;
-  } else if (pickedTail != null && pickedSize > 256) {
-   try {
-   final int fLen = ent.lengthSync();
-   if ((fLen - pickedSize).abs() <= 65536 && fLen >= 256) {
-    final RandomAccessFile raf = ent.openSync();
-    raf.setPositionSync(fLen - 128);
-    final Uint8List candTail = raf.readSync(128);
-    raf.closeSync();
-    if (candTail.length == 128) {
-    bool same = true;
-    for (int b = 0; b < 128; b++) {
-     if (candTail[b] != pickedTail[b]) {
-     same = false;
-     break;
-     }
-    }
-    if (same) isCandidate = true;
-    }
+  } else if (ent is File) {
+   if (seenFiles.contains(ent.path)) continue;
+   final String low = ent.path.toLowerCase();
+   if (low.endsWith('.jpg') ||
+    low.endsWith('.jpeg') ||
+    low.endsWith('.png') ||
+    low.endsWith('.heic')) {
+   seenFiles.add(ent.path);
+   result.add(ent);
    }
-   } catch (_) {}
-  }
-  if (isCandidate) {
-   final Map<String, dynamic> m = await _extractPhotoMetaFromPath(ent.path);
-   if (m['lat'] != null && m['lng'] != null) return m;
   }
   }
  } catch (_) {}
+ }
+ for (final String r in roots) {
+ scanDir(r, 0);
+ }
+ return result;
+}
+Future<Map<String, dynamic>> _recoverGpsFromOriginalStorage(
+ XFile picked, String? rawDateTime) async {
+ final List<File> allFiles = await _collectDeviceGalleryFiles();
+ if (allFiles.isEmpty) return {};
+ String? cleanTargetDt;
+ String? minutePrefix;
+ if (rawDateTime != null && rawDateTime.trim().isNotEmpty) {
+ final String digits = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
+ if (digits.length >= 14) {
+  cleanTargetDt = digits.substring(0, 14);
+  minutePrefix = '${digits.substring(0, 8)}_${digits.substring(8, 12)}';
+ }
+ }
+ final String pickedName = picked.name;
+ int pickedSize = 0;
+ try {
+ pickedSize = await File(picked.path).length();
+ } catch (_) {}
+ for (final File f in allFiles) {
+ final String fname = f.path.split('/').last;
+ int fLen = 0;
+ try {
+  fLen = f.lengthSync();
+ } catch (_) {}
+ final bool nameMatch = (fname == pickedName) ||
+  (minutePrefix != null && fname.contains(minutePrefix));
+ final bool sizeClose =
+  pickedSize > 0 && (fLen - pickedSize).abs() <= 131072;
+ if (nameMatch || sizeClose) {
+  final Map<String, dynamic> headMeta = _fastReadExifHeadSync(f);
+  if (cleanTargetDt != null && headMeta['dateTime'] != null) {
+  final String candDigits =
+   headMeta['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
+  if (candDigits.length >= 14 &&
+   candDigits.substring(0, 14) == cleanTargetDt &&
+   headMeta['lat'] != null &&
+   headMeta['lng'] != null) {
+   return await _extractPhotoMetaFromPath(f.path);
+  }
+  }
+  if (nameMatch && headMeta['lat'] != null && headMeta['lng'] != null) {
+  return await _extractPhotoMetaFromPath(f.path);
+  }
+  if (pickedSize > 0 &&
+   (fLen - pickedSize).abs() <= 4096 &&
+   headMeta['lat'] != null &&
+   headMeta['lng'] != null) {
+  return await _extractPhotoMetaFromPath(f.path);
+  }
+ }
+ }
+ if (cleanTargetDt != null) {
+ for (final File f in allFiles) {
+  final Map<String, dynamic> headMeta = _fastReadExifHeadSync(f);
+  if (headMeta['dateTime'] != null &&
+   headMeta['lat'] != null &&
+   headMeta['lng'] != null) {
+  final String candDigits =
+   headMeta['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
+  if (candDigits.length >= 14 &&
+   candDigits.substring(0, 14) == cleanTargetDt) {
+   return await _extractPhotoMetaFromPath(f.path);
+  }
+  }
+ }
  }
  return {};
 }
+Future<List<String>?> _showDirectGalleryMultiPicker(List<File> files) async {
+ files.sort((a, b) {
+ try {
+  return b.lastModifiedSync().compareTo(a.lastModifiedSync());
+ } catch (_) {
+  return b.path.compareTo(a.path);
+ }
+ });
+ final Set<String> folderNames = {'전체'};
+ for (final File f in files) {
+ final List<String> segs = f.path.split('/');
+ if (segs.length >= 2) {
+  folderNames.add(segs[segs.length - 2]);
+ }
+ }
+ final List<String> selectedPaths = [];
+ String activeFolder = '전체';
+ final Map<String, bool> gpsBadgeCache = {};
+ return showModalBottomSheet<List<String>>(
+ context: context,
+ isScrollControlled: true,
+ backgroundColor: Colors.grey[900],
+ shape: const RoundedRectangleBorder(
+  borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+ ),
+ builder: (ctx) {
+  return StatefulBuilder(
+  builder: (ctx, setSheetState) {
+   final List<File> filtered = activeFolder == '전체'
+    ? files
+    : files.where((f) {
+     final List<String> s = f.path.split('/');
+     return s.length >= 2 && s[s.length - 2] == activeFolder;
+    }).toList();
+   return SafeArea(
+   child: SizedBox(
+    height: MediaQuery.of(ctx).size.height * 0.82,
+    child: Column(
+    children: [
+     Padding(
+     padding: const EdgeInsets.fromLTRB(14, 12, 10, 6),
+     child: Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+      const Expanded(
+       child: Text(
+       '📷 원본 GPS 보존 멀티 사진 선택기',
+       style: TextStyle(
+        color: Colors.amber,
+        fontSize: 14.5,
+        fontWeight: FontWeight.bold,
+       ),
+       ),
+      ),
+      TextButton.icon(
+       onPressed: () => Navigator.pop(ctx, <String>['__USE_SYSTEM_PICKER__']),
+       icon: const Icon(Icons.folder_open,
+        color: Colors.lightBlueAccent, size: 15),
+       label: const Text(
+       '기본 피커',
+       style: TextStyle(
+        color: Colors.lightBlueAccent,
+        fontSize: 11.5,
+        fontWeight: FontWeight.bold,
+       ),
+       ),
+      ),
+      IconButton(
+       icon: const Icon(Icons.close, color: Colors.white70, size: 20),
+       onPressed: () => Navigator.pop(ctx, null),
+      ),
+      ],
+     ),
+     ),
+     SizedBox(
+     height: 34,
+     child: ListView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      children: folderNames.map((fn) {
+      final bool isSel = activeFolder == fn;
+      return Padding(
+       padding: const EdgeInsets.only(right: 6),
+       child: ChoiceChip(
+       label: Text(
+        fn,
+        style: TextStyle(
+        color: isSel ? Colors.black : Colors.white,
+        fontSize: 11.5,
+        fontWeight: FontWeight.bold,
+        ),
+       ),
+       selected: isSel,
+       selectedColor: Colors.amber,
+       backgroundColor: Colors.white12,
+       onSelected: (_) {
+        setSheetState(() => activeFolder = fn);
+       },
+       ),
+      );
+      }).toList(),
+     ),
+     ),
+     const SizedBox(height: 6),
+     Expanded(
+     child: GridView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+      crossAxisCount: 3,
+      crossAxisSpacing: 5,
+      mainAxisSpacing: 5,
+      ),
+      itemCount: filtered.length,
+      itemBuilder: (_, idx) {
+      final File file = filtered[idx];
+      final int selOrder = selectedPaths.indexOf(file.path);
+      final bool isSelected = selOrder >= 0;
+      if (!gpsBadgeCache.containsKey(file.path)) {
+       final Map<String, dynamic> hm = _fastReadExifHeadSync(file);
+       gpsBadgeCache[file.path] =
+        (hm['lat'] != null && hm['lng'] != null);
+      }
+      final bool hasGps = gpsBadgeCache[file.path] ?? false;
+      return GestureDetector(
+       onTap: () {
+       setSheetState(() {
+        if (isSelected) {
+        selectedPaths.remove(file.path);
+        } else {
+        selectedPaths.add(file.path);
+        }
+       });
+       },
+       child: Stack(
+       fit: StackFit.expand,
+       children: [
+        ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: Image.file(
+         file,
+         cacheWidth: 220,
+         fit: BoxFit.cover,
+         gaplessPlayback: true,
+        ),
+        ),
+        Positioned(
+        left: 4,
+        bottom: 4,
+        child: Container(
+         padding: const EdgeInsets.symmetric(
+          horizontal: 5, vertical: 2),
+         decoration: BoxDecoration(
+         color: hasGps
+          ? Colors.green.withOpacity(0.85)
+          : Colors.black54,
+         borderRadius: BorderRadius.circular(4),
+         ),
+         child: Text(
+         hasGps ? '📍GPS' : '위치없음',
+         style: const TextStyle(
+          color: Colors.white,
+          fontSize: 9.5,
+          fontWeight: FontWeight.bold,
+         ),
+         ),
+        ),
+        ),
+        if (isSelected)
+        Container(
+         decoration: BoxDecoration(
+         color: Colors.amber.withOpacity(0.28),
+         borderRadius: BorderRadius.circular(6),
+         border: Border.all(color: Colors.amber, width: 2.5),
+         ),
+        ),
+        Positioned(
+        top: 5,
+        right: 5,
+        child: Container(
+         width: 22,
+         height: 22,
+         alignment: Alignment.center,
+         decoration: BoxDecoration(
+         color: isSelected ? Colors.amber : Colors.black54,
+         shape: BoxShape.circle,
+         border: Border.all(color: Colors.white, width: 1.5),
+         ),
+         child: isSelected
+          ? Text(
+           '${selOrder + 1}',
+           style: const TextStyle(
+           color: Colors.black,
+           fontSize: 11,
+           fontWeight: FontWeight.bold,
+           ),
+          )
+          : null,
+        ),
+        ),
+       ],
+       ),
+      );
+      },
+     ),
+     ),
+     Padding(
+     padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+     child: SizedBox(
+      width: double.infinity,
+      height: 44,
+      child: ElevatedButton.icon(
+      onPressed: selectedPaths.isEmpty
+       ? null
+       : () => Navigator.pop(ctx, selectedPaths),
+      icon: const Icon(Icons.check_circle, size: 18),
+      label: Text(
+       selectedPaths.isEmpty
+        ? '사진을 여러 장 터치해서 선택하세요'
+        : '${selectedPaths.length}장 사진 첨부하기 (원본 GPS 적용)',
+       style: const TextStyle(
+       fontSize: 13.5,
+       fontWeight: FontWeight.bold,
+       ),
+      ),
+      style: ElevatedButton.styleFrom(
+       backgroundColor: Colors.amber,
+       foregroundColor: Colors.black,
+       disabledBackgroundColor: Colors.white12,
+       disabledForegroundColor: Colors.white38,
+      ),
+      ),
+     ),
+     ),
+    ],
+    ),
+   ),
+   );
+  },
+  );
+ },
+ );
+}
 Future<void> _importPhotosFromGallery() async {
  try {
+ PermissionStatus pStat = PermissionStatus.denied;
+ PermissionStatus sStat = PermissionStatus.denied;
+ PermissionStatus mStat = PermissionStatus.denied;
  try {
-  await [
-  Permission.photos,
-  Permission.storage,
-  Permission.accessMediaLocation,
-  ].request();
+  pStat = await Permission.photos.request();
+  sStat = await Permission.storage.request();
+  mStat = await Permission.accessMediaLocation.request();
  } catch (_) {}
- final ImagePicker picker = ImagePicker();
+ final List<File> directDeviceFiles = await _collectDeviceGalleryFiles();
  List<XFile> pickedFiles = [];
- try {
-  pickedFiles = await picker.pickMultipleMedia(
-  requestFullMetadata: true,
-  );
- } catch (_) {
-  pickedFiles = await picker.pickMultiImage(
-  requestFullMetadata: true,
-  );
+ if (directDeviceFiles.isNotEmpty && mounted) {
+  final List<String>? chosenPaths =
+   await _showDirectGalleryMultiPicker(directDeviceFiles);
+  if (chosenPaths == null || chosenPaths.isEmpty) return;
+  if (chosenPaths.length == 1 && chosenPaths.first == '__USE_SYSTEM_PICKER__') {
+  final ImagePicker picker = ImagePicker();
+  pickedFiles = await picker.pickMultiImage(requestFullMetadata: true);
+  } else {
+  pickedFiles = chosenPaths.map((p) => XFile(p)).toList();
+  }
+ } else {
+  final ImagePicker picker = ImagePicker();
+  pickedFiles = await picker.pickMultiImage(requestFullMetadata: true);
  }
  if (pickedFiles.isEmpty) return;
  setState(() => _isExporting = true);
@@ -1537,10 +1783,6 @@ Future<void> _importPhotosFromGallery() async {
  }
  for (int i = 0; i < pickedFiles.length; i++) {
   final XFile picked = pickedFiles[i];
-  final String extLower = picked.path.split('.').last.toLowerCase();
-  if (extLower == 'mp4' || extLower == 'mov' || extLower == 'avi' || extLower == 'mkv') {
-  continue;
-  }
   Map<String, dynamic> meta = await _extractPhotoMetaFromPath(picked.path);
   if (meta['lat'] == null || meta['lng'] == null) {
   final Map<String, dynamic> recovered = await _recoverGpsFromOriginalStorage(
@@ -1612,14 +1854,23 @@ Future<void> _importPhotosFromGallery() async {
    if (exifGpsCount > 0) {
    msg = '📍 $addedCount장 중 $exifGpsCount장의 촬영 위치(${lastAdded.lat.toStringAsFixed(5)}, ${lastAdded.lng.toStringAsFixed(5)})에 동그라미를 표시했습니다!';
    } else if (redactedCount > 0) {
-   msg = '⚠️ 안드로이드 기본 피커가 위치정보를 가렸습니다. 사진 선택 창 우측 상단 [⋮ → 찾아보기(갤러리/내파일)]로 선택하면 실제 위치가 바로 읽힙니다.';
+   msg = '⚠️ 위치권한 차단됨(사진:${pStat.isGranted || sStat.isGranted}, 원본위치:${mStat.isGranted}, 폴더파일:${directDeviceFiles.length}개). 우측 [권한설정]에서 사진 및 위치 권한을 모두 허용해주세요.';
    } else {
    msg = '⚠️ 선택한 사진에 촬영 당시 저장된 GPS 정보가 없어 현재 지도 위치에 배치되었습니다.';
    }
    ScaffoldMessenger.of(context).showSnackBar(
    SnackBar(
     content: Text(msg),
-    duration: const Duration(seconds: 4),
+    duration: const Duration(seconds: 5),
+    action: redactedCount > 0
+     ? SnackBarAction(
+      label: '권한설정',
+      textColor: Colors.amber,
+      onPressed: () {
+      openAppSettings();
+      },
+     )
+     : null,
    ),
    );
   }
@@ -2899,24 +3150,29 @@ Future<void> _exportAsHtmlViewer() async {
 const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = photos.length > 0 ? 0 : 0;
+
 const photoPane = document.getElementById('photo-pane');
 const mainImg = document.getElementById('main-photo');
 let pScale = 1.0, pX = 0, pY = 0;
 let startDist = 0, startScale = 1.0;
 let isDragging = false, dragStartX = 0, dragStartY = 0;
 let lastTapTime = 0;
+
 function applyPhotoTransform() {
  mainImg.style.transform = `translate(\${pX}px, \${pY}px) scale(\${pScale})`;
 }
+
 function resetPhotoZoom() {
  pScale = 1.0; pX = 0; pY = 0;
  applyPhotoTransform();
 }
+
 function getTouchDist(t1, t2) {
  const dx = t1.clientX - t2.clientX;
  const dy = t1.clientY - t2.clientY;
  return Math.hypot(dx, dy);
 }
+
 photoPane.addEventListener('touchstart', (e) => {
  if (e.touches.length === 2) {
   isDragging = false;
@@ -2939,6 +3195,7 @@ photoPane.addEventListener('touchstart', (e) => {
   }
  }
 }, { passive: false });
+
 photoPane.addEventListener('touchmove', (e) => {
  e.preventDefault();
  if (e.touches.length === 2 && startDist > 0) {
@@ -2952,10 +3209,12 @@ photoPane.addEventListener('touchmove', (e) => {
   applyPhotoTransform();
  }
 }, { passive: false });
+
 photoPane.addEventListener('touchend', (e) => {
  if (e.touches.length < 2) startDist = 0;
  if (e.touches.length === 0) isDragging = false;
 });
+
 photoPane.addEventListener('wheel', (e) => {
  e.preventDefault();
  const delta = e.deltaY < 0 ? 0.2 : -0.2;
@@ -2963,14 +3222,17 @@ photoPane.addEventListener('wheel', (e) => {
  if (pScale <= 1.02) { pX = 0; pY = 0; }
  applyPhotoTransform();
 }, { passive: false });
+
 const initLat = photos.length > 0 ? photos[selectedIdx].lat : (bps.length > 0 ? bps[0].lat : 37.4984);
 const initLng = photos.length > 0 ? photos[selectedIdx].lng : (bps.length > 0 ? bps[0].lng : 127.1324);
+
 const map = L.map('map-pane', { maxZoom: 22 }).setView([initLat, initLng], ${currentMapZoom.toStringAsFixed(1)});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
  maxNativeZoom: 19,
  maxZoom: 22,
  attribution: '© OpenStreetMap'
 }).addTo(map);
+
 bps.forEach((bp) => {
  const bpImg = new Image();
  bpImg.onload = () => {
@@ -2991,13 +3253,16 @@ bps.forEach((bp) => {
   const drawH = bpImg.height * scale;
   ctx.drawImage(bpImg, -drawW / 2, -drawH / 2, drawW, drawH);
   ctx.restore();
+
   const bakedUrl = canvas.toDataURL('image/png');
   const bounds = [[bp.swLat, bp.swLng], [bp.neLat, bp.neLng]];
   L.imageOverlay(bakedUrl, bounds, { opacity: 1.0, interactive: false }).addTo(map);
  };
  bpImg.src = bp.b64;
 });
+
 const markersLayer = L.layerGroup().addTo(map);
+
 function getDistanceMeters(lat1, lon1, lat2, lon2) {
  const R = 6371000;
  const dLat = (lat2 - lat1) * Math.PI / 180.0;
@@ -3007,6 +3272,7 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
       Math.sin(dLon / 2) * Math.sin(dLon / 2);
  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
+
 function selectPhoto(idx) {
  selectedIdx = idx;
  resetPhotoZoom();
@@ -3014,12 +3280,13 @@ function selectPhoto(idx) {
  mainImg.src = p.b64;
  document.getElementById('info-txt').innerText =
   `[\${p.category}] 위도: \${p.lat.toFixed(6)} | 경도: \${p.lng.toFixed(6)} | 방위각: \${p.azimuth.toFixed(1)}° | \${p.time}` + (p.memo ? ` | 메모: \${p.memo}` : '');
-renderThumbnails();
-renderMarkers();
-map.panTo([p.lat, p.lng]);
+ renderThumbnails();
+ renderMarkers();
+ map.panTo([p.lat, p.lng]);
 }
+
 function renderThumbnails() {
-const box = document.getElementById('thumbs');
+ const box = document.getElementById('thumbs');
  box.innerHTML = '';
  photos.forEach((p, i) => {
   const im = document.createElement('img');
@@ -3029,6 +3296,7 @@ const box = document.getElementById('thumbs');
   box.appendChild(im);
  });
 }
+
 function renderMarkers() {
  markersLayer.clearLayers();
  const order = [];
@@ -3038,6 +3306,7 @@ function renderMarkers() {
  if (selectedIdx >= 0 && selectedIdx < photos.length) {
   order.push(selectedIdx);
  }
+
  order.forEach((i) => {
   const p = photos[i];
   const isSel = (i === selectedIdx);
@@ -3046,8 +3315,8 @@ function renderMarkers() {
   const noDir = p.azimuth < 0;
   const htmlIcon = L.divIcon({
    className: '',
- iconSize: [28, 28],
- iconAnchor: [14, 14],
+   iconSize: [28, 28],
+   iconAnchor: [14, 14],
    html: `<div style="width:24px;height:24px;border-radius:50%;background:\${color}4d;border:2px solid \${color};display:flex;align-items:center;justify-content:center;\${noDir ? '' : 'transform:rotate(' + p.azimuth + 'deg);'}">
        <span style="color:\${color};font-size:\${noDir ? '12px' : '14px'};font-weight:bold;">\${noDir ? '●' : '▲'}</span>
       </div>`
@@ -3070,6 +3339,7 @@ function renderMarkers() {
   });
  });
 }
+
 if (photos.length > 0) {
  selectPhoto(selectedIdx);
 }
@@ -3081,75 +3351,75 @@ if (photos.length > 0) {
  final String stamp = DateTime.now()
   .toString()
   .substring(0, 16)
-     .replaceAll(RegExp(r'[:\-\s]'), '');
-   final File htmlFile = File('${dir.path}/GPS_Map_Viewer_$stamp.html');
-   await htmlFile.writeAsString(htmlContent);
-   await Share.shareXFiles(
-    [XFile(htmlFile.path)],
-    text: '📍 GPS 도면 & 현장 촬영 사진 웹 뷰어 파일입니다. (클릭하여 브라우저로 열기)',
-   );
-  } catch (e) {
-   if (mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-     SnackBar(content: Text('HTML 내보내기 오류: $e')),
-    );
-   }
-  } finally {
-   if (mounted) setState(() => _isExporting = false);
-  }
+  .replaceAll(RegExp(r'[:\-\s]'), '');
+ final File htmlFile = File('${dir.path}/GPS_Map_Viewer_$stamp.html');
+ await htmlFile.writeAsString(htmlContent);
+ await Share.shareXFiles(
+  [XFile(htmlFile.path)],
+  text: '📍 GPS 도면 & 현장 촬영 사진 웹 뷰어 파일입니다. (클릭하여 브라우저로 열기)',
+ );
+ } catch (e) {
+ if (mounted) {
+  ScaffoldMessenger.of(context).showSnackBar(
+  SnackBar(content: Text('HTML 내보내기 오류: $e')),
+  );
  }
- Future<void> _exportAsZipArchive() async {
-  if (_visiblePhotos.isEmpty && _blueprints.isEmpty) {
-   ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text('내보낼 사진이나 도면이 없습니다.')),
-   );
-   return;
-  }
-  setState(() => _isExporting = true);
-  try {
-   final Archive archive = Archive();
-   final List<Map<String, dynamic>> exportedMeta = [];
-   for (final p in _visiblePhotos) {
-    final f = File(p.path);
-    if (!f.existsSync()) continue;
-    final String fileName = p.path.split('/').last;
-    final Uint8List bytes = await f.readAsBytes();
-    archive.addFile(ArchiveFile('photos/$fileName', bytes.length, bytes));
-    final mapItem = p.toMap();
-    mapItem['fileName'] = fileName;
-    exportedMeta.add(mapItem);
-   }
-   final Uint8List metaBytes =
-     Uint8List.fromList(utf8.encode(jsonEncode(exportedMeta)));
-   archive.addFile(
-     ArchiveFile('photos_meta.json', metaBytes.length, metaBytes));
-   final List<Map<String, dynamic>> exportedBps = [];
-   for (final bp in _blueprints) {
-    final f = File(bp.imagePath);
-    if (!f.existsSync()) continue;
-    final String bpName = bp.imagePath.split('/').last;
-    final Uint8List bpBytes = await f.readAsBytes();
-    archive.addFile(
-      ArchiveFile('blueprint/$bpName', bpBytes.length, bpBytes));
-    final bpMap = bp.toMap();
-    bpMap['fileName'] = bpName;
-    exportedBps.add(bpMap);
-   }
-   if (exportedBps.isNotEmpty) {
-    final Uint8List cfgBytes = Uint8List.fromList(utf8.encode(jsonEncode({
-     'globalShow': _bpGlobalShow,
-     'blueprints': exportedBps,
-    })));
-    archive.addFile(
-      ArchiveFile('blueprint_config.json', cfgBytes.length, cfgBytes));
-   }
-   final List<int>? zipData = ZipEncoder().encode(archive);
-   if (zipData == null) throw Exception('ZIP 압축 실패');
-   final dir = await getTemporaryDirectory();
-   final String stamp = DateTime.now()
-     .toString()
-     .substring(0, 16)
-     .replaceAll(RegExp(r'[:\-\s]'), '');
+ } finally {
+ if (mounted) setState(() => _isExporting = false);
+ }
+}
+Future<void> _exportAsZipArchive() async {
+ if (_visiblePhotos.isEmpty && _blueprints.isEmpty) {
+ ScaffoldMessenger.of(context).showSnackBar(
+  const SnackBar(content: Text('내보낼 사진이나 도면이 없습니다.')),
+ );
+ return;
+ }
+ setState(() => _isExporting = true);
+ try {
+ final Archive archive = Archive();
+ final List<Map<String, dynamic>> exportedMeta = [];
+ for (final p in _visiblePhotos) {
+  final f = File(p.path);
+  if (!f.existsSync()) continue;
+  final String fileName = p.path.split('/').last;
+  final Uint8List bytes = await f.readAsBytes();
+  archive.addFile(ArchiveFile('photos/$fileName', bytes.length, bytes));
+  final mapItem = p.toMap();
+  mapItem['fileName'] = fileName;
+  exportedMeta.add(mapItem);
+ }
+ final Uint8List metaBytes =
+  Uint8List.fromList(utf8.encode(jsonEncode(exportedMeta)));
+ archive.addFile(
+  ArchiveFile('photos_meta.json', metaBytes.length, metaBytes));
+ final List<Map<String, dynamic>> exportedBps = [];
+ for (final bp in _blueprints) {
+  final f = File(bp.imagePath);
+  if (!f.existsSync()) continue;
+  final String bpName = bp.imagePath.split('/').last;
+  final Uint8List bpBytes = await f.readAsBytes();
+  archive.addFile(
+   ArchiveFile('blueprint/$bpName', bpBytes.length, bpBytes));
+  final bpMap = bp.toMap();
+  bpMap['fileName'] = bpName;
+  exportedBps.add(bpMap);
+ }
+ if (exportedBps.isNotEmpty) {
+  final Uint8List cfgBytes = Uint8List.fromList(utf8.encode(jsonEncode({
+  'globalShow': _bpGlobalShow,
+  'blueprints': exportedBps,
+  })));
+  archive.addFile(
+   ArchiveFile('blueprint_config.json', cfgBytes.length, cfgBytes));
+ }
+ final List<int>? zipData = ZipEncoder().encode(archive);
+ if (zipData == null) throw Exception('ZIP 압축 실패');
+ final dir = await getTemporaryDirectory();
+ final String stamp = DateTime.now()
+  .toString()
+  .substring(0, 16)
+  .replaceAll(RegExp(r'[:\-\s]'), '');
  final File zipFile = File('${dir.path}/GPS_Camera_Package_$stamp.zip');
  await zipFile.writeAsBytes(zipData);
  await Share.shareXFiles(
@@ -3209,1396 +3479,1396 @@ Future<void> _exportAsCombinedImage() async {
  final String stamp = DateTime.now()
   .toString()
   .substring(0, 16)
-     .replaceAll(RegExp(r'[:\-\s]'), '');
-   final File outFile = File('${dir.path}/GPS_Report_$stamp.jpg');
-   await outFile.writeAsBytes(outJpg);
-   await Gal.putImage(outFile.path);
-   await Share.shareXFiles(
-    [XFile(outFile.path)],
-    text:
-      '🖼️ 현장 사진 & 도면 위치 합본 [카테고리: ${currentPhoto.category}] (${currentPhoto.timestamp})\n위도: ${currentPhoto.lat.toStringAsFixed(6)}, 경도: ${currentPhoto.lng.toStringAsFixed(6)}${currentPhoto.memo.trim().isNotEmpty ? "\n내용: ${currentPhoto.memo.trim()}" : ""}',
-   );
-  } catch (e) {
-   if (mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-     SnackBar(content: Text('합본 이미지 생성 오류: $e')),
-    );
-   }
-  } finally {
-   if (mounted) setState(() => _isExporting = false);
-  }
+  .replaceAll(RegExp(r'[:\-\s]'), '');
+ final File outFile = File('${dir.path}/GPS_Report_$stamp.jpg');
+ await outFile.writeAsBytes(outJpg);
+ await Gal.putImage(outFile.path);
+ await Share.shareXFiles(
+  [XFile(outFile.path)],
+  text:
+   '🖼️ 현장 사진 & 도면 위치 합본 [카테고리: ${currentPhoto.category}] (${currentPhoto.timestamp})\n위도: ${currentPhoto.lat.toStringAsFixed(6)}, 경도: ${currentPhoto.lng.toStringAsFixed(6)}${currentPhoto.memo.trim().isNotEmpty ? "\n내용: ${currentPhoto.memo.trim()}" : ""}',
+ );
+ } catch (e) {
+ if (mounted) {
+  ScaffoldMessenger.of(context).showSnackBar(
+  SnackBar(content: Text('합본 이미지 생성 오류: $e')),
+  );
  }
- Widget _fineStepBtn(String label, VoidCallback onTap) {
-  return Padding(
-   padding: const EdgeInsets.symmetric(horizontal: 2),
-   child: InkWell(
-    onTap: onTap,
-    borderRadius: BorderRadius.circular(6),
-    child: Container(
-     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+ } finally {
+ if (mounted) setState(() => _isExporting = false);
+ }
+}
+Widget _fineStepBtn(String label, VoidCallback onTap) {
+ return Padding(
+ padding: const EdgeInsets.symmetric(horizontal: 2),
+ child: InkWell(
+  onTap: onTap,
+  borderRadius: BorderRadius.circular(6),
+  child: Container(
+  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+  decoration: BoxDecoration(
+   color: Colors.white12,
+   borderRadius: BorderRadius.circular(6),
+   border: Border.all(color: Colors.white24),
+  ),
+  child: Text(
+   label,
+   style: const TextStyle(
+   color: Colors.white,
+   fontSize: 11,
+   fontWeight: FontWeight.bold,
+   ),
+  ),
+  ),
+ ),
+ );
+}
+Widget _buildLiveBlueprintOverlayWidget(Size mapSize) {
+ final bp = _activeBp;
+ final bounds = _currentMapBounds;
+ if (bp == null || bounds == null || !bp.isVisible) {
+ return const SizedBox.shrink();
+ }
+ final double rad = bp.currentRadius;
+ final double dLat = rad / 111320.0;
+ final double cosLat = cos(bp.centerLat * pi / 180.0).abs().clamp(0.1, 1.0);
+ final double dLng = rad / (111320.0 * cosLat);
+ final double swLat = bp.centerLat - dLat;
+ final double neLat = bp.centerLat + dLat;
+ final double swLng = bp.centerLng - dLng;
+ final double neLng = bp.centerLng + dLng;
+ final double latSpan =
+  (bounds.northEast.latitude - bounds.southWest.latitude).abs();
+ final double lngSpan =
+  (bounds.northEast.longitude - bounds.southWest.longitude).abs();
+ if (latSpan < 1e-9 || lngSpan < 1e-9) return const SizedBox.shrink();
+ final double left =
+  ((swLng - bounds.southWest.longitude) / lngSpan) * mapSize.width;
+ final double right =
+  ((neLng - bounds.southWest.longitude) / lngSpan) * mapSize.width;
+ final double top =
+  ((bounds.northEast.latitude - neLat) / latSpan) * mapSize.height;
+ final double bottom =
+  ((bounds.northEast.latitude - swLat) / latSpan) * mapSize.height;
+ final double boxW = (right - left).abs();
+ final double boxH = (bottom - top).abs();
+ if (boxW < 2 || boxH < 2) return const SizedBox.shrink();
+ final Widget imgWidget = bp.fastBytes != null
+  ? Image.memory(
+   bp.fastBytes!,
+   fit: BoxFit.contain,
+   filterQuality: FilterQuality.medium,
+   gaplessPlayback: true,
+  )
+  : Image.file(
+   File(bp.imagePath),
+   fit: BoxFit.contain,
+   filterQuality: FilterQuality.medium,
+   gaplessPlayback: true,
+  );
+ return Positioned(
+ left: left,
+ top: top,
+ width: boxW,
+ height: boxH,
+ child: IgnorePointer(
+  child: Opacity(
+  opacity: bp.opacity.clamp(0.1, 1.0),
+  child: Transform.rotate(
+   angle: bp.rotation * (pi / 180.0),
+   child: Padding(
+   padding: EdgeInsets.symmetric(
+    horizontal: boxW * (40.0 / 900.0),
+    vertical: boxH * (40.0 / 900.0),
+   ),
+   child: imgWidget,
+   ),
+  ),
+  ),
+ ),
+ );
+}
+Widget _buildBlueprintControlBox() {
+ final bp = _activeBp;
+ if (bp == null) {
+ return Container(
+  color: Colors.grey[900],
+  alignment: Alignment.center,
+  child: ElevatedButton.icon(
+  onPressed: _importBlueprintFromGallery,
+  icon: const Icon(Icons.add_photo_alternate),
+  label: const Text('도면 추가하기'),
+  style: ElevatedButton.styleFrom(
+   backgroundColor: Colors.amber,
+   foregroundColor: Colors.black,
+  ),
+  ),
+ );
+ }
+ return Container(
+ color: Colors.grey[900],
+ padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+ child: SingleChildScrollView(
+  child: Column(
+  crossAxisAlignment: CrossAxisAlignment.start,
+  children: [
+   SizedBox(
+   height: 32,
+   child: ListView(
+    scrollDirection: Axis.horizontal,
+    children: [
+    ...List.generate(_blueprints.length, (i) {
+     final item = _blueprints[i];
+     final bool isSel = i == _activeBpIdx;
+     return Container(
+     margin: const EdgeInsets.only(right: 6),
+     padding: const EdgeInsets.symmetric(horizontal: 6),
      decoration: BoxDecoration(
-      color: Colors.white12,
+      color: isSel
+       ? Colors.amber.withOpacity(0.22)
+       : Colors.white10,
       borderRadius: BorderRadius.circular(6),
-      border: Border.all(color: Colors.white24),
+      border: Border.all(
+      color: isSel ? Colors.amber : Colors.white24,
+      width: isSel ? 1.5 : 1.0,
+      ),
      ),
-     child: Text(
-      label,
-      style: const TextStyle(
-       color: Colors.white,
+     child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+      InkWell(
+       onTap: () async {
+       setState(() {
+        item.isVisible = !item.isVisible;
+        if (item.isVisible) _bpGlobalShow = true;
+       });
+       await _persistBlueprintConfig();
+       await _refreshAllOverlays(includeBlueprint: true);
+       },
+       child: Padding(
+       padding: const EdgeInsets.only(right: 4),
+       child: Icon(
+        item.isVisible
+         ? Icons.visibility
+         : Icons.visibility_off,
+        size: 15,
+        color: item.isVisible
+         ? Colors.lightGreenAccent
+         : Colors.white38,
+       ),
+       ),
+      ),
+      InkWell(
+       onTap: () async {
+       await _updateMapViewportInfo();
+       setState(() {
+        _activeBpIdx = i;
+        item.isVisible = true;
+        _bpGlobalShow = true;
+       });
+       await _refreshAllOverlays(includeBlueprint: true);
+       },
+       onLongPress: () async {
+       final newName = await _promptBlueprintNameDialog(
+        defaultName: item.name,
+        title: '도면 이름 변경',
+       );
+       if (newName != null && newName.isNotEmpty) {
+        setState(() => item.name = newName);
+        await _persistBlueprintConfig();
+       }
+       },
+       child: Padding(
+       padding: const EdgeInsets.symmetric(
+        horizontal: 4, vertical: 4),
+       child: Text(
+        item.name,
+        style: TextStyle(
+        color: isSel ? Colors.amber : Colors.white,
+        fontSize: 11.5,
+        fontWeight: isSel
+         ? FontWeight.bold
+         : FontWeight.normal,
+        ),
+       ),
+       ),
+      ),
+      InkWell(
+       onTap: () => _deleteBlueprintAt(i),
+       child: const Padding(
+       padding: EdgeInsets.only(left: 4),
+       child: Icon(
+        Icons.close,
+        size: 14,
+        color: Colors.redAccent,
+       ),
+       ),
+      ),
+      ],
+     ),
+     );
+    }),
+    InkWell(
+     onTap: _importBlueprintFromGallery,
+     borderRadius: BorderRadius.circular(6),
+     child: Container(
+     padding: const EdgeInsets.symmetric(horizontal: 8),
+     decoration: BoxDecoration(
+      color: Colors.amber.withOpacity(0.15),
+      borderRadius: BorderRadius.circular(6),
+      border: Border.all(color: Colors.amber),
+     ),
+     alignment: Alignment.center,
+     child: const Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+      Icon(Icons.add, size: 14, color: Colors.amber),
+      SizedBox(width: 2),
+      Text(
+       '도면추가',
+       style: TextStyle(
+       color: Colors.amber,
        fontSize: 11,
        fontWeight: FontWeight.bold,
-      ),
-     ),
-    ),
-   ),
-  );
- }
- Widget _buildLiveBlueprintOverlayWidget(Size mapSize) {
-  final bp = _activeBp;
-  final bounds = _currentMapBounds;
-  if (bp == null || bounds == null || !bp.isVisible) {
-   return const SizedBox.shrink();
-  }
-  final double rad = bp.currentRadius;
-  final double dLat = rad / 111320.0;
-  final double cosLat = cos(bp.centerLat * pi / 180.0).abs().clamp(0.1, 1.0);
-  final double dLng = rad / (111320.0 * cosLat);
-  final double swLat = bp.centerLat - dLat;
-  final double neLat = bp.centerLat + dLat;
-  final double swLng = bp.centerLng - dLng;
-  final double neLng = bp.centerLng + dLng;
-  final double latSpan =
-    (bounds.northEast.latitude - bounds.southWest.latitude).abs();
-  final double lngSpan =
-    (bounds.northEast.longitude - bounds.southWest.longitude).abs();
-  if (latSpan < 1e-9 || lngSpan < 1e-9) return const SizedBox.shrink();
-  final double left =
-    ((swLng - bounds.southWest.longitude) / lngSpan) * mapSize.width;
-  final double right =
-    ((neLng - bounds.southWest.longitude) / lngSpan) * mapSize.width;
-  final double top =
-    ((bounds.northEast.latitude - neLat) / latSpan) * mapSize.height;
-  final double bottom =
-    ((bounds.northEast.latitude - swLat) / latSpan) * mapSize.height;
-  final double boxW = (right - left).abs();
-  final double boxH = (bottom - top).abs();
-  if (boxW < 2 || boxH < 2) return const SizedBox.shrink();
-  final Widget imgWidget = bp.fastBytes != null
-    ? Image.memory(
-      bp.fastBytes!,
-      fit: BoxFit.contain,
-      filterQuality: FilterQuality.medium,
-      gaplessPlayback: true,
-     )
-    : Image.file(
-      File(bp.imagePath),
-      fit: BoxFit.contain,
-      filterQuality: FilterQuality.medium,
-      gaplessPlayback: true,
-     );
-  return Positioned(
-   left: left,
-   top: top,
-   width: boxW,
-   height: boxH,
-   child: IgnorePointer(
-    child: Opacity(
-     opacity: bp.opacity.clamp(0.1, 1.0),
-     child: Transform.rotate(
-      angle: bp.rotation * (pi / 180.0),
-      child: Padding(
-       padding: EdgeInsets.symmetric(
-        horizontal: boxW * (40.0 / 900.0),
-        vertical: boxH * (40.0 / 900.0),
        ),
-       child: imgWidget,
       ),
+      ],
+     ),
      ),
     ),
+    ],
    ),
-  );
- }
- Widget _buildBlueprintControlBox() {
-  final bp = _activeBp;
-  if (bp == null) {
-   return Container(
-    color: Colors.grey[900],
-    alignment: Alignment.center,
-    child: ElevatedButton.icon(
-     onPressed: _importBlueprintFromGallery,
-     icon: const Icon(Icons.add_photo_alternate),
-     label: const Text('도면 추가하기'),
+   ),
+   const SizedBox(height: 6),
+   Row(
+   children: [
+    Expanded(
+    child: Row(
+     children: [
+     Expanded(
+      child: ElevatedButton.icon(
+      onPressed: () async {
+       await _updateMapViewportInfo();
+       setState(() => _bpTouchModeIsBlueprint = true);
+       await _refreshAllOverlays(includeBlueprint: true);
+      },
+      icon: const Icon(Icons.pan_tool_alt, size: 15),
+      label: const Text('도면이동',
+       style: TextStyle(
+        fontSize: 12, fontWeight: FontWeight.bold)),
+      style: ElevatedButton.styleFrom(
+       backgroundColor: _bpTouchModeIsBlueprint
+        ? Colors.amber
+        : Colors.white12,
+       foregroundColor: _bpTouchModeIsBlueprint
+        ? Colors.black
+        : Colors.white70,
+       padding: const EdgeInsets.symmetric(vertical: 6),
+      ),
+      ),
+     ),
+     const SizedBox(width: 6),
+     Expanded(
+      child: ElevatedButton.icon(
+      onPressed: () async {
+       setState(() => _bpTouchModeIsBlueprint = false);
+       await _persistBlueprintConfig();
+       await _refreshAllOverlays(includeBlueprint: true);
+      },
+      icon: const Icon(Icons.map_outlined, size: 15),
+      label: const Text('지도이동',
+       style: TextStyle(
+        fontSize: 12, fontWeight: FontWeight.bold)),
+      style: ElevatedButton.styleFrom(
+       backgroundColor: !_bpTouchModeIsBlueprint
+        ? Colors.lightBlueAccent
+        : Colors.white12,
+       foregroundColor: !_bpTouchModeIsBlueprint
+        ? Colors.black
+        : Colors.white70,
+       padding: const EdgeInsets.symmetric(vertical: 6),
+      ),
+      ),
+     ),
+     ],
+    ),
+    ),
+    const SizedBox(width: 8),
+    ElevatedButton.icon(
+    onPressed: () async {
+     setState(() {
+     _bpEditMode = false;
+     _isSliderManipulating = false;
+     });
+     await _persistBlueprintConfig();
+     await _refreshAllOverlays(includeBlueprint: true);
+     if (mounted) {
+     ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+      content: Text('모든 도면 설정이 영구 저장되었습니다!'),
+      ),
+     );
+     }
+    },
+    icon: const Icon(Icons.check, size: 15),
+    label: const Text('저장',
+     style:
+      TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+    style: ElevatedButton.styleFrom(
+     backgroundColor: Colors.greenAccent[700],
+     foregroundColor: Colors.white,
+     padding: const EdgeInsets.symmetric(horizontal: 10),
+    ),
+    ),
+   ],
+   ),
+   Padding(
+   padding: const EdgeInsets.symmetric(vertical: 3),
+   child: Text(
+    _bpTouchModeIsBlueprint
+     ? '💡 [${bp.name}] 한 손가락 이동, 두 손가락 확대·회전이 즉시 반영됩니다. (탭 길게 눌러 이름 변경)'
+     : '💡 [지도이동 켜짐] 도면은 고정된 채로 배경 지도를 이동·확대할 수 있습니다.',
+    style: TextStyle(
+    color: _bpTouchModeIsBlueprint
+     ? Colors.amberAccent
+     : Colors.lightBlueAccent,
+    fontSize: 11,
+    ),
+   ),
+   ),
+   const Divider(color: Colors.white24, height: 6),
+   Row(
+   mainAxisAlignment: MainAxisAlignment.spaceBetween,
+   children: [
+    ElevatedButton.icon(
+    onPressed: () async {
+     if (_mapCtrl == null) return;
+     final pos = await _mapCtrl!.getCameraPosition();
+     final rad60 = await _calcScreen80Radius();
+     await _updateMapViewportInfo();
+     setState(() {
+     bp.centerLat = pos.target.latitude;
+     bp.centerLng = pos.target.longitude;
+     bp.baseRadius = rad60;
+     bp.sizeSlider = 0.5;
+     });
+     if (!_useLiveActiveBpOverlay) {
+     await _syncBlueprintsToMap();
+     }
+     await _persistBlueprintConfig();
+    },
+    icon: const Icon(Icons.center_focus_strong, size: 14),
+    label:
+     const Text('화면중앙 초기화', style: TextStyle(fontSize: 11)),
+    style: ElevatedButton.styleFrom(
+     backgroundColor: Colors.blueGrey,
+     foregroundColor: Colors.white,
+     padding: const EdgeInsets.symmetric(horizontal: 8),
+     minimumSize: const Size(0, 30),
+    ),
+    ),
+    Row(
+    children: [
+     _fineStepBtn(
+     _nudgeStepMeters == 1.0 ? '단위: 1m' : '단위: 5m',
+     () {
+      setState(() {
+      _nudgeStepMeters =
+       (_nudgeStepMeters == 1.0) ? 5.0 : 1.0;
+      });
+     },
+     ),
+     IconButton(
+     constraints:
+      const BoxConstraints(minWidth: 32, minHeight: 32),
+     padding: EdgeInsets.zero,
+     icon: const Icon(Icons.arrow_back,
+      color: Colors.white, size: 18),
+     onPressed: () =>
+      _shiftBlueprintMeters(0, -_nudgeStepMeters),
+     ),
+     IconButton(
+     constraints:
+      const BoxConstraints(minWidth: 32, minHeight: 32),
+     padding: EdgeInsets.zero,
+     icon: const Icon(Icons.arrow_upward,
+      color: Colors.white, size: 18),
+     onPressed: () =>
+      _shiftBlueprintMeters(_nudgeStepMeters, 0),
+     ),
+     IconButton(
+     constraints:
+      const BoxConstraints(minWidth: 32, minHeight: 32),
+     padding: EdgeInsets.zero,
+     icon: const Icon(Icons.arrow_downward,
+      color: Colors.white, size: 18),
+     onPressed: () =>
+      _shiftBlueprintMeters(-_nudgeStepMeters, 0),
+     ),
+     IconButton(
+     constraints:
+      const BoxConstraints(minWidth: 32, minHeight: 32),
+     padding: EdgeInsets.zero,
+     icon: const Icon(Icons.arrow_forward,
+      color: Colors.white, size: 18),
+     onPressed: () =>
+      _shiftBlueprintMeters(0, _nudgeStepMeters),
+     ),
+    ],
+    ),
+   ],
+   ),
+   Row(
+   children: [
+    SizedBox(
+    width: 78,
+    child: Text(
+     '크기:${bp.currentRadius.toStringAsFixed(1)}m',
+     style: const TextStyle(color: Colors.white, fontSize: 11),
+    ),
+    ),
+    _fineStepBtn('-5m', () {
+    setState(() {
+     bp.setRadiusDirectly(bp.currentRadius - 5.0);
+    });
+    if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
+    _persistBlueprintConfig();
+    }),
+    _fineStepBtn('-0.5', () {
+    setState(() {
+     bp.setRadiusDirectly(bp.currentRadius - 0.5);
+    });
+    if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
+    _persistBlueprintConfig();
+    }),
+    Expanded(
+    child: Slider(
+     value: bp.sizeSlider.clamp(0.0, 1.0),
+     min: 0.0,
+     max: 1.0,
+     activeColor: Colors.amber,
+     onChangeStart: (_) async {
+     if (!_bpTouchModeIsBlueprint) {
+      await _updateMapViewportInfo();
+      setState(() => _isSliderManipulating = true);
+      await _refreshAllOverlays(includeBlueprint: true);
+     }
+     },
+     onChanged: (val) {
+     setState(() => bp.sizeSlider = val);
+     },
+     onChangeEnd: (_) async {
+     if (_isSliderManipulating) {
+      setState(() => _isSliderManipulating = false);
+      await _refreshAllOverlays(includeBlueprint: true);
+     }
+     await _persistBlueprintConfig();
+     },
+    ),
+    ),
+    _fineStepBtn('+0.5', () {
+    setState(() {
+     bp.setRadiusDirectly(bp.currentRadius + 0.5);
+    });
+    if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
+    _persistBlueprintConfig();
+    }),
+    _fineStepBtn('+5m', () {
+    setState(() {
+     bp.setRadiusDirectly(bp.currentRadius + 5.0);
+    });
+    if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
+    _persistBlueprintConfig();
+    }),
+   ],
+   ),
+   Row(
+   children: [
+    SizedBox(
+    width: 78,
+    child: Text(
+     '회전:${bp.rotation.toStringAsFixed(1)}°',
+     style: const TextStyle(color: Colors.white, fontSize: 11),
+    ),
+    ),
+    _fineStepBtn('-2°', () async {
+    setState(() {
+     bp.rotation = (bp.rotation - 2.0).clamp(-180.0, 180.0);
+    });
+    if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
+    _persistBlueprintConfig();
+    }),
+    _fineStepBtn('-0.2°', () async {
+    setState(() {
+     bp.rotation = (bp.rotation - 0.2).clamp(-180.0, 180.0);
+    });
+    if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
+    _persistBlueprintConfig();
+    }),
+    Expanded(
+    child: Slider(
+     value: bp.rotation.clamp(-180.0, 180.0),
+     min: -180.0,
+     max: 180.0,
+     activeColor: Colors.amber,
+     onChangeStart: (_) async {
+     if (!_bpTouchModeIsBlueprint) {
+      await _updateMapViewportInfo();
+      setState(() => _isSliderManipulating = true);
+      await _refreshAllOverlays(includeBlueprint: true);
+     }
+     },
+     onChanged: (val) {
+     setState(() => bp.rotation = val);
+     },
+     onChangeEnd: (_) async {
+     if (_isSliderManipulating) {
+      setState(() => _isSliderManipulating = false);
+      await _refreshAllOverlays(includeBlueprint: true);
+     }
+     await _persistBlueprintConfig();
+     },
+    ),
+    ),
+    _fineStepBtn('+0.2°', () async {
+    setState(() {
+     bp.rotation = (bp.rotation + 0.2).clamp(-180.0, 180.0);
+    });
+    if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
+    _persistBlueprintConfig();
+    }),
+    _fineStepBtn('+2°', () async {
+    setState(() {
+     bp.rotation = (bp.rotation + 2.0).clamp(-180.0, 180.0);
+    });
+    if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
+    _persistBlueprintConfig();
+    }),
+   ],
+   ),
+   Row(
+   children: [
+    SizedBox(
+    width: 78,
+    child: Text(
+     '투명도:${(bp.opacity * 100).toInt()}%',
+     style: const TextStyle(color: Colors.white, fontSize: 11),
+    ),
+    ),
+    Expanded(
+    child: Slider(
+     value: bp.opacity.clamp(0.1, 1.0),
+     min: 0.1,
+     max: 1.0,
+     activeColor: Colors.amber,
+     onChangeStart: (_) async {
+     if (!_bpTouchModeIsBlueprint) {
+      await _updateMapViewportInfo();
+      setState(() => _isSliderManipulating = true);
+      await _refreshAllOverlays(includeBlueprint: true);
+     }
+     },
+     onChanged: (val) {
+     setState(() => bp.opacity = val);
+     },
+     onChangeEnd: (_) async {
+     if (_isSliderManipulating) {
+      setState(() => _isSliderManipulating = false);
+      await _refreshAllOverlays(includeBlueprint: true);
+     }
+     await _persistBlueprintConfig();
+     },
+    ),
+    ),
+   ],
+   ),
+  ],
+  ),
+ ),
+ );
+}
+@override
+Widget build(BuildContext context) {
+ final List<String> dateTabs = ['전체 보기'];
+ final Set<String> days =
+  widget.photos.map((p) => p.timestamp.substring(0, 10)).toSet();
+ final List<String> sortedDays = days.toList()
+ ..sort((a, b) => b.compareTo(a));
+ dateTabs.addAll(sortedDays);
+ final bool portrait =
+  MediaQuery.of(context).orientation == Orientation.portrait;
+ final double bottomSafe = MediaQuery.of(context).viewPadding.bottom;
+ final PhotoItem? activePhoto = _visiblePhotos.isNotEmpty
+  ? _visiblePhotos[_selectedIdx.clamp(0, _visiblePhotos.length - 1)]
+  : null;
+ final List<String> cats = _allCategories;
+ final Widget leftOrTopPane = _bpEditMode
+  ? _buildBlueprintControlBox()
+  : (activePhoto != null
+   ? Container(
+    color: Colors.black,
+    width: double.infinity,
+    height: double.infinity,
+    child: Stack(
+    children: [
+     Padding(
+     padding: const EdgeInsets.only(bottom: 46),
+     child: InteractiveViewer(
+      panEnabled: true,
+      boundaryMargin: const EdgeInsets.all(20),
+      minScale: 0.5,
+      maxScale: 4.0,
+      child: Center(
+      child: Image.file(
+       File(activePhoto.path),
+       fit: BoxFit.contain,
+       gaplessPlayback: true,
+      ),
+      ),
+     ),
+     ),
+     Positioned(
+     top: 10,
+     left: 10,
+     child: Container(
+      padding: const EdgeInsets.symmetric(
+       horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+      color: Colors.black87,
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(color: Colors.amber, width: 1.2),
+      ),
+      child: DropdownButtonHideUnderline(
+      child: DropdownButton<String>(
+       value: cats.contains(activePhoto.category)
+        ? activePhoto.category
+        : '미분류',
+       isDense: true,
+       dropdownColor: Colors.grey[900],
+       icon: const Padding(
+       padding: EdgeInsets.only(left: 4),
+       child: Icon(Icons.arrow_drop_down,
+        color: Colors.amber, size: 18),
+       ),
+       style: const TextStyle(
+       color: Colors.amber,
+       fontWeight: FontWeight.bold,
+       fontSize: 11.5,
+       ),
+       selectedItemBuilder: (context) {
+       return [
+        ...cats.map(
+        (c) => Align(
+         alignment: Alignment.centerLeft,
+         child: Text(
+         c,
+         style: const TextStyle(
+          color: Colors.white,
+          fontSize: 11.5,
+          fontWeight: FontWeight.bold,
+         ),
+         ),
+        ),
+        ),
+        const Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+         '+ 새 카테고리 입력',
+         style: TextStyle(
+         color: Colors.amberAccent,
+         fontSize: 11.5,
+         ),
+        ),
+        ),
+       ];
+       },
+       items: [
+       ...cats.map(
+        (c) => DropdownMenuItem<String>(
+        value: c,
+        child: Row(
+         mainAxisSize: MainAxisSize.min,
+         mainAxisAlignment:
+          MainAxisAlignment.spaceBetween,
+         children: [
+         ConstrainedBox(
+          constraints: const BoxConstraints(
+           minWidth: 64, maxWidth: 115),
+          child: Text(
+          c,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+           color: c == '미분류'
+            ? Colors.white70
+            : Colors.white,
+           fontSize: 11.5,
+          ),
+          ),
+         ),
+         if (c != '미분류')
+          InkWell(
+          onTap: () {
+           Navigator.of(context).pop();
+           _deleteCategory(c);
+          },
+          child: const Padding(
+           padding: EdgeInsets.only(
+            left: 6, top: 2, bottom: 2),
+           child: Icon(
+           Icons.close,
+           size: 14,
+           color: Colors.redAccent,
+           ),
+          ),
+          ),
+         ],
+        ),
+        ),
+       ),
+       const DropdownMenuItem<String>(
+        value: '__ADD_NEW__',
+        child: Text(
+        '+ 새 카테고리 입력',
+        style: TextStyle(
+         color: Colors.amberAccent,
+         fontWeight: FontWeight.bold,
+         fontSize: 11,
+        ),
+        ),
+       ),
+       ],
+       onChanged: (val) {
+       if (val == '__ADD_NEW__') {
+        _showAddCategoryDialog(activePhoto);
+       } else if (val != null) {
+        setState(() {
+        activePhoto.category = val;
+        });
+        saveDefaultCategory(val);
+        _persistPhotoMetadata();
+       }
+       },
+      ),
+      ),
+     ),
+     ),
+     Positioned(
+     top: 10,
+     right: 10,
+     child: InkWell(
+      onTap: () => _deletePhoto(activePhoto),
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+       color: Colors.black87,
+       shape: BoxShape.circle,
+       border: Border.all(
+        color: Colors.redAccent, width: 1.5),
+      ),
+      child: const Icon(
+       Icons.close,
+       color: Colors.redAccent,
+       size: 20,
+      ),
+      ),
+     ),
+     ),
+     Positioned(
+     left: 10,
+     right: 10,
+     bottom: 4,
+     child: Container(
+      padding: const EdgeInsets.symmetric(
+       horizontal: 10, vertical: 2),
+      decoration: BoxDecoration(
+      color: Colors.grey[900],
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(
+       color: Colors.amber.withOpacity(0.75),
+       width: 1.2),
+      ),
+      child: Row(
+      children: [
+       const Icon(Icons.edit_note,
+        color: Colors.amber, size: 18),
+       const SizedBox(width: 6),
+       Expanded(
+       child: TextFormField(
+        key: ValueKey(activePhoto.path),
+        initialValue: activePhoto.memo,
+        style: const TextStyle(
+         color: Colors.white, fontSize: 12.5),
+        maxLines: 1,
+        textInputAction: TextInputAction.done,
+        onTapOutside: (_) =>
+         FocusScope.of(context).unfocus(),
+        decoration: const InputDecoration(
+        isDense: true,
+        contentPadding:
+         EdgeInsets.symmetric(vertical: 7),
+        hintText: '사진 내용을 자유롭게 입력하세요 (자동 저장)',
+        hintStyle: TextStyle(
+         color: Colors.white54, fontSize: 12),
+        border: InputBorder.none,
+        ),
+        onChanged: (val) {
+        activePhoto.memo = val;
+        _persistPhotoMetadata();
+        },
+       ),
+       ),
+      ],
+      ),
+     ),
+     ),
+    ],
+    ),
+   )
+   : Center(
+    child: Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+     const Text(
+     '저장된 사진이 없습니다.',
+     style: TextStyle(color: Colors.white70, fontSize: 13),
+     ),
+     const SizedBox(height: 10),
+     ElevatedButton.icon(
+     onPressed: _isExporting ? null : _importPhotosFromGallery,
+     icon: const Icon(Icons.photo_library, size: 17),
+     label: const Text(
+      '갤러리에서 기존 사진 불러오기 (다중 선택)',
+      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+     ),
      style: ElevatedButton.styleFrom(
       backgroundColor: Colors.amber,
       foregroundColor: Colors.black,
      ),
+     ),
+    ],
     ),
-   );
-  }
-  return Container(
-   color: Colors.grey[900],
-   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-   child: SingleChildScrollView(
-    child: Column(
-     crossAxisAlignment: CrossAxisAlignment.start,
-     children: [
-      SizedBox(
-       height: 32,
-       child: ListView(
-        scrollDirection: Axis.horizontal,
-        children: [
-         ...List.generate(_blueprints.length, (i) {
-          final item = _blueprints[i];
-          final bool isSel = i == _activeBpIdx;
-          return Container(
-           margin: const EdgeInsets.only(right: 6),
-           padding: const EdgeInsets.symmetric(horizontal: 6),
-           decoration: BoxDecoration(
-            color: isSel
-              ? Colors.amber.withOpacity(0.22)
-              : Colors.white10,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(
-             color: isSel ? Colors.amber : Colors.white24,
-             width: isSel ? 1.5 : 1.0,
-            ),
-           ),
-           child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-             InkWell(
-              onTap: () async {
-               setState(() {
-                item.isVisible = !item.isVisible;
-                if (item.isVisible) _bpGlobalShow = true;
-               });
-               await _persistBlueprintConfig();
-               await _refreshAllOverlays(includeBlueprint: true);
-              },
-              child: Padding(
-               padding: const EdgeInsets.only(right: 4),
-               child: Icon(
-                item.isVisible
-                  ? Icons.visibility
-                  : Icons.visibility_off,
-                size: 15,
-                color: item.isVisible
-                  ? Colors.lightGreenAccent
-                  : Colors.white38,
-               ),
-              ),
-             ),
-             InkWell(
-              onTap: () async {
-               await _updateMapViewportInfo();
-               setState(() {
-                _activeBpIdx = i;
-                item.isVisible = true;
-                _bpGlobalShow = true;
-               });
-               await _refreshAllOverlays(includeBlueprint: true);
-              },
-              onLongPress: () async {
-               final newName = await _promptBlueprintNameDialog(
-                defaultName: item.name,
-                title: '도면 이름 변경',
-               );
-               if (newName != null && newName.isNotEmpty) {
-                setState(() => item.name = newName);
-                await _persistBlueprintConfig();
-               }
-              },
-              child: Padding(
-               padding: const EdgeInsets.symmetric(
-                 horizontal: 4, vertical: 4),
-               child: Text(
-                item.name,
-                style: TextStyle(
-                 color: isSel ? Colors.amber : Colors.white,
-                 fontSize: 11.5,
-                 fontWeight: isSel
-                   ? FontWeight.bold
-                   : FontWeight.normal,
-                ),
-               ),
-              ),
-             ),
-             InkWell(
-              onTap: () => _deleteBlueprintAt(i),
-              child: const Padding(
-               padding: EdgeInsets.only(left: 4),
-               child: Icon(
-                Icons.close,
-                size: 14,
-                color: Colors.redAccent,
-               ),
-              ),
-             ),
-            ],
-           ),
-          );
-         }),
-         InkWell(
-          onTap: _importBlueprintFromGallery,
-          borderRadius: BorderRadius.circular(6),
-          child: Container(
-           padding: const EdgeInsets.symmetric(horizontal: 8),
-           decoration: BoxDecoration(
-            color: Colors.amber.withOpacity(0.15),
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: Colors.amber),
-           ),
-           alignment: Alignment.center,
-           child: const Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-             Icon(Icons.add, size: 14, color: Colors.amber),
-             SizedBox(width: 2),
-             Text(
-              '도면추가',
-              style: TextStyle(
-               color: Colors.amber,
-               fontSize: 11,
-               fontWeight: FontWeight.bold,
-              ),
-             ),
-            ],
-           ),
-          ),
-         ),
-        ],
-       ),
-      ),
-      const SizedBox(height: 6),
-      Row(
-       children: [
-        Expanded(
-         child: Row(
-          children: [
-           Expanded(
-            child: ElevatedButton.icon(
-             onPressed: () async {
-              await _updateMapViewportInfo();
-              setState(() => _bpTouchModeIsBlueprint = true);
-              await _refreshAllOverlays(includeBlueprint: true);
-             },
-             icon: const Icon(Icons.pan_tool_alt, size: 15),
-             label: const Text('도면이동',
-               style: TextStyle(
-                 fontSize: 12, fontWeight: FontWeight.bold)),
-             style: ElevatedButton.styleFrom(
-              backgroundColor: _bpTouchModeIsBlueprint
-                ? Colors.amber
-                : Colors.white12,
-              foregroundColor: _bpTouchModeIsBlueprint
-                ? Colors.black
-                : Colors.white70,
-              padding: const EdgeInsets.symmetric(vertical: 6),
-             ),
-            ),
-           ),
-           const SizedBox(width: 6),
-           Expanded(
-            child: ElevatedButton.icon(
-             onPressed: () async {
-              setState(() => _bpTouchModeIsBlueprint = false);
-              await _persistBlueprintConfig();
-              await _refreshAllOverlays(includeBlueprint: true);
-             },
-             icon: const Icon(Icons.map_outlined, size: 15),
-             label: const Text('지도이동',
-               style: TextStyle(
-                 fontSize: 12, fontWeight: FontWeight.bold)),
-             style: ElevatedButton.styleFrom(
-              backgroundColor: !_bpTouchModeIsBlueprint
-                ? Colors.lightBlueAccent
-                : Colors.white12,
-              foregroundColor: !_bpTouchModeIsBlueprint
-                ? Colors.black
-                : Colors.white70,
-              padding: const EdgeInsets.symmetric(vertical: 6),
-             ),
-            ),
-           ),
-          ],
-         ),
-        ),
-        const SizedBox(width: 8),
-        ElevatedButton.icon(
-         onPressed: () async {
-          setState(() {
-           _bpEditMode = false;
-           _isSliderManipulating = false;
-          });
-          await _persistBlueprintConfig();
-          await _refreshAllOverlays(includeBlueprint: true);
-          if (mounted) {
-           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-             content: Text('모든 도면 설정이 영구 저장되었습니다!'),
-            ),
-           );
-          }
-         },
-         icon: const Icon(Icons.check, size: 15),
-         label: const Text('저장',
-           style:
-             TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-         style: ElevatedButton.styleFrom(
-          backgroundColor: Colors.greenAccent[700],
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-         ),
-        ),
-       ],
-      ),
-      Padding(
-       padding: const EdgeInsets.symmetric(vertical: 3),
-       child: Text(
-        _bpTouchModeIsBlueprint
-          ? '💡 [${bp.name}] 한 손가락 이동, 두 손가락 확대·회전이 즉시 반영됩니다. (탭 길게 눌러 이름 변경)'
-          : '💡 [지도이동 켜짐] 도면은 고정된 채로 배경 지도를 이동·확대할 수 있습니다.',
-        style: TextStyle(
-         color: _bpTouchModeIsBlueprint
-           ? Colors.amberAccent
-           : Colors.lightBlueAccent,
-         fontSize: 11,
-        ),
-       ),
-      ),
-      const Divider(color: Colors.white24, height: 6),
-      Row(
-       mainAxisAlignment: MainAxisAlignment.spaceBetween,
-       children: [
-        ElevatedButton.icon(
-         onPressed: () async {
-          if (_mapCtrl == null) return;
-          final pos = await _mapCtrl!.getCameraPosition();
-          final rad60 = await _calcScreen80Radius();
-          await _updateMapViewportInfo();
-          setState(() {
-           bp.centerLat = pos.target.latitude;
-           bp.centerLng = pos.target.longitude;
-           bp.baseRadius = rad60;
-           bp.sizeSlider = 0.5;
-          });
-          if (!_useLiveActiveBpOverlay) {
-           await _syncBlueprintsToMap();
-          }
-          await _persistBlueprintConfig();
-         },
-         icon: const Icon(Icons.center_focus_strong, size: 14),
-         label:
-           const Text('화면중앙 초기화', style: TextStyle(fontSize: 11)),
-         style: ElevatedButton.styleFrom(
-          backgroundColor: Colors.blueGrey,
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          minimumSize: const Size(0, 30),
-         ),
-        ),
-        Row(
-         children: [
-          _fineStepBtn(
-           _nudgeStepMeters == 1.0 ? '단위: 1m' : '단위: 5m',
-           () {
-            setState(() {
-             _nudgeStepMeters =
-               (_nudgeStepMeters == 1.0) ? 5.0 : 1.0;
-            });
-           },
-          ),
-          IconButton(
-           constraints:
-             const BoxConstraints(minWidth: 32, minHeight: 32),
-           padding: EdgeInsets.zero,
-           icon: const Icon(Icons.arrow_back,
-             color: Colors.white, size: 18),
-           onPressed: () =>
-             _shiftBlueprintMeters(0, -_nudgeStepMeters),
-          ),
-          IconButton(
-           constraints:
-             const BoxConstraints(minWidth: 32, minHeight: 32),
-           padding: EdgeInsets.zero,
-           icon: const Icon(Icons.arrow_upward,
-             color: Colors.white, size: 18),
-           onPressed: () =>
-             _shiftBlueprintMeters(_nudgeStepMeters, 0),
-          ),
-          IconButton(
-           constraints:
-             const BoxConstraints(minWidth: 32, minHeight: 32),
-           padding: EdgeInsets.zero,
-           icon: const Icon(Icons.arrow_downward,
-             color: Colors.white, size: 18),
-           onPressed: () =>
-             _shiftBlueprintMeters(-_nudgeStepMeters, 0),
-          ),
-          IconButton(
-           constraints:
-             const BoxConstraints(minWidth: 32, minHeight: 32),
-           padding: EdgeInsets.zero,
-           icon: const Icon(Icons.arrow_forward,
-             color: Colors.white, size: 18),
-           onPressed: () =>
-             _shiftBlueprintMeters(0, _nudgeStepMeters),
-          ),
-         ],
-        ),
-       ],
-      ),
-      Row(
-       children: [
-        SizedBox(
-         width: 78,
-         child: Text(
-          '크기:${bp.currentRadius.toStringAsFixed(1)}m',
-          style: const TextStyle(color: Colors.white, fontSize: 11),
-         ),
-        ),
-        _fineStepBtn('-5m', () {
-         setState(() {
-          bp.setRadiusDirectly(bp.currentRadius - 5.0);
-         });
-         if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
-         _persistBlueprintConfig();
-        }),
-        _fineStepBtn('-0.5', () {
-         setState(() {
-          bp.setRadiusDirectly(bp.currentRadius - 0.5);
-         });
-         if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
-         _persistBlueprintConfig();
-        }),
-        Expanded(
-         child: Slider(
-          value: bp.sizeSlider.clamp(0.0, 1.0),
-          min: 0.0,
-          max: 1.0,
-          activeColor: Colors.amber,
-          onChangeStart: (_) async {
-           if (!_bpTouchModeIsBlueprint) {
-            await _updateMapViewportInfo();
-            setState(() => _isSliderManipulating = true);
-            await _refreshAllOverlays(includeBlueprint: true);
-           }
-          },
-          onChanged: (val) {
-           setState(() => bp.sizeSlider = val);
-          },
-          onChangeEnd: (_) async {
-           if (_isSliderManipulating) {
-            setState(() => _isSliderManipulating = false);
-            await _refreshAllOverlays(includeBlueprint: true);
-           }
-           await _persistBlueprintConfig();
-          },
-         ),
-        ),
-        _fineStepBtn('+0.5', () {
-         setState(() {
-          bp.setRadiusDirectly(bp.currentRadius + 0.5);
-         });
-         if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
-         _persistBlueprintConfig();
-        }),
-        _fineStepBtn('+5m', () {
-         setState(() {
-          bp.setRadiusDirectly(bp.currentRadius + 5.0);
-         });
-         if (!_useLiveActiveBpOverlay) _syncBlueprintsToMap();
-         _persistBlueprintConfig();
-        }),
-       ],
-      ),
-      Row(
-       children: [
-        SizedBox(
-         width: 78,
-         child: Text(
-          '회전:${bp.rotation.toStringAsFixed(1)}°',
-          style: const TextStyle(color: Colors.white, fontSize: 11),
-         ),
-        ),
-        _fineStepBtn('-2°', () async {
-         setState(() {
-          bp.rotation = (bp.rotation - 2.0).clamp(-180.0, 180.0);
-         });
-         if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
-         _persistBlueprintConfig();
-        }),
-        _fineStepBtn('-0.2°', () async {
-         setState(() {
-          bp.rotation = (bp.rotation - 0.2).clamp(-180.0, 180.0);
-         });
-         if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
-         _persistBlueprintConfig();
-        }),
-        Expanded(
-         child: Slider(
-          value: bp.rotation.clamp(-180.0, 180.0),
-          min: -180.0,
-          max: 180.0,
-          activeColor: Colors.amber,
-          onChangeStart: (_) async {
-           if (!_bpTouchModeIsBlueprint) {
-            await _updateMapViewportInfo();
-            setState(() => _isSliderManipulating = true);
-            await _refreshAllOverlays(includeBlueprint: true);
-           }
-          },
-          onChanged: (val) {
-           setState(() => bp.rotation = val);
-          },
-          onChangeEnd: (_) async {
-           if (_isSliderManipulating) {
-            setState(() => _isSliderManipulating = false);
-            await _refreshAllOverlays(includeBlueprint: true);
-           }
-           await _persistBlueprintConfig();
-          },
-         ),
-        ),
-        _fineStepBtn('+0.2°', () async {
-         setState(() {
-          bp.rotation = (bp.rotation + 0.2).clamp(-180.0, 180.0);
-         });
-         if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
-         _persistBlueprintConfig();
-        }),
-        _fineStepBtn('+2°', () async {
-         setState(() {
-          bp.rotation = (bp.rotation + 2.0).clamp(-180.0, 180.0);
-         });
-         if (!_useLiveActiveBpOverlay) await _syncBlueprintsToMap();
-         _persistBlueprintConfig();
-        }),
-       ],
-      ),
-      Row(
-       children: [
-        SizedBox(
-         width: 78,
-         child: Text(
-          '투명도:${(bp.opacity * 100).toInt()}%',
-          style: const TextStyle(color: Colors.white, fontSize: 11),
-         ),
-        ),
-        Expanded(
-         child: Slider(
-          value: bp.opacity.clamp(0.1, 1.0),
-          min: 0.1,
-          max: 1.0,
-          activeColor: Colors.amber,
-          onChangeStart: (_) async {
-           if (!_bpTouchModeIsBlueprint) {
-            await _updateMapViewportInfo();
-            setState(() => _isSliderManipulating = true);
-            await _refreshAllOverlays(includeBlueprint: true);
-           }
-          },
-          onChanged: (val) {
-           setState(() => bp.opacity = val);
-          },
-          onChangeEnd: (_) async {
-           if (_isSliderManipulating) {
-            setState(() => _isSliderManipulating = false);
-            await _refreshAllOverlays(includeBlueprint: true);
-           }
-           await _persistBlueprintConfig();
-          },
-         ),
-        ),
-       ],
-      ),
-     ],
+   ));
+ final double initLat =
+  activePhoto?.lat ?? _activeBp?.centerLat ?? 37.4984;
+ final double initLng =
+  activePhoto?.lng ?? _activeBp?.centerLng ?? 127.1324;
+ final Widget mapPane = naverAuthErrorMsg != null
+  ? Container(
+   color: Colors.white,
+   padding: const EdgeInsets.all(20),
+   child: Center(
+   child: Text(
+    '🚨 네이버 지도 차단됨!\n\n$naverAuthErrorMsg',
+    style: const TextStyle(
+    color: Colors.red,
+    fontSize: 15,
+    fontWeight: FontWeight.bold,
     ),
+    textAlign: TextAlign.center,
    ),
-  );
- }
- @override
- Widget build(BuildContext context) {
-  final List<String> dateTabs = ['전체 보기'];
-  final Set<String> days =
-    widget.photos.map((p) => p.timestamp.substring(0, 10)).toSet();
-  final List<String> sortedDays = days.toList()
-   ..sort((a, b) => b.compareTo(a));
-  dateTabs.addAll(sortedDays);
-  final bool portrait =
-    MediaQuery.of(context).orientation == Orientation.portrait;
-  final double bottomSafe = MediaQuery.of(context).viewPadding.bottom;
-  final PhotoItem? activePhoto = _visiblePhotos.isNotEmpty
-    ? _visiblePhotos[_selectedIdx.clamp(0, _visiblePhotos.length - 1)]
-    : null;
-  final List<String> cats = _allCategories;
-  final Widget leftOrTopPane = _bpEditMode
-    ? _buildBlueprintControlBox()
-    : (activePhoto != null
-      ? Container(
-        color: Colors.black,
-        width: double.infinity,
-        height: double.infinity,
-        child: Stack(
-         children: [
-          Padding(
-           padding: const EdgeInsets.only(bottom: 46),
-           child: InteractiveViewer(
-            panEnabled: true,
-            boundaryMargin: const EdgeInsets.all(20),
-            minScale: 0.5,
-            maxScale: 4.0,
-            child: Center(
-             child: Image.file(
-              File(activePhoto.path),
-              fit: BoxFit.contain,
-              gaplessPlayback: true,
-             ),
-            ),
-           ),
-          ),
-          Positioned(
-           top: 10,
-           left: 10,
-           child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-             color: Colors.black87,
-             borderRadius: BorderRadius.circular(8),
-             border: Border.all(color: Colors.amber, width: 1.2),
-            ),
-            child: DropdownButtonHideUnderline(
-             child: DropdownButton<String>(
-              value: cats.contains(activePhoto.category)
-                ? activePhoto.category
-                : '미분류',
-              isDense: true,
-              dropdownColor: Colors.grey[900],
-              icon: const Padding(
-               padding: EdgeInsets.only(left: 4),
-               child: Icon(Icons.arrow_drop_down,
-                 color: Colors.amber, size: 18),
-              ),
-              style: const TextStyle(
-               color: Colors.amber,
-               fontWeight: FontWeight.bold,
-               fontSize: 11.5,
-              ),
-              selectedItemBuilder: (context) {
-               return [
-                ...cats.map(
-                 (c) => Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                   c,
-                   style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.bold,
-                   ),
-                  ),
-                 ),
-                ),
-                const Align(
-                 alignment: Alignment.centerLeft,
-                 child: Text(
-                  '+ 새 카테고리 입력',
-                  style: TextStyle(
-                   color: Colors.amberAccent,
-                   fontSize: 11.5,
-                  ),
-                 ),
-                ),
-               ];
-              },
-              items: [
-               ...cats.map(
-                (c) => DropdownMenuItem<String>(
-                 value: c,
-                 child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  mainAxisAlignment:
-                    MainAxisAlignment.spaceBetween,
-                  children: [
-                   ConstrainedBox(
-                    constraints: const BoxConstraints(
-                      minWidth: 64, maxWidth: 115),
-                    child: Text(
-                     c,
-                     overflow: TextOverflow.ellipsis,
-                     style: TextStyle(
-                      color: c == '미분류'
-                        ? Colors.white70
-                        : Colors.white,
-                      fontSize: 11.5,
-                     ),
-                    ),
-                   ),
-                   if (c != '미분류')
-                    InkWell(
-                     onTap: () {
-                      Navigator.of(context).pop();
-                      _deleteCategory(c);
-                     },
-                     child: const Padding(
-                      padding: EdgeInsets.only(
-                        left: 6, top: 2, bottom: 2),
-                      child: Icon(
-                       Icons.close,
-                       size: 14,
-                       color: Colors.redAccent,
-                      ),
-                     ),
-                    ),
-                  ],
-                 ),
-                ),
-               ),
-               const DropdownMenuItem<String>(
-                value: '__ADD_NEW__',
-                child: Text(
-                 '+ 새 카테고리 입력',
-                 style: TextStyle(
-                  color: Colors.amberAccent,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 11,
-                 ),
-                ),
-               ),
-              ],
-              onChanged: (val) {
-               if (val == '__ADD_NEW__') {
-                _showAddCategoryDialog(activePhoto);
-               } else if (val != null) {
-                setState(() {
-                 activePhoto.category = val;
-                });
-                saveDefaultCategory(val);
-                _persistPhotoMetadata();
-               }
-              },
-             ),
-            ),
-           ),
-          ),
-          Positioned(
-           top: 10,
-           right: 10,
-           child: InkWell(
-            onTap: () => _deletePhoto(activePhoto),
-            borderRadius: BorderRadius.circular(20),
-            child: Container(
-             padding: const EdgeInsets.all(6),
-             decoration: BoxDecoration(
-              color: Colors.black87,
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: Colors.redAccent, width: 1.5),
-             ),
-             child: const Icon(
-              Icons.close,
-              color: Colors.redAccent,
-              size: 20,
-             ),
-            ),
-           ),
-          ),
-          Positioned(
-           left: 10,
-           right: 10,
-           bottom: 4,
-           child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 10, vertical: 2),
-            decoration: BoxDecoration(
-             color: Colors.grey[900],
-             borderRadius: BorderRadius.circular(8),
-             border: Border.all(
-               color: Colors.amber.withOpacity(0.75),
-               width: 1.2),
-            ),
-            child: Row(
-             children: [
-              const Icon(Icons.edit_note,
-                color: Colors.amber, size: 18),
-              const SizedBox(width: 6),
-              Expanded(
-               child: TextFormField(
-                key: ValueKey(activePhoto.path),
-                initialValue: activePhoto.memo,
-                style: const TextStyle(
-                  color: Colors.white, fontSize: 12.5),
-                maxLines: 1,
-                textInputAction: TextInputAction.done,
-                onTapOutside: (_) =>
-                  FocusScope.of(context).unfocus(),
-                decoration: const InputDecoration(
-                 isDense: true,
-                 contentPadding:
-                   EdgeInsets.symmetric(vertical: 7),
-                 hintText: '사진 내용을 자유롭게 입력하세요 (자동 저장)',
-                 hintStyle: TextStyle(
-                   color: Colors.white54, fontSize: 12),
-                 border: InputBorder.none,
-                ),
-                onChanged: (val) {
-                 activePhoto.memo = val;
-                 _persistPhotoMetadata();
-                },
-               ),
-              ),
-             ],
-            ),
-           ),
-          ),
-         ],
-        ),
-       )
-      : Center(
-        child: Column(
-         mainAxisSize: MainAxisSize.min,
-         children: [
-          const Text(
-           '저장된 사진이 없습니다.',
-           style: TextStyle(color: Colors.white70, fontSize: 13),
-          ),
-          const SizedBox(height: 10),
-          ElevatedButton.icon(
-           onPressed: _isExporting ? null : _importPhotosFromGallery,
-           icon: const Icon(Icons.photo_library, size: 17),
-           label: const Text(
-            '갤러리에서 기존 사진 불러오기 (다중 선택)',
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-           ),
-           style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.amber,
-            foregroundColor: Colors.black,
-           ),
-          ),
-         ],
-        ),
-       ));
-  final double initLat =
-    activePhoto?.lat ?? _activeBp?.centerLat ?? 37.4984;
-  final double initLng =
-    activePhoto?.lng ?? _activeBp?.centerLng ?? 127.1324;
-  final Widget mapPane = naverAuthErrorMsg != null
-    ? Container(
-      color: Colors.white,
-      padding: const EdgeInsets.all(20),
-      child: Center(
-       child: Text(
-        '🚨 네이버 지도 차단됨!\n\n$naverAuthErrorMsg',
-        style: const TextStyle(
-         color: Colors.red,
-         fontSize: 15,
-         fontWeight: FontWeight.bold,
-        ),
-        textAlign: TextAlign.center,
+   ),
+  )
+  : LayoutBuilder(
+   builder: (context, constraints) {
+   _mapWidgetSize =
+    Size(constraints.maxWidth, constraints.maxHeight);
+   return Stack(
+    children: [
+    Listener(
+     behavior: HitTestBehavior.translucent,
+     onPointerDown: (e) {
+     _tapDownPos = e.localPosition;
+     _tapDownMs = DateTime.now().millisecondsSinceEpoch;
+     },
+     onPointerUp: (e) async {
+     if (!_showMyLocation || _bpEditMode || _mapCtrl == null) {
+      return;
+     }
+     final Offset? down = _tapDownPos;
+     if (down == null) return;
+     if (DateTime.now().millisecondsSinceEpoch - _tapDownMs <
+       260 &&
+      (e.localPosition - down).distance < 10.0 &&
+      _mapWidgetSize.width > 10 &&
+      _mapWidgetSize.height > 10) {
+      final bounds = _currentMapBounds ??
+       await _mapCtrl!.getContentBounds();
+      final double tLat = bounds.northEast.latitude -
+       (e.localPosition.dy / _mapWidgetSize.height) *
+        (bounds.northEast.latitude -
+         bounds.southWest.latitude);
+      final double tLng = bounds.southWest.longitude +
+       (e.localPosition.dx / _mapWidgetSize.width) *
+        (bounds.northEast.longitude -
+         bounds.southWest.longitude);
+      setState(() {
+      forcedUserLat = tLat;
+      forcedUserLng = tLng;
+      });
+      await _updateMyLocationMarkerOnly();
+      if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+       const SnackBar(
+       content: Text(
+        '내 위치가 강제 이동되었습니다. 촬영 시 이 좌표가 기록됩니다.'),
+       duration: Duration(milliseconds: 1200),
        ),
+      );
+      }
+     }
+     },
+     child: NaverMap(
+     options: NaverMapViewOptions(
+      initialCameraPosition: NCameraPosition(
+      target: NLatLng(initLat, initLng),
+      zoom: 16,
+      ),
+     ),
+     onMapReady: (ctrl) async {
+      _mapCtrl = ctrl;
+      if (_bpLoadFuture != null) {
+      await _bpLoadFuture;
+      }
+      await _updateMapViewportInfo();
+      await _refreshAllOverlays(includeBlueprint: true);
+     },
+     onCameraIdle: () {
+      _updateMapViewportInfo();
+     },
+     ),
+    ),
+    if (_useLiveActiveBpOverlay)
+     _buildLiveBlueprintOverlayWidget(_mapWidgetSize),
+    if (_bpEditMode &&
+     _activeBp != null &&
+     _bpTouchModeIsBlueprint)
+     Positioned.fill(
+     child: Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (event) {
+      _activePointers[event.pointer] = event.localPosition;
+      },
+      onPointerMove: _handleBlueprintPointerMove,
+      onPointerUp: (event) {
+      _activePointers.remove(event.pointer);
+      if (_activePointers.isEmpty) {
+       _persistBlueprintConfig();
+      }
+      },
+      onPointerCancel: (event) {
+      _activePointers.remove(event.pointer);
+      if (_activePointers.isEmpty) {
+       _persistBlueprintConfig();
+      }
+      },
+      child: Container(color: Colors.transparent),
+     ),
+     ),
+    Positioned(
+     top: 10,
+     right: 10,
+     child: InkWell(
+     onTap: _toggleMyLocation,
+     borderRadius: BorderRadius.circular(8),
+     child: Container(
+      padding: const EdgeInsets.symmetric(
+       horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+      color:
+       _showMyLocation ? Colors.amber : Colors.black87,
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(
+       color: _showMyLocation
+        ? Colors.amber
+        : Colors.white54,
+       width: 1.2,
+      ),
+      ),
+      child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+       Icon(
+       _showMyLocation
+        ? Icons.my_location
+        : Icons.location_searching,
+       color: _showMyLocation
+        ? Colors.black
+        : Colors.white,
+       size: 16,
+       ),
+       const SizedBox(width: 4),
+       Text(
+       _showMyLocation
+        ? (forcedUserLat != null
+         ? '강제위치 ON'
+         : '내 위치 ON')
+        : '내 위치 표기',
+       style: TextStyle(
+        color: _showMyLocation
+         ? Colors.black
+         : Colors.white,
+        fontSize: 11.5,
+        fontWeight: FontWeight.bold,
+       ),
+       ),
+      ],
+      ),
+     ),
+     ),
+    ),
+    ],
+   );
+   },
+  );
+ const TextStyle unifiedTopTextStyle = TextStyle(
+ fontSize: 11,
+ fontWeight: FontWeight.bold,
+ );
+ return Scaffold(
+ backgroundColor: Colors.black,
+ resizeToAvoidBottomInset: false,
+ appBar: AppBar(
+  backgroundColor: Colors.black,
+  automaticallyImplyLeading: false,
+  titleSpacing: 4,
+  toolbarHeight: 48,
+  title: Row(
+  children: [
+   IconButton(
+   icon: const Icon(Icons.arrow_back, color: Colors.white, size: 19),
+   padding: EdgeInsets.zero,
+   constraints: const BoxConstraints(minWidth: 26, minHeight: 34),
+   onPressed: () => Navigator.pop(context),
+   ),
+   const SizedBox(width: 2),
+   Container(
+   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+   decoration: BoxDecoration(
+    color: Colors.white10,
+    borderRadius: BorderRadius.circular(6),
+   ),
+   child: DropdownButtonHideUnderline(
+    child: DropdownButton<String>(
+    value: _dateFilter,
+    isDense: true,
+    dropdownColor: Colors.grey[900],
+    style: unifiedTopTextStyle.copyWith(color: Colors.white),
+    icon: const Icon(Icons.arrow_drop_down,
+     color: Colors.white70, size: 15),
+    selectedItemBuilder: (context) {
+     return dateTabs.map((d) {
+     final String shortLabel =
+      (d == '전체 보기') ? '전체날짜' : (d.length >= 10 ? d.substring(5) : d);
+     return Align(
+      alignment: Alignment.centerLeft,
+      child: Text(shortLabel, style: unifiedTopTextStyle),
+     );
+     }).toList();
+    },
+    items: dateTabs
+     .map(
+      (d) => DropdownMenuItem(
+      value: d,
+      child: Text(
+       d == '전체 보기' ? '전체 날짜 보기' : d,
+       style: unifiedTopTextStyle,
+      ),
       ),
      )
-    : LayoutBuilder(
-      builder: (context, constraints) {
-       _mapWidgetSize =
-         Size(constraints.maxWidth, constraints.maxHeight);
-       return Stack(
-        children: [
-         Listener(
-          behavior: HitTestBehavior.translucent,
-          onPointerDown: (e) {
-           _tapDownPos = e.localPosition;
-           _tapDownMs = DateTime.now().millisecondsSinceEpoch;
-          },
-          onPointerUp: (e) async {
-           if (!_showMyLocation || _bpEditMode || _mapCtrl == null) {
-            return;
-           }
-           final Offset? down = _tapDownPos;
-           if (down == null) return;
-           if (DateTime.now().millisecondsSinceEpoch - _tapDownMs <
-               260 &&
-             (e.localPosition - down).distance < 10.0 &&
-             _mapWidgetSize.width > 10 &&
-             _mapWidgetSize.height > 10) {
-            final bounds = _currentMapBounds ??
-              await _mapCtrl!.getContentBounds();
-            final double tLat = bounds.northEast.latitude -
-              (e.localPosition.dy / _mapWidgetSize.height) *
-                (bounds.northEast.latitude -
-                  bounds.southWest.latitude);
-            final double tLng = bounds.southWest.longitude +
-              (e.localPosition.dx / _mapWidgetSize.width) *
-                (bounds.northEast.longitude -
-                  bounds.southWest.longitude);
-            setState(() {
-             forcedUserLat = tLat;
-             forcedUserLng = tLng;
-            });
-            await _updateMyLocationMarkerOnly();
-            if (mounted) {
-             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-               content: Text(
-                 '내 위치가 강제 이동되었습니다. 촬영 시 이 좌표가 기록됩니다.'),
-               duration: Duration(milliseconds: 1200),
-              ),
-             );
-            }
-           }
-          },
-          child: NaverMap(
-           options: NaverMapViewOptions(
-            initialCameraPosition: NCameraPosition(
-             target: NLatLng(initLat, initLng),
-             zoom: 16,
-            ),
-           ),
-           onMapReady: (ctrl) async {
-            _mapCtrl = ctrl;
-            if (_bpLoadFuture != null) {
-             await _bpLoadFuture;
-            }
-            await _updateMapViewportInfo();
-            await _refreshAllOverlays(includeBlueprint: true);
-           },
-           onCameraIdle: () {
-            _updateMapViewportInfo();
-           },
-          ),
-         ),
-         if (_useLiveActiveBpOverlay)
-          _buildLiveBlueprintOverlayWidget(_mapWidgetSize),
-         if (_bpEditMode &&
-           _activeBp != null &&
-           _bpTouchModeIsBlueprint)
-          Positioned.fill(
-           child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (event) {
-             _activePointers[event.pointer] = event.localPosition;
-            },
-            onPointerMove: _handleBlueprintPointerMove,
-            onPointerUp: (event) {
-             _activePointers.remove(event.pointer);
-             if (_activePointers.isEmpty) {
-              _persistBlueprintConfig();
-             }
-            },
-            onPointerCancel: (event) {
-             _activePointers.remove(event.pointer);
-             if (_activePointers.isEmpty) {
-              _persistBlueprintConfig();
-             }
-            },
-            child: Container(color: Colors.transparent),
-           ),
-          ),
-         Positioned(
-          top: 10,
-          right: 10,
-          child: InkWell(
-           onTap: _toggleMyLocation,
-           borderRadius: BorderRadius.circular(8),
-           child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(
-             color:
-               _showMyLocation ? Colors.amber : Colors.black87,
-             borderRadius: BorderRadius.circular(8),
-             border: Border.all(
-              color: _showMyLocation
-                ? Colors.amber
-                : Colors.white54,
-              width: 1.2,
-             ),
-            ),
-            child: Row(
-             mainAxisSize: MainAxisSize.min,
-             children: [
-              Icon(
-               _showMyLocation
-                 ? Icons.my_location
-                 : Icons.location_searching,
-               color: _showMyLocation
-                 ? Colors.black
-                 : Colors.white,
-               size: 16,
-              ),
-              const SizedBox(width: 4),
-              Text(
-               _showMyLocation
-                 ? (forcedUserLat != null
-                   ? '강제위치 ON'
-                   : '내 위치 ON')
-                 : '내 위치 표기',
-               style: TextStyle(
-                color: _showMyLocation
-                  ? Colors.black
-                  : Colors.white,
-                fontSize: 11.5,
-                fontWeight: FontWeight.bold,
-               ),
-              ),
-             ],
-            ),
-           ),
-          ),
-         ),
-        ],
-       );
-      },
-     );
-  const TextStyle unifiedTopTextStyle = TextStyle(
-   fontSize: 11,
-   fontWeight: FontWeight.bold,
-  );
-  return Scaffold(
-   backgroundColor: Colors.black,
-   resizeToAvoidBottomInset: false,
-   appBar: AppBar(
-    backgroundColor: Colors.black,
-    automaticallyImplyLeading: false,
-    titleSpacing: 4,
-    toolbarHeight: 48,
-    title: Row(
-     children: [
-      IconButton(
-       icon: const Icon(Icons.arrow_back, color: Colors.white, size: 19),
-       padding: EdgeInsets.zero,
-       constraints: const BoxConstraints(minWidth: 26, minHeight: 34),
-       onPressed: () => Navigator.pop(context),
-      ),
-      const SizedBox(width: 2),
-      Container(
-       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-       decoration: BoxDecoration(
-        color: Colors.white10,
-        borderRadius: BorderRadius.circular(6),
-       ),
-       child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-         value: _dateFilter,
-         isDense: true,
-         dropdownColor: Colors.grey[900],
-         style: unifiedTopTextStyle.copyWith(color: Colors.white),
-         icon: const Icon(Icons.arrow_drop_down,
-           color: Colors.white70, size: 15),
-         selectedItemBuilder: (context) {
-          return dateTabs.map((d) {
-           final String shortLabel =
-             (d == '전체 보기') ? '전체날짜' : (d.length >= 10 ? d.substring(5) : d);
-           return Align(
-            alignment: Alignment.centerLeft,
-            child: Text(shortLabel, style: unifiedTopTextStyle),
-           );
-          }).toList();
-         },
-         items: dateTabs
-           .map(
-            (d) => DropdownMenuItem(
-             value: d,
-             child: Text(
-              d == '전체 보기' ? '전체 날짜 보기' : d,
-              style: unifiedTopTextStyle,
-             ),
-            ),
-           )
-           .toList(),
-         onChanged: (val) {
-          if (val == null) return;
-          setState(() {
-           _dateFilter = val;
-           _selectedIdx = _visiblePhotos.isNotEmpty
-             ? _visiblePhotos.length - 1
-             : 0;
-          });
-          _refreshAllOverlays(includeBlueprint: true);
-          if (_visiblePhotos.isNotEmpty) {
-           final p = _visiblePhotos[_selectedIdx];
-           _panMapKeepZoom(p.lat, p.lng);
-          }
-         },
-        ),
-       ),
-      ),
-      const SizedBox(width: 4),
-      Flexible(
-       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-        decoration: BoxDecoration(
-         color: Colors.white10,
-         borderRadius: BorderRadius.circular(6),
-        ),
-        child: DropdownButtonHideUnderline(
-         child: DropdownButton<String>(
-          value: cats.contains(_categoryFilter)
-            ? _categoryFilter
-            : '전체 카테고리',
-          isDense: true,
-          isExpanded: true,
-          dropdownColor: Colors.grey[900],
-          style: unifiedTopTextStyle.copyWith(color: Colors.amberAccent),
-          icon: const Icon(Icons.arrow_drop_down,
-            color: Colors.amberAccent, size: 15),
-          selectedItemBuilder: (context) {
-           return ['전체 카테고리', ...cats].map((c) {
-            final String shortCat = (c == '전체 카테고리') ? '전체분류' : c;
-            return Align(
-             alignment: Alignment.centerLeft,
-             child: Text(
-              shortCat,
-              overflow: TextOverflow.ellipsis,
-              style: unifiedTopTextStyle.copyWith(color: Colors.amberAccent),
-             ),
-            );
-           }).toList();
-          },
-          items: ['전체 카테고리', ...cats]
-            .map(
-             (c) => DropdownMenuItem(
-              value: c,
-              child: Text(c, style: unifiedTopTextStyle),
-             ),
-            )
-            .toList(),
-          onChanged: (val) {
-           if (val == null) return;
-           setState(() {
-            _categoryFilter = val;
-            _selectedIdx = _visiblePhotos.isNotEmpty
-              ? _visiblePhotos.length - 1
-              : 0;
-           });
-           _refreshAllOverlays(includeBlueprint: true);
-           if (_visiblePhotos.isNotEmpty) {
-            final p = _visiblePhotos[_selectedIdx];
-            _panMapKeepZoom(p.lat, p.lng);
-           }
-          },
-         ),
-        ),
-       ),
-      ),
-      const SizedBox(width: 4),
-      InkWell(
-       onTap: _isExporting ? null : _importPhotosFromGallery,
-       borderRadius: BorderRadius.circular(6),
-       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-        decoration: BoxDecoration(
-         color: Colors.lightGreenAccent.withOpacity(0.12),
-         borderRadius: BorderRadius.circular(6),
-         border: Border.all(color: Colors.lightGreenAccent.withOpacity(0.6)),
-        ),
-        child: Row(
-         mainAxisSize: MainAxisSize.min,
-         children: [
-          const Icon(Icons.add_a_photo,
-            color: Colors.lightGreenAccent, size: 13),
-          const SizedBox(width: 3),
-          Text(
-           '사진',
-           style: unifiedTopTextStyle.copyWith(
-             color: Colors.lightGreenAccent),
-          ),
-         ],
-        ),
-       ),
-      ),
-      const SizedBox(width: 4),
-      InkWell(
-       onTap: _isExporting ? null : _showExportOptionsSheet,
-       borderRadius: BorderRadius.circular(6),
-       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-        decoration: BoxDecoration(
-         color: Colors.lightBlueAccent.withOpacity(0.12),
-         borderRadius: BorderRadius.circular(6),
-         border: Border.all(color: Colors.lightBlueAccent.withOpacity(0.6)),
-        ),
-        child: Row(
-         mainAxisSize: MainAxisSize.min,
-         children: [
-          const Icon(Icons.ios_share,
-            color: Colors.lightBlueAccent, size: 13),
-          const SizedBox(width: 2),
-          Text(
-           '공유',
-           style: unifiedTopTextStyle.copyWith(
-             color: Colors.lightBlueAccent),
-          ),
-         ],
-        ),
-       ),
-      ),
-      const SizedBox(width: 4),
-      InkWell(
-       onTap: _showBlueprintActionMenuDialog,
-       borderRadius: BorderRadius.circular(6),
-       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-        decoration: BoxDecoration(
-         color: Colors.amber.withOpacity(0.14),
-         borderRadius: BorderRadius.circular(6),
-         border: Border.all(color: Colors.amber.withOpacity(0.7)),
-        ),
-        child: Row(
-         mainAxisSize: MainAxisSize.min,
-         children: [
-          const Icon(Icons.map, color: Colors.amber, size: 13),
-          const SizedBox(width: 2),
-          Text(
-           '도면',
-           style: unifiedTopTextStyle.copyWith(color: Colors.amber),
-          ),
-         ],
-        ),
-       ),
-      ),
-      if (_blueprints.isNotEmpty) ...[
-       const SizedBox(width: 3),
-       InkWell(
-        onTap: _showBlueprintLayerSelectorDialog,
-        borderRadius: BorderRadius.circular(6),
-        child: Container(
-         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-         decoration: BoxDecoration(
-          color: Colors.white10,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(
-           color: _hasAnyVisibleBlueprint
-             ? Colors.lightGreenAccent
-             : Colors.white38,
-          ),
-         ),
-         child: Icon(
-          _hasAnyVisibleBlueprint ? Icons.layers : Icons.layers_clear,
-          color: _hasAnyVisibleBlueprint
-            ? Colors.lightGreenAccent
-            : Colors.grey,
-          size: 15,
-         ),
-        ),
-       ),
-      ],
-     ],
+     .toList(),
+    onChanged: (val) {
+     if (val == null) return;
+     setState(() {
+     _dateFilter = val;
+     _selectedIdx = _visiblePhotos.isNotEmpty
+      ? _visiblePhotos.length - 1
+      : 0;
+     });
+     _refreshAllOverlays(includeBlueprint: true);
+     if (_visiblePhotos.isNotEmpty) {
+     final p = _visiblePhotos[_selectedIdx];
+     _panMapKeepZoom(p.lat, p.lng);
+     }
+    },
     ),
    ),
-   body: Stack(
+   ),
+   const SizedBox(width: 4),
+   Flexible(
+   child: Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+    decoration: BoxDecoration(
+    color: Colors.white10,
+    borderRadius: BorderRadius.circular(6),
+    ),
+    child: DropdownButtonHideUnderline(
+    child: DropdownButton<String>(
+     value: cats.contains(_categoryFilter)
+      ? _categoryFilter
+      : '전체 카테고리',
+     isDense: true,
+     isExpanded: true,
+     dropdownColor: Colors.grey[900],
+     style: unifiedTopTextStyle.copyWith(color: Colors.amberAccent),
+     icon: const Icon(Icons.arrow_drop_down,
+      color: Colors.amberAccent, size: 15),
+     selectedItemBuilder: (context) {
+     return ['전체 카테고리', ...cats].map((c) {
+      final String shortCat = (c == '전체 카테고리') ? '전체분류' : c;
+      return Align(
+      alignment: Alignment.centerLeft,
+      child: Text(
+       shortCat,
+       overflow: TextOverflow.ellipsis,
+       style: unifiedTopTextStyle.copyWith(color: Colors.amberAccent),
+      ),
+      );
+     }).toList();
+     },
+     items: ['전체 카테고리', ...cats]
+      .map(
+      (c) => DropdownMenuItem(
+       value: c,
+       child: Text(c, style: unifiedTopTextStyle),
+      ),
+      )
+      .toList(),
+     onChanged: (val) {
+     if (val == null) return;
+     setState(() {
+      _categoryFilter = val;
+      _selectedIdx = _visiblePhotos.isNotEmpty
+       ? _visiblePhotos.length - 1
+       : 0;
+     });
+     _refreshAllOverlays(includeBlueprint: true);
+     if (_visiblePhotos.isNotEmpty) {
+      final p = _visiblePhotos[_selectedIdx];
+      _panMapKeepZoom(p.lat, p.lng);
+     }
+     },
+    ),
+    ),
+   ),
+   ),
+   const SizedBox(width: 4),
+   InkWell(
+   onTap: _isExporting ? null : _importPhotosFromGallery,
+   borderRadius: BorderRadius.circular(6),
+   child: Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+    decoration: BoxDecoration(
+    color: Colors.lightGreenAccent.withOpacity(0.12),
+    borderRadius: BorderRadius.circular(6),
+    border: Border.all(color: Colors.lightGreenAccent.withOpacity(0.6)),
+    ),
+    child: Row(
+    mainAxisSize: MainAxisSize.min,
     children: [
-     Column(
+     const Icon(Icons.add_a_photo,
+      color: Colors.lightGreenAccent, size: 13),
+     const SizedBox(width: 3),
+     Text(
+     '사진',
+     style: unifiedTopTextStyle.copyWith(
+      color: Colors.lightGreenAccent),
+     ),
+    ],
+    ),
+   ),
+   ),
+   const SizedBox(width: 4),
+   InkWell(
+   onTap: _isExporting ? null : _showExportOptionsSheet,
+   borderRadius: BorderRadius.circular(6),
+   child: Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+    decoration: BoxDecoration(
+    color: Colors.lightBlueAccent.withOpacity(0.12),
+    borderRadius: BorderRadius.circular(6),
+    border: Border.all(color: Colors.lightBlueAccent.withOpacity(0.6)),
+    ),
+    child: Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+     const Icon(Icons.ios_share,
+      color: Colors.lightBlueAccent, size: 13),
+     const SizedBox(width: 2),
+     Text(
+     '공유',
+     style: unifiedTopTextStyle.copyWith(
+      color: Colors.lightBlueAccent),
+     ),
+    ],
+    ),
+   ),
+   ),
+   const SizedBox(width: 4),
+   InkWell(
+   onTap: _showBlueprintActionMenuDialog,
+   borderRadius: BorderRadius.circular(6),
+   child: Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+    decoration: BoxDecoration(
+    color: Colors.amber.withOpacity(0.14),
+    borderRadius: BorderRadius.circular(6),
+    border: Border.all(color: Colors.amber.withOpacity(0.7)),
+    ),
+    child: Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+     const Icon(Icons.map, color: Colors.amber, size: 13),
+     const SizedBox(width: 2),
+     Text(
+     '도면',
+     style: unifiedTopTextStyle.copyWith(color: Colors.amber),
+     ),
+    ],
+    ),
+   ),
+   ),
+   if (_blueprints.isNotEmpty) ...[
+   const SizedBox(width: 3),
+   InkWell(
+    onTap: _showBlueprintLayerSelectorDialog,
+    borderRadius: BorderRadius.circular(6),
+    child: Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+    decoration: BoxDecoration(
+     color: Colors.white10,
+     borderRadius: BorderRadius.circular(6),
+     border: Border.all(
+     color: _hasAnyVisibleBlueprint
+      ? Colors.lightGreenAccent
+      : Colors.white38,
+     ),
+    ),
+    child: Icon(
+     _hasAnyVisibleBlueprint ? Icons.layers : Icons.layers_clear,
+     color: _hasAnyVisibleBlueprint
+      ? Colors.lightGreenAccent
+      : Colors.grey,
+     size: 15,
+    ),
+    ),
+   ),
+   ],
+  ],
+  ),
+ ),
+ body: Stack(
+  children: [
+  Column(
+   children: [
+   Expanded(
+    child: portrait
+     ? Column(
       children: [
-       Expanded(
-        child: portrait
-          ? Column(
-            children: [
-             Expanded(flex: 5, child: leftOrTopPane),
-             const SizedBox(height: 4),
-             Expanded(flex: 5, child: mapPane),
-            ],
-           )
-          : Row(
-            children: [
-             Expanded(flex: 5, child: leftOrTopPane),
-             const SizedBox(width: 4),
-             Expanded(flex: 5, child: mapPane),
-            ],
-           ),
-       ),
-       if (_visiblePhotos.isNotEmpty)
-        Padding(
-         padding: EdgeInsets.only(bottom: bottomSafe + 28.0),
-         child: SizedBox(
-          height: 80,
-          child: ListView.builder(
-           scrollDirection: Axis.horizontal,
-           itemCount: _visiblePhotos.length,
-           itemBuilder: (context, idx) {
-            final bool selected = _selectedIdx == idx;
-            return GestureDetector(
-             onTap: () => _selectPhotoFast(idx),
-             child: Container(
-              margin: const EdgeInsets.all(4),
-              decoration: BoxDecoration(
-               border: Border.all(
-                color: selected
-                  ? Colors.amber
-                  : Colors.transparent,
-                width: 3,
-               ),
-              ),
-              child: Image.file(
-               File(_visiblePhotos[idx].path),
-               width: 70,
-               height: 70,
-               cacheWidth: 160,
-               fit: BoxFit.cover,
-               gaplessPlayback: true,
-              ),
-             ),
-            );
-           },
-          ),
-         ),
-        ),
+      Expanded(flex: 5, child: leftOrTopPane),
+      const SizedBox(height: 4),
+      Expanded(flex: 5, child: mapPane),
+      ],
+     )
+     : Row(
+      children: [
+      Expanded(flex: 5, child: leftOrTopPane),
+      const SizedBox(width: 4),
+      Expanded(flex: 5, child: mapPane),
       ],
      ),
-     if (_isExporting)
-      Container(
-       color: Colors.black54,
-       child: const Center(
-        child: Column(
-         mainAxisSize: MainAxisSize.min,
-         children: [
-          CircularProgressIndicator(color: Colors.amber),
-          SizedBox(height: 12),
-          Text(
-           '공유 파일을 생성하는 중입니다...',
-           style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-           ),
-          ),
-         ],
-        ),
+   ),
+   if (_visiblePhotos.isNotEmpty)
+    Padding(
+    padding: EdgeInsets.only(bottom: bottomSafe + 28.0),
+    child: SizedBox(
+     height: 80,
+     child: ListView.builder(
+     scrollDirection: Axis.horizontal,
+     itemCount: _visiblePhotos.length,
+     itemBuilder: (context, idx) {
+      final bool selected = _selectedIdx == idx;
+      return GestureDetector(
+      onTap: () => _selectPhotoFast(idx),
+      child: Container(
+       margin: const EdgeInsets.all(4),
+       decoration: BoxDecoration(
+       border: Border.all(
+        color: selected
+         ? Colors.amber
+         : Colors.transparent,
+        width: 3,
+       ),
+       ),
+       child: Image.file(
+       File(_visiblePhotos[idx].path),
+       width: 70,
+       height: 70,
+       cacheWidth: 160,
+       fit: BoxFit.cover,
+       gaplessPlayback: true,
        ),
       ),
+      );
+     },
+     ),
+    ),
+    ),
+   ],
+  ),
+  if (_isExporting)
+   Container(
+   color: Colors.black54,
+   child: const Center(
+    child: Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+     CircularProgressIndicator(color: Colors.amber),
+     SizedBox(height: 12),
+     Text(
+     '공유 파일을 생성하는 중입니다...',
+     style: TextStyle(
+      color: Colors.white,
+      fontWeight: FontWeight.bold,
+     ),
+     ),
     ],
+    ),
    ),
-  );
+   ),
+  ],
+ ),
+ );
+}
+Future<void> _refreshAllOverlays({bool includeBlueprint = true}) async {
+ if (_mapCtrl == null) return;
+ await _mapCtrl!.clearOverlays();
+ if (includeBlueprint && _bpGlobalShow && _blueprints.isNotEmpty) {
+ await _syncBlueprintsToMap();
  }
- Future<void> _refreshAllOverlays({bool includeBlueprint = true}) async {
-  if (_mapCtrl == null) return;
-  await _mapCtrl!.clearOverlays();
-  if (includeBlueprint && _bpGlobalShow && _blueprints.isNotEmpty) {
-   await _syncBlueprintsToMap();
-  }
-  final List<int> order = [];
-  for (int i = 0; i < _visiblePhotos.length; i++) {
-   if (i != _selectedIdx) order.add(i);
-  }
-  if (_selectedIdx >= 0 && _selectedIdx < _visiblePhotos.length) {
-   order.add(_selectedIdx);
-  }
-  final List<NAddableOverlay> markerBatch = [];
-  for (final int i in order) {
-   final PhotoItem item = _visiblePhotos[i];
-   final bool selected = i == _selectedIdx;
-   try {
-    final icon = await _getCachedMarkerIcon(item.azimuth, selected);
-    markerBatch.add(_buildPhotoMarker(i, item, icon));
-   } catch (e) {
-    debugPrint('Marker build error: $e');
-   }
-  }
-  if (markerBatch.isNotEmpty) {
-   await _mapCtrl!.addOverlayAll(markerBatch.toSet());
-  }
-  if (_showMyLocation && _myCurrentPos != null) {
-   await _updateMyLocationMarkerOnly();
-  }
+ final List<int> order = [];
+ for (int i = 0; i < _visiblePhotos.length; i++) {
+ if (i != _selectedIdx) order.add(i);
  }
+ if (_selectedIdx >= 0 && _selectedIdx < _visiblePhotos.length) {
+ order.add(_selectedIdx);
+ }
+ final List<NAddableOverlay> markerBatch = [];
+ for (final int i in order) {
+ final PhotoItem item = _visiblePhotos[i];
+ final bool selected = i == _selectedIdx;
+ try {
+  final icon = await _getCachedMarkerIcon(item.azimuth, selected);
+  markerBatch.add(_buildPhotoMarker(i, item, icon));
+ } catch (e) {
+  debugPrint('Marker build error: $e');
+ }
+ }
+ if (markerBatch.isNotEmpty) {
+ await _mapCtrl!.addOverlayAll(markerBatch.toSet());
+ }
+ if (_showMyLocation && _myCurrentPos != null) {
+ await _updateMyLocationMarkerOnly();
+ }
+}
 }
