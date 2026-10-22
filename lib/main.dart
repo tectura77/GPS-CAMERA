@@ -309,12 +309,10 @@ Future<void> _setupApp() async {
  await [
  Permission.camera,
  Permission.location,
+ Permission.storage,
+ Permission.photos,
+ Permission.accessMediaLocation,
  ].request();
- try {
- await Permission.photos.request();
- await Permission.storage.request();
- await Permission.accessMediaLocation.request();
- } catch (_) {}
  await _restorePhotos();
  await loadDefaultCategory(_photoList);
  if (mounted) setState(() {});
@@ -1049,29 +1047,32 @@ double? _parseExifCoord(Object? raw, String? ref) {
 Map<String, dynamic> _parseBinaryExifFromBytes(Uint8List bytes) {
  final Map<String, dynamic> res = {};
  if (bytes.length < 16) return res;
- final int scanLimit = min(bytes.length, 1048576);
+ final int scanLimit = min(bytes.length, 65536);
  try {
  final String headAscii = latin1.decode(
-  bytes.sublist(0, min(bytes.length, 65536)),
+  bytes.sublist(0, min(bytes.length, 16384)),
   allowInvalid: true,
  );
- final RegExp camRe = RegExp(
+ if (headAscii.contains('GPSCAM:')) {
+  final RegExp camRe = RegExp(
   r'GPSCAM:(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+)',
- );
- final RegExpMatch? cm = camRe.firstMatch(headAscii);
- if (cm != null) {
+  );
+  final RegExpMatch? cm = camRe.firstMatch(headAscii);
+  if (cm != null) {
   final double? la = double.tryParse(cm.group(1)!);
   final double? lo = double.tryParse(cm.group(2)!);
   final double? al = double.tryParse(cm.group(3)!);
   final double? az = double.tryParse(cm.group(4)!);
   if (la != null && lo != null && (la.abs() > 0.0001 || lo.abs() > 0.0001)) {
-  res['lat'] = la;
-  res['lng'] = lo;
-  if (al != null) res['alt'] = al;
-  if (az != null) res['azimuth'] = az;
+   res['lat'] = la;
+   res['lng'] = lo;
+   if (al != null) res['alt'] = al;
+   if (az != null) res['azimuth'] = az;
+  }
   }
  }
- if (res['lat'] == null || res['lng'] == null) {
+ if ((res['lat'] == null || res['lng'] == null) &&
+  headAscii.contains('GPSLatitude')) {
   final RegExp xmpLatRe = RegExp(
   r'GPSLatitude[="\s>]+([0-9.,\s]+[NSns]?)',
   );
@@ -1107,7 +1108,7 @@ Map<String, dynamic> _parseBinaryExifFromBytes(Uint8List bytes) {
    bytes[tiffStart + 2] == 0x00 &&
    bytes[tiffStart + 3] == 0x2A;
   if (!isLE && !isBE) continue;
-  final int segEnd = min(bytes.length, tiffStart + 262144);
+  final int segEnd = bytes.length;
   int u16(int p) {
   if (p < 0 || p + 2 > segEnd) return 0;
   return isLE
@@ -1152,9 +1153,9 @@ Map<String, dynamic> _parseBinaryExifFromBytes(Uint8List bytes) {
   }
   final int ifd0Rel = u32(tiffStart + 4);
   final int ifd0Pos = tiffStart + ifd0Rel;
-  if (ifd0Pos + 2 > segEnd) continue;
+  if (ifd0Pos + 2 > segEnd) break;
   final int n0 = u16(ifd0Pos);
-  if (n0 <= 0 || n0 > 500) continue;
+  if (n0 <= 0 || n0 > 300) break;
   int? gpsIfdRel;
   int? exifIfdRel;
   for (int i = 0; i < n0; i++) {
@@ -1177,7 +1178,7 @@ Map<String, dynamic> _parseBinaryExifFromBytes(Uint8List bytes) {
   final int exifPos = tiffStart + exifIfdRel;
   if (exifPos + 2 <= segEnd) {
    final int ne = u16(exifPos);
-   if (ne > 0 && ne <= 500) {
+   if (ne > 0 && ne <= 300) {
    for (int i = 0; i < ne; i++) {
     final int ePos = exifPos + 2 + i * 12;
     if (ePos + 12 > segEnd) break;
@@ -1196,7 +1197,7 @@ Map<String, dynamic> _parseBinaryExifFromBytes(Uint8List bytes) {
   final int gpsPos = tiffStart + gpsIfdRel;
   if (gpsPos + 2 <= segEnd) {
    final int ng = u16(gpsPos);
-   if (ng > 0 && ng <= 200) {
+   if (ng > 0 && ng <= 150) {
    String latRef = 'N';
    String lngRef = 'E';
    int altRef = 0;
@@ -1276,28 +1277,22 @@ Map<String, dynamic> _parseBinaryExifFromBytes(Uint8List bytes) {
    }
   }
   }
-  if (res['lat'] != null && res['lng'] != null) break;
+  break;
  }
  }
  return res;
 }
-Map<String, dynamic> _fastReadExifHeadSync(File f) {
- try {
- final int len = f.lengthSync();
- if (len < 32) return {};
- final RandomAccessFile raf = f.openSync();
- final Uint8List head = raf.readSync(min(len, 65536));
- raf.closeSync();
- return _parseBinaryExifFromBytes(head);
- } catch (_) {
- return {};
- }
-}
 Future<Map<String, dynamic>> _extractPhotoMetaFromPath(String path) async {
  final Map<String, dynamic> out = {};
  try {
- final Uint8List rawBytes = await File(path).readAsBytes();
- out.addAll(_parseBinaryExifFromBytes(rawBytes));
+ final File f = File(path);
+ final int len = await f.length();
+ if (len > 16) {
+  final RandomAccessFile raf = await f.open();
+  final Uint8List headBytes = await raf.read(min(len, 131072));
+  await raf.close();
+  out.addAll(_parseBinaryExifFromBytes(headBytes));
+ }
  } catch (_) {}
  try {
  final Exif exif = await Exif.fromPath(path);
@@ -1386,388 +1381,66 @@ Future<Map<String, dynamic>> _extractPhotoMetaFromPath(String path) async {
  } catch (_) {}
  return out;
 }
-Future<List<File>> _collectDeviceGalleryFiles() async {
- final List<String> roots = [
+Future<Map<String, dynamic>> _fastDirectPathLookup(
+ XFile picked, String? rawDateTime) async {
+ final List<String> directPaths = [];
+ final String pickedName = picked.name;
+ for (final String dir in [
  '/storage/emulated/0/DCIM/Camera',
- '/storage/emulated/0/DCIM',
  '/storage/emulated/0/Pictures',
  '/storage/emulated/0/Pictures/KakaoTalk',
  '/storage/emulated/0/Download',
- '/storage/emulated/0/Documents',
- ];
- final Set<String> visitedDirs = {};
- final Set<String> seenFiles = {};
- final List<File> result = [];
- void scanDir(String path, int depth) {
- if (depth > 2 || visitedDirs.contains(path)) return;
- visitedDirs.add(path);
- try {
-  final Directory d = Directory(path);
-  if (!d.existsSync()) return;
-  final List<FileSystemEntity> list = d.listSync(recursive: false);
-  for (final FileSystemEntity ent in list) {
-  if (ent is Directory) {
-   final String subName = ent.path.split('/').last;
-   if (!subName.startsWith('.')) {
-   scanDir(ent.path, depth + 1);
-   }
-  } else if (ent is File) {
-   if (seenFiles.contains(ent.path)) continue;
-   final String low = ent.path.toLowerCase();
-   if (low.endsWith('.jpg') ||
-    low.endsWith('.jpeg') ||
-    low.endsWith('.png') ||
-    low.endsWith('.heic')) {
-   seenFiles.add(ent.path);
-   result.add(ent);
-   }
-  }
-  }
- } catch (_) {}
+ ]) {
+ directPaths.add('$dir/$pickedName');
  }
- for (final String r in roots) {
- scanDir(r, 0);
- }
- return result;
-}
-Future<Map<String, dynamic>> _recoverGpsFromOriginalStorage(
- XFile picked, String? rawDateTime) async {
- final List<File> allFiles = await _collectDeviceGalleryFiles();
- if (allFiles.isEmpty) return {};
- String? cleanTargetDt;
- String? minutePrefix;
- if (rawDateTime != null && rawDateTime.trim().isNotEmpty) {
+ if (rawDateTime != null) {
  final String digits = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
  if (digits.length >= 14) {
-  cleanTargetDt = digits.substring(0, 14);
-  minutePrefix = '${digits.substring(0, 8)}_${digits.substring(8, 12)}';
+  final int? yr = int.tryParse(digits.substring(0, 4));
+  final int? mo = int.tryParse(digits.substring(4, 6));
+  final int? dy = int.tryParse(digits.substring(6, 8));
+  final int? hr = int.tryParse(digits.substring(8, 10));
+  final int? mn = int.tryParse(digits.substring(10, 12));
+  final int? sc = int.tryParse(digits.substring(12, 14));
+  if (yr != null && mo != null && dy != null && hr != null && mn != null && sc != null) {
+  final DateTime baseDt = DateTime(yr, mo, dy, hr, mn, sc);
+  for (final int dSec in [0, 1, -1, 2, -2, 3]) {
+   final DateTime d = baseDt.add(Duration(seconds: dSec));
+   final String s =
+    '${d.year.toString().padLeft(4, '0')}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}_'
+    '${d.hour.toString().padLeft(2, '0')}${d.minute.toString().padLeft(2, '0')}${d.second.toString().padLeft(2, '0')}';
+   directPaths.add('/storage/emulated/0/DCIM/Camera/$s.jpg');
+   directPaths.add('/storage/emulated/0/DCIM/Camera/IMG_$s.jpg');
+   directPaths.add('/storage/emulated/0/DCIM/Camera/$s.heic');
+   directPaths.add('/storage/emulated/0/Pictures/$s.jpg');
+  }
+  }
  }
  }
- final String pickedName = picked.name;
- int pickedSize = 0;
+ for (final String p in directPaths) {
  try {
- pickedSize = await File(picked.path).length();
+  final File f = File(p);
+  if (await f.exists()) {
+  final Map<String, dynamic> m = await _extractPhotoMetaFromPath(p);
+  if (m['lat'] != null && m['lng'] != null) return m;
+  }
  } catch (_) {}
- for (final File f in allFiles) {
- final String fname = f.path.split('/').last;
- int fLen = 0;
- try {
-  fLen = f.lengthSync();
- } catch (_) {}
- final bool nameMatch = (fname == pickedName) ||
-  (minutePrefix != null && fname.contains(minutePrefix));
- final bool sizeClose =
-  pickedSize > 0 && (fLen - pickedSize).abs() <= 131072;
- if (nameMatch || sizeClose) {
-  final Map<String, dynamic> headMeta = _fastReadExifHeadSync(f);
-  if (cleanTargetDt != null && headMeta['dateTime'] != null) {
-  final String candDigits =
-   headMeta['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
-  if (candDigits.length >= 14 &&
-   candDigits.substring(0, 14) == cleanTargetDt &&
-   headMeta['lat'] != null &&
-   headMeta['lng'] != null) {
-   return await _extractPhotoMetaFromPath(f.path);
-  }
-  }
-  if (nameMatch && headMeta['lat'] != null && headMeta['lng'] != null) {
-  return await _extractPhotoMetaFromPath(f.path);
-  }
-  if (pickedSize > 0 &&
-   (fLen - pickedSize).abs() <= 4096 &&
-   headMeta['lat'] != null &&
-   headMeta['lng'] != null) {
-  return await _extractPhotoMetaFromPath(f.path);
-  }
- }
- }
- if (cleanTargetDt != null) {
- for (final File f in allFiles) {
-  final Map<String, dynamic> headMeta = _fastReadExifHeadSync(f);
-  if (headMeta['dateTime'] != null &&
-   headMeta['lat'] != null &&
-   headMeta['lng'] != null) {
-  final String candDigits =
-   headMeta['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
-  if (candDigits.length >= 14 &&
-   candDigits.substring(0, 14) == cleanTargetDt) {
-   return await _extractPhotoMetaFromPath(f.path);
-  }
-  }
- }
  }
  return {};
 }
-Future<List<String>?> _showDirectGalleryMultiPicker(List<File> files) async {
- files.sort((a, b) {
- try {
-  return b.lastModifiedSync().compareTo(a.lastModifiedSync());
- } catch (_) {
-  return b.path.compareTo(a.path);
- }
- });
- final Set<String> folderNames = {'전체'};
- for (final File f in files) {
- final List<String> segs = f.path.split('/');
- if (segs.length >= 2) {
-  folderNames.add(segs[segs.length - 2]);
- }
- }
- final List<String> selectedPaths = [];
- String activeFolder = '전체';
- final Map<String, bool> gpsBadgeCache = {};
- return showModalBottomSheet<List<String>>(
- context: context,
- isScrollControlled: true,
- backgroundColor: Colors.grey[900],
- shape: const RoundedRectangleBorder(
-  borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
- ),
- builder: (ctx) {
-  return StatefulBuilder(
-  builder: (ctx, setSheetState) {
-   final List<File> filtered = activeFolder == '전체'
-    ? files
-    : files.where((f) {
-     final List<String> s = f.path.split('/');
-     return s.length >= 2 && s[s.length - 2] == activeFolder;
-    }).toList();
-   return SafeArea(
-   child: SizedBox(
-    height: MediaQuery.of(ctx).size.height * 0.82,
-    child: Column(
-    children: [
-     Padding(
-     padding: const EdgeInsets.fromLTRB(14, 12, 10, 6),
-     child: Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-      const Expanded(
-       child: Text(
-       '📷 원본 GPS 보존 멀티 사진 선택기',
-       style: TextStyle(
-        color: Colors.amber,
-        fontSize: 14.5,
-        fontWeight: FontWeight.bold,
-       ),
-       ),
-      ),
-      TextButton.icon(
-       onPressed: () => Navigator.pop(ctx, <String>['__USE_SYSTEM_PICKER__']),
-       icon: const Icon(Icons.folder_open,
-        color: Colors.lightBlueAccent, size: 15),
-       label: const Text(
-       '기본 피커',
-       style: TextStyle(
-        color: Colors.lightBlueAccent,
-        fontSize: 11.5,
-        fontWeight: FontWeight.bold,
-       ),
-       ),
-      ),
-      IconButton(
-       icon: const Icon(Icons.close, color: Colors.white70, size: 20),
-       onPressed: () => Navigator.pop(ctx, null),
-      ),
-      ],
-     ),
-     ),
-     SizedBox(
-     height: 34,
-     child: ListView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      children: folderNames.map((fn) {
-      final bool isSel = activeFolder == fn;
-      return Padding(
-       padding: const EdgeInsets.only(right: 6),
-       child: ChoiceChip(
-       label: Text(
-        fn,
-        style: TextStyle(
-        color: isSel ? Colors.black : Colors.white,
-        fontSize: 11.5,
-        fontWeight: FontWeight.bold,
-        ),
-       ),
-       selected: isSel,
-       selectedColor: Colors.amber,
-       backgroundColor: Colors.white12,
-       onSelected: (_) {
-        setSheetState(() => activeFolder = fn);
-       },
-       ),
-      );
-      }).toList(),
-     ),
-     ),
-     const SizedBox(height: 6),
-     Expanded(
-     child: GridView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-      crossAxisCount: 3,
-      crossAxisSpacing: 5,
-      mainAxisSpacing: 5,
-      ),
-      itemCount: filtered.length,
-      itemBuilder: (_, idx) {
-      final File file = filtered[idx];
-      final int selOrder = selectedPaths.indexOf(file.path);
-      final bool isSelected = selOrder >= 0;
-      if (!gpsBadgeCache.containsKey(file.path)) {
-       final Map<String, dynamic> hm = _fastReadExifHeadSync(file);
-       gpsBadgeCache[file.path] =
-        (hm['lat'] != null && hm['lng'] != null);
-      }
-      final bool hasGps = gpsBadgeCache[file.path] ?? false;
-      return GestureDetector(
-       onTap: () {
-       setSheetState(() {
-        if (isSelected) {
-        selectedPaths.remove(file.path);
-        } else {
-        selectedPaths.add(file.path);
-        }
-       });
-       },
-       child: Stack(
-       fit: StackFit.expand,
-       children: [
-        ClipRRect(
-        borderRadius: BorderRadius.circular(6),
-        child: Image.file(
-         file,
-         cacheWidth: 220,
-         fit: BoxFit.cover,
-         gaplessPlayback: true,
-        ),
-        ),
-        Positioned(
-        left: 4,
-        bottom: 4,
-        child: Container(
-         padding: const EdgeInsets.symmetric(
-          horizontal: 5, vertical: 2),
-         decoration: BoxDecoration(
-         color: hasGps
-          ? Colors.green.withOpacity(0.85)
-          : Colors.black54,
-         borderRadius: BorderRadius.circular(4),
-         ),
-         child: Text(
-         hasGps ? '📍GPS' : '위치없음',
-         style: const TextStyle(
-          color: Colors.white,
-          fontSize: 9.5,
-          fontWeight: FontWeight.bold,
-         ),
-         ),
-        ),
-        ),
-        if (isSelected)
-        Container(
-         decoration: BoxDecoration(
-         color: Colors.amber.withOpacity(0.28),
-         borderRadius: BorderRadius.circular(6),
-         border: Border.all(color: Colors.amber, width: 2.5),
-         ),
-        ),
-        Positioned(
-        top: 5,
-        right: 5,
-        child: Container(
-         width: 22,
-         height: 22,
-         alignment: Alignment.center,
-         decoration: BoxDecoration(
-         color: isSelected ? Colors.amber : Colors.black54,
-         shape: BoxShape.circle,
-         border: Border.all(color: Colors.white, width: 1.5),
-         ),
-         child: isSelected
-          ? Text(
-           '${selOrder + 1}',
-           style: const TextStyle(
-           color: Colors.black,
-           fontSize: 11,
-           fontWeight: FontWeight.bold,
-           ),
-          )
-          : null,
-        ),
-        ),
-       ],
-       ),
-      );
-      },
-     ),
-     ),
-     Padding(
-     padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-     child: SizedBox(
-      width: double.infinity,
-      height: 44,
-      child: ElevatedButton.icon(
-      onPressed: selectedPaths.isEmpty
-       ? null
-       : () => Navigator.pop(ctx, selectedPaths),
-      icon: const Icon(Icons.check_circle, size: 18),
-      label: Text(
-       selectedPaths.isEmpty
-        ? '사진을 여러 장 터치해서 선택하세요'
-        : '${selectedPaths.length}장 사진 첨부하기 (원본 GPS 적용)',
-       style: const TextStyle(
-       fontSize: 13.5,
-       fontWeight: FontWeight.bold,
-       ),
-      ),
-      style: ElevatedButton.styleFrom(
-       backgroundColor: Colors.amber,
-       foregroundColor: Colors.black,
-       disabledBackgroundColor: Colors.white12,
-       disabledForegroundColor: Colors.white38,
-      ),
-      ),
-     ),
-     ),
-    ],
-    ),
-   ),
-   );
-  },
-  );
- },
- );
-}
 Future<void> _importPhotosFromGallery() async {
  try {
- PermissionStatus pStat = PermissionStatus.denied;
- PermissionStatus sStat = PermissionStatus.denied;
- PermissionStatus mStat = PermissionStatus.denied;
- try {
-  pStat = await Permission.photos.request();
-  sStat = await Permission.storage.request();
-  mStat = await Permission.accessMediaLocation.request();
- } catch (_) {}
- final List<File> directDeviceFiles = await _collectDeviceGalleryFiles();
- List<XFile> pickedFiles = [];
- if (directDeviceFiles.isNotEmpty && mounted) {
-  final List<String>? chosenPaths =
-   await _showDirectGalleryMultiPicker(directDeviceFiles);
-  if (chosenPaths == null || chosenPaths.isEmpty) return;
-  if (chosenPaths.length == 1 && chosenPaths.first == '__USE_SYSTEM_PICKER__') {
-  final ImagePicker picker = ImagePicker();
-  pickedFiles = await picker.pickMultiImage(requestFullMetadata: true);
-  } else {
-  pickedFiles = chosenPaths.map((p) => XFile(p)).toList();
-  }
- } else {
-  final ImagePicker picker = ImagePicker();
-  pickedFiles = await picker.pickMultiImage(requestFullMetadata: true);
- }
+ final ImagePicker picker = ImagePicker();
+ final List<XFile> pickedFiles = await picker.pickMultiImage(
+  requestFullMetadata: true,
+ );
  if (pickedFiles.isEmpty) return;
  setState(() => _isExporting = true);
+ try {
+  if (!await Permission.accessMediaLocation.isGranted) {
+  await Permission.accessMediaLocation.request();
+  }
+ } catch (_) {}
  final Directory docDir = await getApplicationDocumentsDirectory();
  int addedCount = 0;
  int exifGpsCount = 0;
@@ -1785,8 +1458,8 @@ Future<void> _importPhotosFromGallery() async {
   final XFile picked = pickedFiles[i];
   Map<String, dynamic> meta = await _extractPhotoMetaFromPath(picked.path);
   if (meta['lat'] == null || meta['lng'] == null) {
-  final Map<String, dynamic> recovered = await _recoverGpsFromOriginalStorage(
-   picked, meta['dateTime'] as String?);
+  final Map<String, dynamic> recovered =
+   await _fastDirectPathLookup(picked, meta['dateTime'] as String?);
   if (recovered['lat'] != null && recovered['lng'] != null) {
    meta = {...meta, ...recovered};
   }
@@ -1852,25 +1525,16 @@ Future<void> _importPhotosFromGallery() async {
   if (mounted) {
    String msg;
    if (exifGpsCount > 0) {
-   msg = '📍 $addedCount장 중 $exifGpsCount장의 촬영 위치(${lastAdded.lat.toStringAsFixed(5)}, ${lastAdded.lng.toStringAsFixed(5)})에 동그라미를 표시했습니다!';
+   msg = '📍 $addedCount장 첨부 완료! ($exifGpsCount장 실제 GPS 위치에 동그라미 표시)';
    } else if (redactedCount > 0) {
-   msg = '⚠️ 위치권한 차단됨(사진:${pStat.isGranted || sStat.isGranted}, 원본위치:${mStat.isGranted}, 폴더파일:${directDeviceFiles.length}개). 우측 [권한설정]에서 사진 및 위치 권한을 모두 허용해주세요.';
+   msg = '📍 $addedCount장 첨부 완료! (지도 우측 [사진위치 이동]을 켜고 지도를 터치하면 원하는 위치로 즉시 옮겨집니다)';
    } else {
-   msg = '⚠️ 선택한 사진에 촬영 당시 저장된 GPS 정보가 없어 현재 지도 위치에 배치되었습니다.';
+   msg = '📍 $addedCount장 첨부 완료! (사진에 저장된 GPS가 없어 현재 지도 중앙에 배치됨 · [사진위치 이동]으로 이동 가능)';
    }
    ScaffoldMessenger.of(context).showSnackBar(
    SnackBar(
     content: Text(msg),
-    duration: const Duration(seconds: 5),
-    action: redactedCount > 0
-     ? SnackBarAction(
-      label: '권한설정',
-      textColor: Colors.amber,
-      onPressed: () {
-      openAppSettings();
-      },
-     )
-     : null,
+    duration: const Duration(seconds: 3),
    ),
    );
   }
@@ -1950,6 +1614,7 @@ Future<NOverlayImage> _getMyLocationIcon() async {
 }
 Offset? _tapDownPos;
 int _tapDownMs = 0;
+bool _moveSelectedPhotoMode = false;
 Future<void> _updateMyLocationMarkerOnly() async {
  if (_mapCtrl == null || !_showMyLocation) return;
  final double? lat = forcedUserLat ?? _myCurrentPos?.latitude;
@@ -4382,7 +4047,9 @@ Widget build(BuildContext context) {
      _tapDownMs = DateTime.now().millisecondsSinceEpoch;
      },
      onPointerUp: (e) async {
-     if (!_showMyLocation || _bpEditMode || _mapCtrl == null) {
+     if ((!_showMyLocation && !_moveSelectedPhotoMode) ||
+      _bpEditMode ||
+      _mapCtrl == null) {
       return;
      }
      final Offset? down = _tapDownPos;
@@ -4402,6 +4069,38 @@ Widget build(BuildContext context) {
        (e.localPosition.dx / _mapWidgetSize.width) *
         (bounds.northEast.longitude -
          bounds.southWest.longitude);
+      if (_moveSelectedPhotoMode && _visiblePhotos.isNotEmpty) {
+      final PhotoItem cur = _visiblePhotos[
+       _selectedIdx.clamp(0, _visiblePhotos.length - 1)];
+      final int masterIdx = widget.photos.indexOf(cur);
+      if (masterIdx >= 0) {
+       setState(() {
+       widget.photos[masterIdx] = PhotoItem(
+        path: cur.path,
+        lat: tLat,
+        lng: tLng,
+        alt: cur.alt,
+        acc: cur.acc,
+        azimuth: cur.azimuth,
+        pitch: cur.pitch,
+        timestamp: cur.timestamp,
+        category: cur.category,
+        memo: cur.memo,
+       );
+       });
+       await _persistPhotoMetadata();
+       await _refreshAllOverlays(includeBlueprint: true);
+       if (mounted) {
+       ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+        content: Text('📍 현재 사진의 위치가 터치한 지점으로 변경·저장되었습니다.'),
+        duration: Duration(milliseconds: 1000),
+        ),
+       );
+       }
+      }
+      return;
+      }
       setState(() {
       forcedUserLat = tLat;
       forcedUserLng = tLng;
@@ -4468,53 +4167,124 @@ Widget build(BuildContext context) {
     Positioned(
      top: 10,
      right: 10,
-     child: InkWell(
-     onTap: _toggleMyLocation,
-     borderRadius: BorderRadius.circular(8),
-     child: Container(
-      padding: const EdgeInsets.symmetric(
-       horizontal: 10, vertical: 7),
-      decoration: BoxDecoration(
-      color:
-       _showMyLocation ? Colors.amber : Colors.black87,
-      borderRadius: BorderRadius.circular(8),
-      border: Border.all(
-       color: _showMyLocation
-        ? Colors.amber
-        : Colors.white54,
-       width: 1.2,
-      ),
-      ),
-      child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-       Icon(
-       _showMyLocation
-        ? Icons.my_location
-        : Icons.location_searching,
-       color: _showMyLocation
-        ? Colors.black
-        : Colors.white,
-       size: 16,
+     child: Row(
+     mainAxisSize: MainAxisSize.min,
+     children: [
+      if (_visiblePhotos.isNotEmpty) ...[
+      InkWell(
+       onTap: () {
+       setState(() {
+        _moveSelectedPhotoMode = !_moveSelectedPhotoMode;
+        if (_moveSelectedPhotoMode) {
+        _showMyLocation = false;
+        }
+       });
+       if (_moveSelectedPhotoMode && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+         content: Text('지도나 도면 위 원하는 곳을 터치하면 현재 사진 마커가 그곳으로 이동합니다.'),
+         duration: Duration(milliseconds: 1400),
+        ),
+        );
+       }
+       },
+       borderRadius: BorderRadius.circular(8),
+       child: Container(
+       padding: const EdgeInsets.symmetric(
+        horizontal: 9, vertical: 7),
+       decoration: BoxDecoration(
+        color: _moveSelectedPhotoMode
+         ? Colors.lightGreenAccent
+         : Colors.black87,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+        color: _moveSelectedPhotoMode
+         ? Colors.lightGreenAccent
+         : Colors.white54,
+        width: 1.2,
+        ),
        ),
-       const SizedBox(width: 4),
-       Text(
-       _showMyLocation
-        ? (forcedUserLat != null
-         ? '강제위치 ON'
-         : '내 위치 ON')
-        : '내 위치 표기',
-       style: TextStyle(
+       child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+        Icon(
+         Icons.edit_location_alt,
+         color: _moveSelectedPhotoMode
+          ? Colors.black
+          : Colors.lightGreenAccent,
+         size: 15,
+        ),
+        const SizedBox(width: 3),
+        Text(
+         _moveSelectedPhotoMode ? '사진이동 ON' : '사진위치 이동',
+         style: TextStyle(
+         color: _moveSelectedPhotoMode
+          ? Colors.black
+          : Colors.white,
+         fontSize: 11,
+         fontWeight: FontWeight.bold,
+         ),
+        ),
+        ],
+       ),
+       ),
+      ),
+      const SizedBox(width: 6),
+      ],
+      InkWell(
+      onTap: () {
+       if (_moveSelectedPhotoMode) {
+       setState(() => _moveSelectedPhotoMode = false);
+       }
+       _toggleMyLocation();
+      },
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+       padding: const EdgeInsets.symmetric(
+        horizontal: 10, vertical: 7),
+       decoration: BoxDecoration(
+       color:
+        _showMyLocation ? Colors.amber : Colors.black87,
+       borderRadius: BorderRadius.circular(8),
+       border: Border.all(
+        color: _showMyLocation
+         ? Colors.amber
+         : Colors.white54,
+        width: 1.2,
+       ),
+       ),
+       child: Row(
+       mainAxisSize: MainAxisSize.min,
+       children: [
+        Icon(
+        _showMyLocation
+         ? Icons.my_location
+         : Icons.location_searching,
         color: _showMyLocation
          ? Colors.black
          : Colors.white,
-        fontSize: 11.5,
-        fontWeight: FontWeight.bold,
+        size: 16,
+        ),
+        const SizedBox(width: 4),
+        Text(
+        _showMyLocation
+         ? (forcedUserLat != null
+          ? '강제위치 ON'
+          : '내 위치 ON')
+         : '내 위치 표기',
+        style: TextStyle(
+         color: _showMyLocation
+          ? Colors.black
+          : Colors.white,
+         fontSize: 11.5,
+         fontWeight: FontWeight.bold,
+        ),
+        ),
+       ],
        ),
-       ),
-      ],
       ),
-     ),
+      ),
+     ],
      ),
     ),
     ],
