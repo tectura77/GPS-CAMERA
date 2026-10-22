@@ -357,6 +357,7 @@ class _CameraScreenState extends State<CameraScreen> {
    Permission.location,
    Permission.storage,
    Permission.photos,
+   Permission.accessMediaLocation,
   ].request();
   await _restorePhotos();
   await loadDefaultCategory(_photoList);
@@ -1091,6 +1092,212 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
    await metaFile.writeAsString(raw);
   } catch (e) {
    debugPrint('Photo meta save error: $e');
+  }
+ }
+
+ double? _parseRationalToken(String token) {
+  final String clean = token.trim();
+  if (clean.isEmpty) return null;
+  if (clean.contains('/')) {
+   final List<String> parts = clean.split('/');
+   if (parts.length == 2) {
+    final double? n = double.tryParse(parts[0].trim());
+    final double? d = double.tryParse(parts[1].trim());
+    if (n != null && d != null && d != 0) return n / d;
+   }
+  }
+  return double.tryParse(clean);
+ }
+
+ double? _parseExifCoord(Object? raw, String? ref) {
+  if (raw == null) return null;
+  final String s =
+    raw.toString().replaceAll('[', '').replaceAll(']', '').trim();
+  if (s.isEmpty) return null;
+  final List<String> parts = s.split(',');
+  double? deg;
+  if (parts.length >= 3) {
+   final double? d = _parseRationalToken(parts[0]);
+   final double? m = _parseRationalToken(parts[1]);
+   final double? sec = _parseRationalToken(parts[2]);
+   if (d != null && m != null && sec != null) {
+    deg = d.abs() + (m.abs() / 60.0) + (sec.abs() / 3600.0);
+   }
+  } else {
+   deg = _parseRationalToken(parts[0]);
+  }
+  if (deg == null || deg.isNaN) return null;
+  final String r = (ref ?? '').trim().toUpperCase();
+  if (r == 'S' || r == 'W' || s.startsWith('-')) return -deg.abs();
+  return deg.abs();
+ }
+
+ // 갤러리에서 기존 사진(외부 카메라 촬영본 포함)을 불러와 EXIF 메타데이터 위치에 표시
+ Future<void> _importPhotosFromGallery() async {
+  try {
+   try {
+    await Permission.accessMediaLocation.request();
+   } catch (_) {}
+
+   final ImagePicker picker = ImagePicker();
+   final List<XFile> pickedFiles = await picker.pickMultiImage();
+   if (pickedFiles.isEmpty) return;
+
+   setState(() => _isExporting = true);
+
+   final Directory docDir = await getApplicationDocumentsDirectory();
+   int addedCount = 0;
+   int exifGpsCount = 0;
+   int fallbackCount = 0;
+
+   double defaultLat = forcedUserLat ?? _myCurrentPos?.latitude ?? 37.4984;
+   double defaultLng = forcedUserLng ?? _myCurrentPos?.longitude ?? 127.1324;
+   if (_mapCtrl != null && forcedUserLat == null) {
+    try {
+     final camPos = await _mapCtrl!.getCameraPosition();
+     defaultLat = camPos.target.latitude;
+     defaultLng = camPos.target.longitude;
+    } catch (_) {}
+   }
+
+   for (int i = 0; i < pickedFiles.length; i++) {
+    final XFile picked = pickedFiles[i];
+    double? lat;
+    double? lng;
+    double alt = 0.0;
+    double azimuth = -1.0;
+    String? timeStr;
+
+    try {
+     final Exif exif = await Exif.fromPath(picked.path);
+     try {
+      final dynamic latLong = await exif.getLatLong();
+      if (latLong != null) {
+       lat = (latLong.latitude as num).toDouble();
+       lng = (latLong.longitude as num).toDouble();
+      }
+     } catch (_) {}
+
+     final Map<String, Object>? attrs = await exif.getAttributes();
+     if ((lat == null || lng == null || (lat == 0.0 && lng == 0.0)) &&
+       attrs != null) {
+      lat = _parseExifCoord(
+        attrs['GPSLatitude'], attrs['GPSLatitudeRef']?.toString());
+      lng = _parseExifCoord(
+        attrs['GPSLongitude'], attrs['GPSLongitudeRef']?.toString());
+     }
+
+     if (attrs != null) {
+      final double? parsedAlt =
+        _parseRationalToken(attrs['GPSAltitude']?.toString() ?? '');
+      if (parsedAlt != null) {
+       final String altRef =
+         attrs['GPSAltitudeRef']?.toString().trim() ?? '0';
+       alt = (altRef == '1') ? -parsedAlt.abs() : parsedAlt;
+      }
+      final double? parsedAz =
+        _parseRationalToken(attrs['GPSImgDirection']?.toString() ?? '');
+      if (parsedAz != null && !parsedAz.isNaN) {
+       azimuth = (parsedAz % 360 + 360) % 360;
+      }
+     }
+
+     try {
+      final DateTime? origDt = await exif.getOriginalDate();
+      if (origDt != null) {
+       timeStr = origDt.toString().substring(0, 16);
+      }
+     } catch (_) {}
+
+     if (timeStr == null && attrs != null) {
+      final String? rawDt =
+        (attrs['DateTimeOriginal'] ?? attrs['DateTime'])?.toString();
+      if (rawDt != null && rawDt.trim().length >= 16) {
+       final String cleanDt = rawDt.trim().substring(0, 16);
+       timeStr = cleanDt.replaceFirst(':', '-').replaceFirst(':', '-');
+      }
+     }
+
+     await exif.close();
+    } catch (e) {
+     debugPrint('EXIF read error: $e');
+    }
+
+    if (timeStr == null || timeStr.length < 10) {
+     try {
+      final DateTime modDt = await File(picked.path).lastModified();
+      timeStr = modDt.toString().substring(0, 16);
+     } catch (_) {
+      timeStr = DateTime.now().toString().substring(0, 16);
+     }
+    }
+
+    final bool hasValidExifGps =
+      lat != null && lng != null && (lat.abs() > 0.0001 || lng.abs() > 0.0001);
+    final double finalLat = hasValidExifGps ? lat! : defaultLat;
+    final double finalLng = hasValidExifGps ? lng! : defaultLng;
+    if (hasValidExifGps) {
+     exifGpsCount++;
+    } else {
+     fallbackCount++;
+    }
+
+    final String folderDate = timeStr.substring(0, 10);
+    final Directory dayDir = Directory('${docDir.path}/$folderDate');
+    if (!await dayDir.exists()) {
+     await dayDir.create(recursive: true);
+    }
+
+    final int nowMs = DateTime.now().millisecondsSinceEpoch + i;
+    final String targetPath = '${dayDir.path}/imported_$nowMs.jpg';
+    await File(picked.path).copy(targetPath);
+
+    widget.photos.add(PhotoItem(
+     path: targetPath,
+     lat: finalLat,
+     lng: finalLng,
+     alt: alt,
+     acc: 1.0,
+     azimuth: azimuth,
+     pitch: 0.0,
+     timestamp: timeStr,
+     category: currentDefaultCategory,
+    ));
+    addedCount++;
+   }
+
+   if (addedCount > 0) {
+    await _persistPhotoMetadata();
+    setState(() {
+     _dateFilter = '전체 보기';
+     _categoryFilter = '전체 카테고리';
+     _selectedIdx = _visiblePhotos.isNotEmpty ? _visiblePhotos.length - 1 : 0;
+    });
+    await _refreshAllOverlays(includeBlueprint: true);
+    if (_visiblePhotos.isNotEmpty) {
+     final PhotoItem lastAdded = _visiblePhotos[_selectedIdx];
+     _panMapKeepZoom(lastAdded.lat, lastAdded.lng);
+    }
+    if (mounted) {
+     final String msg = fallbackCount == 0
+       ? '📸 사진 ${addedCount}장의 EXIF 위치를 읽어 지도에 동그라미로 표시했습니다!'
+       : '📸 사진 ${addedCount}장 불러오기 완료 (EXIF 좌표 ${exifGpsCount}장 / 현재 위치 대체 ${fallbackCount}장)';
+     ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+       content: Text(msg),
+       duration: const Duration(seconds: 2),
+      ),
+     );
+    }
+   }
+  } catch (e) {
+   if (mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+     SnackBar(content: Text('사진 불러오기 오류: $e')),
+    );
+   }
+  } finally {
+   if (mounted) setState(() => _isExporting = false);
   }
  }
 
@@ -2111,8 +2318,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 
  Future<NOverlayImage> _getCachedMarkerIcon(
    double azimuth, bool selected) async {
-  final int degStep = (((azimuth % 360 + 360) % 360) / 5).round() * 5 % 360;
-  final String key = '${selected ? "sel" : "unsel"}_$degStep';
+  final bool noDir = azimuth < 0;
+  final int degStep =
+    noDir ? -1 : (((azimuth % 360 + 360) % 360) / 5).round() * 5 % 360;
+  final String key =
+    noDir ? '${selected ? "sel" : "unsel"}_circle' : '${selected ? "sel" : "unsel"}_$degStep';
   if (globalMarkerIconCache.containsKey(key)) {
    return globalMarkerIconCache[key]!;
   }
@@ -2126,15 +2336,24 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       width: 28,
       height: 28,
       decoration: BoxDecoration(
-       color: c.withOpacity(0.3),
+       color: c.withOpacity(0.35),
        shape: BoxShape.circle,
-       border: Border.all(color: c, width: 2),
+       border: Border.all(color: c, width: 2.2),
       ),
      ),
-     Transform.rotate(
-      angle: degStep * (pi / 180.0),
-      child: Icon(Icons.navigation, color: c, size: 20),
-     ),
+     noDir
+       ? Container(
+         width: 11,
+         height: 11,
+         decoration: BoxDecoration(
+          color: c,
+          shape: BoxShape.circle,
+         ),
+        )
+       : Transform.rotate(
+         angle: degStep * (pi / 180.0),
+         child: Icon(Icons.navigation, color: c, size: 20),
+        ),
     ],
    ),
    size: const Size(28, 28),
@@ -2562,7 +2781,7 @@ function selectPhoto(idx) {
  const p = photos[idx];
  mainImg.src = p.b64;
  document.getElementById('info-txt').innerText =
-  `[\${p.category}] 위도: \${p.lat.toFixed(6)} | 경도: \${p.lng.toFixed(6)} | 방위각: \${p.azimuth.toFixed(1)}° | \${p.time}` + (p.memo ? ` | 메모: \${p.memo}` : '');
+  `[\${p.category}] 위도: \${p.lat.toFixed(6)} | 경도: \${p.lng.toFixed(6)} | \${p.azimuth >= 0 ? "방위각: " + p.azimuth.toFixed(1) + "° | " : ""}` + `\${p.time}` + (p.memo ? ` | 메모: \${p.memo}` : '');
  renderThumbnails();
  renderMarkers();
  map.panTo([p.lat, p.lng]);
@@ -2595,12 +2814,13 @@ function renderMarkers() {
   const isSel = (i === selectedIdx);
   const color = isSel ? '#2979ff' : '#f44336';
   const zIdx = isSel ? 1000 : 100;
+  const noDir = p.azimuth < 0;
   const htmlIcon = L.divIcon({
    className: '',
    iconSize: [28, 28],
    iconAnchor: [14, 14],
-   html: `<div style="width:24px;height:24px;border-radius:50%;background:\${color}4d;border:2px solid \${color};display:flex;align-items:center;justify-content:center;transform:rotate(\${p.azimuth}deg);">
-       <span style="color:\${color};font-size:14px;font-weight:bold;">▲</span>
+   html: `<div style="width:24px;height:24px;border-radius:50%;background:\${color}4d;border:2px solid \${color};display:flex;align-items:center;justify-content:center;\${noDir ? '' : 'transform:rotate(' + p.azimuth + 'deg);'}">
+       <span style="color:\${color};font-size:\${noDir ? '12px' : '14px'};font-weight:bold;">\${noDir ? '●' : '▲'}</span>
       </div>`
   });
   const m = L.marker([p.lat, p.lng], { icon: htmlIcon, zIndexOffset: zIdx }).addTo(markersLayer);
@@ -3651,10 +3871,28 @@ if (photos.length > 0) {
          ],
         ),
        )
-      : const Center(
-        child: Text(
-         '저장된 사진이 없습니다.',
-         style: TextStyle(color: Colors.white),
+      : Center(
+        child: Column(
+         mainAxisSize: MainAxisSize.min,
+         children: [
+          const Text(
+           '저장된 사진이 없습니다.',
+           style: TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          const SizedBox(height: 10),
+          ElevatedButton.icon(
+           onPressed: _isExporting ? null : _importPhotosFromGallery,
+           icon: const Icon(Icons.photo_library, size: 17),
+           label: const Text(
+            '기존 사진 불러오기 (EXIF 위치 표시)',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+           ),
+           style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.amber,
+            foregroundColor: Colors.black,
+           ),
+          ),
+         ],
         ),
        ));
 
@@ -3921,10 +4159,30 @@ if (photos.length > 0) {
        ),
       ),
       InkWell(
+       onTap: _isExporting ? null : _importPhotosFromGallery,
+       borderRadius: BorderRadius.circular(4),
+       child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
+        child: Row(
+         mainAxisSize: MainAxisSize.min,
+         children: [
+          const Icon(Icons.photo_library,
+            color: Colors.lightGreenAccent, size: 14),
+          const SizedBox(width: 2),
+          Text(
+           '사진추가',
+           style: unifiedTopTextStyle.copyWith(
+             color: Colors.lightGreenAccent),
+          ),
+         ],
+        ),
+       ),
+      ),
+      InkWell(
        onTap: _isExporting ? null : _showExportOptionsSheet,
        borderRadius: BorderRadius.circular(4),
        child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
         child: Row(
          mainAxisSize: MainAxisSize.min,
          children: [
