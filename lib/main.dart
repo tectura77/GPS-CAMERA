@@ -1,3 +1,4 @@
+```dart
 import 'dart:io';
 import 'dart:math';
 import 'dart:convert';
@@ -24,6 +25,10 @@ String? naverAuthErrorMsg;
 
 // 마지막으로 설정하거나 변경한 카테고리를 기억하는 전역 변수 (다음 촬영 시 자동 적용)
 String currentDefaultCategory = '미분류';
+
+// 내 위치 표기 유지 및 강제 이동 좌표 전역 변수 (null이면 실시간 GPS 사용)
+bool globalShowMyLocation = false;
+NLatLng? forcedUserLocation;
 
 Future<void> saveDefaultCategory(String cat) async {
   currentDefaultCategory = cat.trim().isEmpty ? '미분류' : cat.trim();
@@ -520,7 +525,13 @@ class _CameraScreenState extends State<CameraScreen> {
       final Uint8List rawBytes = await rawFile.readAsBytes();
       img.Image? decodedImg = img.decodeImage(rawBytes);
 
-      if (decodedImg != null && _pos != null) {
+      final double? useLat = forcedUserLocation?.latitude ?? _pos?.latitude;
+      final double? useLng = forcedUserLocation?.longitude ?? _pos?.longitude;
+      final double useAlt = _pos?.altitude ?? 0.0;
+      final double useAcc =
+          forcedUserLocation != null ? 1.0 : (_pos?.accuracy ?? 5.0);
+
+      if (decodedImg != null && useLat != null && useLng != null) {
         decodedImg = img.bakeOrientation(decodedImg);
 
         final int w = decodedImg.width;
@@ -558,13 +569,13 @@ class _CameraScreenState extends State<CameraScreen> {
         final String nowStr = DateTime.now().toString().substring(0, 16);
         final String folderDate = nowStr.substring(0, 10);
         final String dirEn = _compassLabel(_heading, korean: false);
-        final double hAcc = _pos!.accuracy;
+        final double hAcc = useAcc;
         final double vAcc = hAcc * 1.5;
 
         final String stamp =
-            'Lat: ${_pos!.latitude.toStringAsFixed(6)} (+-${hAcc.toStringAsFixed(1)}m)\n'
-            'Lng: ${_pos!.longitude.toStringAsFixed(6)} (+-${hAcc.toStringAsFixed(1)}m)\n'
-            'Alt: ${_pos!.altitude.toStringAsFixed(1)}m (+-${vAcc.toStringAsFixed(1)}m)\n'
+            'Lat: ${useLat.toStringAsFixed(6)} (+-${hAcc.toStringAsFixed(1)}m)\n'
+            'Lng: ${useLng.toStringAsFixed(6)} (+-${hAcc.toStringAsFixed(1)}m)\n'
+            'Alt: ${useAlt.toStringAsFixed(1)}m (+-${vAcc.toStringAsFixed(1)}m)\n'
             'Azimuth: ${_heading.toStringAsFixed(1)} deg ($dirEn)\n'
             'Pitch: ${_tiltPitch.toStringAsFixed(1)} deg\n'
             'Time: $nowStr';
@@ -590,16 +601,16 @@ class _CameraScreenState extends State<CameraScreen> {
         await File(targetPath).writeAsBytes(jpgBytes);
 
         final int azRational = (_heading.clamp(0.0, 360.0) * 100).round();
-        final int altRational = (_pos!.altitude.abs() * 100).round();
+        final int altRational = (useAlt.abs() * 100).round();
 
         final exif = await Exif.fromPath(targetPath);
         await exif.writeAttributes({
-          'GPSLatitude': _pos!.latitude.abs().toString(),
-          'GPSLatitudeRef': _pos!.latitude >= 0 ? 'N' : 'S',
-          'GPSLongitude': _pos!.longitude.abs().toString(),
-          'GPSLongitudeRef': _pos!.longitude >= 0 ? 'E' : 'W',
+          'GPSLatitude': useLat.abs().toString(),
+          'GPSLatitudeRef': useLat >= 0 ? 'N' : 'S',
+          'GPSLongitude': useLng.abs().toString(),
+          'GPSLongitudeRef': useLng >= 0 ? 'E' : 'W',
           'GPSAltitude': '$altRational/100',
-          'GPSAltitudeRef': _pos!.altitude >= 0 ? '0' : '1',
+          'GPSAltitudeRef': useAlt >= 0 ? '0' : '1',
           'GPSImgDirection': '$azRational/100',
           'GPSImgDirectionRef': 'T',
         });
@@ -612,9 +623,9 @@ class _CameraScreenState extends State<CameraScreen> {
         setState(() {
           _photoList.add(PhotoItem(
             path: targetPath,
-            lat: _pos!.latitude,
-            lng: _pos!.longitude,
-            alt: _pos!.altitude,
+            lat: useLat,
+            lng: useLng,
+            alt: useAlt,
             acc: hAcc,
             azimuth: _heading,
             pitch: _tiltPitch,
@@ -656,7 +667,13 @@ class _CameraScreenState extends State<CameraScreen> {
 
     final String dirKr = _compassLabel(_heading, korean: true);
     String locInfo = '위치 정보 수신 중...';
-    if (_pos != null) {
+    if (forcedUserLocation != null) {
+      final double altVal = _pos?.altitude ?? 0.0;
+      locInfo =
+          '위도: ${forcedUserLocation!.latitude.toStringAsFixed(6)} (📌강제위치)\n'
+          '경도: ${forcedUserLocation!.longitude.toStringAsFixed(6)} (📌강제위치)\n'
+          '표고: ${altVal.toStringAsFixed(1)}m';
+    } else if (_pos != null) {
       final double acc = _pos!.accuracy;
       locInfo =
           '위도: ${_pos!.latitude.toStringAsFixed(6)} (±${acc.toStringAsFixed(1)}m)\n'
@@ -750,22 +767,66 @@ class _CameraScreenState extends State<CameraScreen> {
           Positioned(
             left: 16,
             bottom: (landscape ? 16 : 88) + liftOffset,
-            child: IgnorePointer(
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (forcedUserLocation != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: InkWell(
+                      onTap: () {
+                        setState(() => forcedUserLocation = null);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('🛰️ 실시간 GPS 위치 모드로 복귀했습니다.'),
+                            duration: Duration(milliseconds: 1100),
+                          ),
+                        );
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: Colors.amber,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.push_pin, size: 14, color: Colors.black),
+                            SizedBox(width: 4),
+                            Text(
+                              '강제 이동 위치 적용 중 (터치 시 GPS 복귀)',
+                              style: TextStyle(
+                                color: Colors.black,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                IgnorePointer(
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '카테고리: $currentDefaultCategory\n'
+                      '$locInfo\n방위각: ${_heading.toStringAsFixed(1)}° ($dirKr)\n'
+                      '피치각: ${_tiltPitch.toStringAsFixed(1)}° | 배율: ${_currentZoom.toStringAsFixed(1)}x\n'
+                      '시간: ${DateTime.now().toString().substring(0, 16)}',
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                    ),
+                  ),
                 ),
-                child: Text(
-                  '카테고리: $currentDefaultCategory\n'
-                  '$locInfo\n방위각: ${_heading.toStringAsFixed(1)}° ($dirKr)\n'
-                  '피치각: ${_tiltPitch.toStringAsFixed(1)}° | 배율: ${_currentZoom.toStringAsFixed(1)}x\n'
-                  '시간: ${DateTime.now().toString().substring(0, 16)}',
-                  style: const TextStyle(color: Colors.white, fontSize: 12),
-                ),
-              ),
+              ],
             ),
           ),
           Positioned(
@@ -925,6 +986,10 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
   @override
   void initState() {
     super.initState();
+    _showMyLocation = globalShowMyLocation || forcedUserLocation != null;
+    if (_showMyLocation) {
+      _startMyLocationStream();
+    }
     _restoreCategories();
     _bpLoadFuture = _restoreBlueprintConfig();
     if (_visiblePhotos.isNotEmpty) {
@@ -1156,14 +1221,19 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     return icon;
   }
 
-  // 지도 위에 내 위치 마커만 단독 갱신
+  // 지도 위에 내 위치 마커만 단독 갱신 (강제 이동 위치가 있으면 해당 위치 우선 표시)
   Future<void> _updateMyLocationMarkerOnly() async {
-    if (_mapCtrl == null || !_showMyLocation || _myCurrentPos == null) return;
+    if (_mapCtrl == null || !_showMyLocation) return;
+    final NLatLng? targetLatLng = forcedUserLocation ??
+        (_myCurrentPos != null
+            ? NLatLng(_myCurrentPos!.latitude, _myCurrentPos!.longitude)
+            : null);
+    if (targetLatLng == null) return;
     try {
       final icon = await _getMyLocationIcon();
       final myMarker = NMarker(
         id: 'my_current_location_marker',
-        position: NLatLng(_myCurrentPos!.latitude, _myCurrentPos!.longitude),
+        position: targetLatLng,
         icon: icon,
       );
       await _mapCtrl!.addOverlay(myMarker);
@@ -1172,17 +1242,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
     }
   }
 
-  // 내 위치 표기 버튼 ON / OFF 토글
-  Future<void> _toggleMyLocation() async {
-    if (_showMyLocation) {
-      await _myLocStreamSub?.cancel();
-      _myLocStreamSub = null;
-      setState(() => _showMyLocation = false);
-      await _refreshAllOverlays(includeBlueprint: true);
-      return;
-    }
-
-    setState(() => _showMyLocation = true);
+  Future<void> _startMyLocationStream() async {
     try {
       final pos = await Geolocator.getLastKnownPosition() ??
           await Geolocator.getCurrentPosition(
@@ -1191,7 +1251,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
           );
       if (!mounted || !_showMyLocation) return;
       setState(() => _myCurrentPos = pos);
-      _panMapKeepZoom(pos.latitude, pos.longitude);
       await _updateMyLocationMarkerOnly();
     } catch (e) {
       debugPrint('Get current pos error: $e');
@@ -1205,6 +1264,34 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
       _myCurrentPos = p;
       _updateMyLocationMarkerOnly();
     });
+  }
+
+  // 내 위치 표기 버튼 ON / OFF 토글
+  Future<void> _toggleMyLocation() async {
+    if (_showMyLocation) {
+      await _myLocStreamSub?.cancel();
+      _myLocStreamSub = null;
+      setState(() {
+        _showMyLocation = false;
+        globalShowMyLocation = false;
+        forcedUserLocation = null;
+      });
+      await _refreshAllOverlays(includeBlueprint: true);
+      return;
+    }
+
+    setState(() {
+      _showMyLocation = true;
+      globalShowMyLocation = true;
+    });
+    await _startMyLocationStream();
+    final NLatLng? target = forcedUserLocation ??
+        (_myCurrentPos != null
+            ? NLatLng(_myCurrentPos!.latitude, _myCurrentPos!.longitude)
+            : null);
+    if (target != null) {
+      _panMapKeepZoom(target.latitude, target.longitude);
+    }
   }
 
   Future<void> _showBlueprintActionMenuDialog() async {
@@ -3685,6 +3772,24 @@ if (photos.length > 0) {
                     onCameraIdle: () {
                       _updateMapViewportInfo();
                     },
+                    onMapTapped: (point, latLng) async {
+                      if (!_showMyLocation || _bpEditMode) return;
+                      setState(() {
+                        forcedUserLocation = latLng;
+                      });
+                      await _updateMyLocationMarkerOnly();
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              '📌 내 위치가 터치한 지점으로 강제 이동되었습니다. 이제 촬영하면 이 좌표로 저장됩니다!',
+                            ),
+                            duration: Duration(milliseconds: 1400),
+                          ),
+                        );
+                      }
+                    },
                   ),
                   if (_useLiveActiveBpOverlay)
                     _buildLiveBlueprintOverlayWidget(_mapWidgetSize),
@@ -3713,53 +3818,137 @@ if (photos.length > 0) {
                         child: Container(color: Colors.transparent),
                       ),
                     ),
-                  // 지도 우측 상단 '내 위치 표기' 켜기/끄기 버튼
+                  // 지도 우측 상단 '내 위치 표기' 켜기/끄기 및 강제위치 복귀 버튼
                   Positioned(
                     top: 10,
                     right: 10,
-                    child: InkWell(
-                      onTap: _toggleMyLocation,
-                      borderRadius: BorderRadius.circular(8),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 7),
-                        decoration: BoxDecoration(
-                          color:
-                              _showMyLocation ? Colors.amber : Colors.black87,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: _showMyLocation
-                                ? Colors.amber
-                                : Colors.white54,
-                            width: 1.2,
-                          ),
-                        ),
-                        child: Row(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(
-                              _showMyLocation
-                                  ? Icons.my_location
-                                  : Icons.location_searching,
-                              color: _showMyLocation
-                                  ? Colors.black
-                                  : Colors.white,
-                              size: 16,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              _showMyLocation ? '내 위치 ON' : '내 위치 표기',
-                              style: TextStyle(
-                                color: _showMyLocation
-                                    ? Colors.black
-                                    : Colors.white,
-                                fontSize: 11.5,
-                                fontWeight: FontWeight.bold,
+                            if (_showMyLocation && forcedUserLocation != null)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 6),
+                                child: InkWell(
+                                  onTap: () async {
+                                    setState(() {
+                                      forcedUserLocation = null;
+                                    });
+                                    await _updateMyLocationMarkerOnly();
+                                    if (_myCurrentPos != null) {
+                                      _panMapKeepZoom(_myCurrentPos!.latitude,
+                                          _myCurrentPos!.longitude);
+                                    }
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .hideCurrentSnackBar();
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                          content:
+                                              Text('🛰️ 실시간 GPS 위치로 복귀했습니다.'),
+                                          duration:
+                                              Duration(milliseconds: 1100),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 7),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black87,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                          color: Colors.lightGreenAccent,
+                                          width: 1.2),
+                                    ),
+                                    child: const Text(
+                                      'GPS 복귀',
+                                      style: TextStyle(
+                                        color: Colors.lightGreenAccent,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            InkWell(
+                              onTap: _toggleMyLocation,
+                              borderRadius: BorderRadius.circular(8),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 7),
+                                decoration: BoxDecoration(
+                                  color: _showMyLocation
+                                      ? Colors.amber
+                                      : Colors.black87,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: _showMyLocation
+                                        ? Colors.amber
+                                        : Colors.white54,
+                                    width: 1.2,
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      _showMyLocation
+                                          ? (forcedUserLocation != null
+                                              ? Icons.push_pin
+                                              : Icons.my_location)
+                                          : Icons.location_searching,
+                                      color: _showMyLocation
+                                          ? Colors.black
+                                          : Colors.white,
+                                      size: 16,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      _showMyLocation
+                                          ? (forcedUserLocation != null
+                                              ? '강제위치 ON'
+                                              : '내 위치 ON')
+                                          : '내 위치 표기',
+                                      style: TextStyle(
+                                        color: _showMyLocation
+                                            ? Colors.black
+                                            : Colors.white,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ],
                         ),
-                      ),
+                        if (_showMyLocation)
+                          Container(
+                            margin: const EdgeInsets.only(top: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 7, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.black87,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Text(
+                              '💡 지도/도면을 터치하면 내 위치가 강제 이동됩니다',
+                              style: TextStyle(
+                                color: Colors.amberAccent,
+                                fontSize: 10.5,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 ],
@@ -4027,8 +4216,10 @@ if (photos.length > 0) {
     }
 
     // 내 위치 표기가 켜져 있으면 마커 유지
-    if (_showMyLocation && _myCurrentPos != null) {
+    if (_showMyLocation &&
+        (_myCurrentPos != null || forcedUserLocation != null)) {
       await _updateMyLocationMarkerOnly();
     }
   }
 }
+```
