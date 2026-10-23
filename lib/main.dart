@@ -1381,21 +1381,65 @@ Future<Map<String, dynamic>> _extractPhotoMetaFromPath(String path) async {
  } catch (_) {}
  return out;
 }
-Future<Map<String, dynamic>> _fastDirectPathLookup(
- XFile picked, String? rawDateTime) async {
- final List<String> directPaths = [];
- final String pickedName = picked.name;
- for (final String dir in [
+List<File> _listGalleryFilePathsFast() {
+ final List<String> roots = [
  '/storage/emulated/0/DCIM/Camera',
  '/storage/emulated/0/Pictures',
  '/storage/emulated/0/Pictures/KakaoTalk',
+ '/storage/emulated/0/DCIM',
  '/storage/emulated/0/Download',
- ]) {
- directPaths.add('$dir/$pickedName');
+ ];
+ final Set<String> visitedDirs = {};
+ final Set<String> seenPaths = {};
+ final List<File> out = [];
+ void scanDir(String dirPath, int depth) {
+ if (depth > 1 || visitedDirs.contains(dirPath)) return;
+ visitedDirs.add(dirPath);
+ try {
+  final Directory d = Directory(dirPath);
+  if (!d.existsSync()) return;
+  for (final FileSystemEntity ent in d.listSync(recursive: false)) {
+  if (ent is Directory && depth < 1) {
+   final String name = ent.path.split('/').last;
+   if (!name.startsWith('.')) scanDir(ent.path, depth + 1);
+  } else if (ent is File) {
+   final String p = ent.path;
+   if (seenPaths.contains(p)) continue;
+   final String low = p.toLowerCase();
+   if (low.endsWith('.jpg') ||
+    low.endsWith('.jpeg') ||
+    low.endsWith('.heic') ||
+    low.endsWith('.png')) {
+   seenPaths.add(p);
+   out.add(ent);
+   }
+  }
+  }
+ } catch (_) {}
  }
+ for (final String r in roots) {
+ scanDir(r, 0);
+ }
+ return out;
+}
+Future<Map<String, dynamic>> _fastPinpointOriginalGps(
+ XFile picked,
+ String? rawDateTime,
+ List<File> cachedGalleryFiles,
+) async {
+ final String pickedName = picked.name;
+ int pickedSize = 0;
+ try {
+ pickedSize = await File(picked.path).length();
+ } catch (_) {}
+ final List<String> secTokens = [];
+ String? minToken;
+ String? compactTargetDt;
  if (rawDateTime != null) {
  final String digits = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
  if (digits.length >= 14) {
+  compactTargetDt = digits.substring(0, 14);
+  minToken = '${digits.substring(0, 8)}_${digits.substring(8, 12)}';
   final int? yr = int.tryParse(digits.substring(0, 4));
   final int? mo = int.tryParse(digits.substring(4, 6));
   final int? dy = int.tryParse(digits.substring(6, 8));
@@ -1404,43 +1448,85 @@ Future<Map<String, dynamic>> _fastDirectPathLookup(
   final int? sc = int.tryParse(digits.substring(12, 14));
   if (yr != null && mo != null && dy != null && hr != null && mn != null && sc != null) {
   final DateTime baseDt = DateTime(yr, mo, dy, hr, mn, sc);
-  for (final int dSec in [0, 1, -1, 2, -2, 3]) {
+  for (final int dSec in [0, 1, -1, 2, -2, 3, -3, 4, 5]) {
    final DateTime d = baseDt.add(Duration(seconds: dSec));
    final String s =
     '${d.year.toString().padLeft(4, '0')}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}_'
     '${d.hour.toString().padLeft(2, '0')}${d.minute.toString().padLeft(2, '0')}${d.second.toString().padLeft(2, '0')}';
-   directPaths.add('/storage/emulated/0/DCIM/Camera/$s.jpg');
-   directPaths.add('/storage/emulated/0/DCIM/Camera/IMG_$s.jpg');
-   directPaths.add('/storage/emulated/0/DCIM/Camera/$s.heic');
-   directPaths.add('/storage/emulated/0/Pictures/$s.jpg');
+   secTokens.add(s);
   }
   }
  }
  }
- for (final String p in directPaths) {
- try {
-  final File f = File(p);
-  if (await f.exists()) {
-  final Map<String, dynamic> m = await _extractPhotoMetaFromPath(p);
+ for (final File f in cachedGalleryFiles) {
+ final String fname = f.path.split('/').last;
+ bool hit = (fname == pickedName);
+ if (!hit && secTokens.isNotEmpty) {
+  for (final String st in secTokens) {
+  if (fname.contains(st)) {
+   hit = true;
+   break;
+  }
+  }
+ }
+ if (hit) {
+  final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
   if (m['lat'] != null && m['lng'] != null) return m;
+ }
+ }
+ if (minToken != null) {
+ for (final File f in cachedGalleryFiles) {
+  final String fname = f.path.split('/').last;
+  if (fname.contains(minToken)) {
+  final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
+  if (m['lat'] != null && m['lng'] != null) {
+   if (compactTargetDt == null || m['dateTime'] == null) return m;
+   final String d = m['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
+   if (d.length >= 14 && d.substring(0, 14) == compactTargetDt) return m;
   }
- } catch (_) {}
+  }
+ }
+ }
+ if (pickedSize > 1024) {
+ int checked = 0;
+ for (final File f in cachedGalleryFiles) {
+  if (checked > 400) break;
+  try {
+  final int len = f.lengthSync();
+  checked++;
+  if ((len - pickedSize).abs() <= 1024) {
+   final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
+   if (m['lat'] != null && m['lng'] != null) return m;
+  }
+  } catch (_) {}
+ }
  }
  return {};
 }
 Future<void> _importPhotosFromGallery() async {
  try {
+ try {
+  if (!await Permission.photos.isGranted) {
+  await Permission.photos.request();
+  }
+  if (!await Permission.storage.isGranted) {
+  await Permission.storage.request();
+  }
+  if (!await Permission.accessMediaLocation.isGranted) {
+  await Permission.accessMediaLocation.request();
+  }
+ } catch (_) {}
  final ImagePicker picker = ImagePicker();
  final List<XFile> pickedFiles = await picker.pickMultiImage(
   requestFullMetadata: true,
  );
  if (pickedFiles.isEmpty) return;
  setState(() => _isExporting = true);
- try {
-  if (!await Permission.accessMediaLocation.isGranted) {
-  await Permission.accessMediaLocation.request();
-  }
- } catch (_) {}
+ await Future.delayed(const Duration(milliseconds: 16));
+ final bool hasMediaLocPerm = await Permission.accessMediaLocation.isGranted;
+ final bool hasPhotoPerm =
+  (await Permission.photos.isGranted) || (await Permission.storage.isGranted);
+ List<File>? cachedGalleryFiles;
  final Directory docDir = await getApplicationDocumentsDirectory();
  int addedCount = 0;
  int exifGpsCount = 0;
@@ -1458,8 +1544,12 @@ Future<void> _importPhotosFromGallery() async {
   final XFile picked = pickedFiles[i];
   Map<String, dynamic> meta = await _extractPhotoMetaFromPath(picked.path);
   if (meta['lat'] == null || meta['lng'] == null) {
-  final Map<String, dynamic> recovered =
-   await _fastDirectPathLookup(picked, meta['dateTime'] as String?);
+  cachedGalleryFiles ??= _listGalleryFilePathsFast();
+  final Map<String, dynamic> recovered = await _fastPinpointOriginalGps(
+   picked,
+   meta['dateTime'] as String?,
+   cachedGalleryFiles,
+  );
   if (recovered['lat'] != null && recovered['lng'] != null) {
    meta = {...meta, ...recovered};
   }
@@ -1525,16 +1615,27 @@ Future<void> _importPhotosFromGallery() async {
   if (mounted) {
    String msg;
    if (exifGpsCount > 0) {
-   msg = '📍 $addedCount장 첨부 완료! ($exifGpsCount장 실제 GPS 위치에 동그라미 표시)';
+   msg = '📍 $addedCount장 중 $exifGpsCount장 실제 촬영 GPS 위치에 자동으로 꽂혔습니다!';
    } else if (redactedCount > 0) {
-   msg = '📍 $addedCount장 첨부 완료! (지도 우측 [사진위치 이동]을 켜고 지도를 터치하면 원하는 위치로 즉시 옮겨집니다)';
+   if (!hasPhotoPerm || !hasMediaLocPerm) {
+    msg = '⚠️ 앱 권한(사진:$hasPhotoPerm, 위치원본:$hasMediaLocPerm)이 꺼져 있어 OS가 GPS를 가렸습니다. 우측 [권한설정]에서 사진 및 위치 권한을 모두 허용해주세요.';
    } else {
-   msg = '📍 $addedCount장 첨부 완료! (사진에 저장된 GPS가 없어 현재 지도 중앙에 배치됨 · [사진위치 이동]으로 이동 가능)';
+    msg = '⚠️ 기본 피커가 GPS를 가렸습니다(폴더파일:${cachedGalleryFiles?.length ?? 0}개). 선택창 우측 상단 [⋮ → 찾아보기]로 고르거나 [사진위치 이동]을 눌러 배치하세요.';
+   }
+   } else {
+   msg = '📍 사진 자체에 촬영 당시 기록된 GPS가 없어 현재 지도 위치에 배치되었습니다.';
    }
    ScaffoldMessenger.of(context).showSnackBar(
    SnackBar(
     content: Text(msg),
-    duration: const Duration(seconds: 3),
+    duration: const Duration(seconds: 4),
+    action: (redactedCount > 0 && (!hasPhotoPerm || !hasMediaLocPerm))
+     ? SnackBarAction(
+      label: '권한설정',
+      textColor: Colors.amber,
+      onPressed: () => openAppSettings(),
+     )
+     : null,
    ),
    );
   }
