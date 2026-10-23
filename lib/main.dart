@@ -59,39 +59,11 @@ Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  try {
  final File origFile = File(path);
  if (!origFile.existsSync()) return null;
- final File cacheFile = File('$path.web.jpg');
- if (cacheFile.existsSync()) {
- final Uint8List cached = await cacheFile.readAsBytes();
- if (cached.isNotEmpty) return cached;
+ final Uint8List raw = await origFile.readAsBytes();
+ if (raw.isNotEmpty && !globalHtmlBase64Cache.containsKey(path)) {
+ globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(raw)}';
  }
- return await Isolate.run(() {
- try {
- final File f = File(path);
- final Uint8List raw = f.readAsBytesSync();
- if (raw.length <= 320 * 1024) {
- try {
- File('$path.web.jpg').writeAsBytesSync(raw);
- } catch (_) {}
  return raw;
- }
- final img.Image? decoded = img.decodeImage(raw);
- if (decoded == null) return raw;
- final img.Image resized = decoded.width > 780
- ? img.copyResize(
- decoded,
- width: 780,
- interpolation: img.Interpolation.nearest,
- )
- : decoded;
- final Uint8List jpg = Uint8List.fromList(img.encodeJpg(resized, quality: 72));
- try {
- File('$path.web.jpg').writeAsBytesSync(jpg);
- } catch (_) {}
- return jpg;
- } catch (_) {
- return null;
- }
- });
  } catch (_) {
  return null;
  }
@@ -561,7 +533,27 @@ class _CameraScreenState extends State<CameraScreen> {
  y: max(20, decodedImg.height - 220),
  color: img.ColorRgb8(255, 200, 50),
  );
- final List<int> jpgBytes = img.encodeJpg(decodedImg, quality: 90);
+ final Uint8List rawJpg = Uint8List.fromList(img.encodeJpg(decodedImg, quality: 92));
+ final String metaJson = jsonEncode({
+ 'lat': useLat,
+ 'lng': useLng,
+ 'alt': _pos!.altitude,
+ 'azimuth': _heading,
+ 'time': nowStr,
+ });
+ final String metaTag = 'GPSCAM_META:$metaJson';
+ final List<int> metaUtf8 = utf8.encode(metaTag);
+ final int comLen = metaUtf8.length + 2;
+ final BytesBuilder jpgBuilder = BytesBuilder(copy: false);
+ if (rawJpg.length > 2 && rawJpg[0] == 0xFF && rawJpg[1] == 0xD8) {
+ jpgBuilder.add(rawJpg.sublist(0, 2));
+ jpgBuilder.add([0xFF, 0xFE, (comLen >> 8) & 0xFF, comLen & 0xFF]);
+ jpgBuilder.add(metaUtf8);
+ jpgBuilder.add(rawJpg.sublist(2));
+ } else {
+ jpgBuilder.add(rawJpg);
+ }
+ final Uint8List jpgBytes = jpgBuilder.toBytes();
  final Directory docDir = await getApplicationDocumentsDirectory();
  final Directory dayDir = Directory('${docDir.path}/$folderDate');
  if (!await dayDir.exists()) {
@@ -573,6 +565,8 @@ class _CameraScreenState extends State<CameraScreen> {
  await File(targetPath).writeAsBytes(jpgBytes);
  final int azRational = (_heading.clamp(0.0, 360.0) * 100).round();
  final int altRational = (_pos!.altitude.abs() * 100).round();
+ final String exifDt =
+ '${nowStr.substring(0, 10).replaceAll("-", ":")} ${nowStr.substring(11, 16)}:00';
  try {
  final exif = await Exif.fromPath(targetPath);
  await exif.writeAttributes({
@@ -584,6 +578,9 @@ class _CameraScreenState extends State<CameraScreen> {
  'GPSAltitudeRef': _pos!.altitude >= 0 ? '0' : '1',
  'GPSImgDirection': '$azRational/100',
  'GPSImgDirectionRef': 'T',
+ 'DateTime': exifDt,
+ 'DateTimeOriginal': exifDt,
+ 'ImageDescription': metaTag,
  });
  await exif.close();
  } catch (exifErr) {
@@ -986,18 +983,18 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  try {
  final List<String> paths = [];
  for (final p in widget.photos) {
- if (!File('${p.path}.web.jpg').existsSync()) paths.add(p.path);
- if (p.hasAfterPhoto && !File('${p.afterPath}.web.jpg').existsSync()) {
+ if (!globalHtmlBase64Cache.containsKey(p.path)) paths.add(p.path);
+ if (p.hasAfterPhoto && !globalHtmlBase64Cache.containsKey(p.afterPath!)) {
  paths.add(p.afterPath!);
  }
  }
- for (int i = 0; i < paths.length; i += 3) {
+ for (int i = 0; i < paths.length; i += 6) {
  if (!mounted) return;
  if (_isExporting) {
- await Future.delayed(const Duration(milliseconds: 500));
+ await Future.delayed(const Duration(milliseconds: 300));
  continue;
  }
- final int end = min(i + 3, paths.length);
+ final int end = min(i + 6, paths.length);
  await Future.wait(paths.sublist(i, end).map((path) => encodePhotoForHtmlFast(path)));
  }
  } catch (_) {}
@@ -1159,81 +1156,27 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  final Map<String, List<int>> onMap = {};
  final Map<String, List<int>> offMap = {};
  final Map<String, int> advMap = {};
- int rightmostWhiteX(img.Image c) {
- int maxX = 0;
- for (int py = 0; py < c.height; py++) {
- for (int px = c.width - 1; px > maxX; px--) {
- if (c.getPixel(px, py).r > 128) {
- maxX = px;
- break;
+ final int lh = img.arial24.lineHeight > 0 ? img.arial24.lineHeight : 28;
+ _arial24LineH = lh;
+ int exactStringAdvance(String s) {
+ int sum = 0;
+ for (final int cu in s.codeUnits) {
+ final chObj = img.arial24.characters[cu];
+ if (chObj != null) {
+ sum += chObj.xAdvance;
+ } else {
+ sum += 11;
  }
  }
- }
- return maxX;
- }
- final img.Image refCanvas = img.Image(width: 60, height: 44);
- img.fill(refCanvas, color: img.ColorRgb8(0, 0, 0));
- img.drawString(
- refCanvas,
- 'I',
- font: img.arial24,
- x: 0,
- y: 0,
- color: img.ColorRgb8(255, 255, 255),
- );
- final int refMaxX = rightmostWhiteX(refCanvas);
- int topY0 = 44;
- int botY0 = 0;
- for (int py = 0; py < 44; py++) {
- for (int px = 0; px < 40; px++) {
- if (refCanvas.getPixel(px, py).r > 128) {
- if (py < topY0) topY0 = py;
- if (py > botY0) botY0 = py;
- }
- }
- }
- final img.Image tallCanvas = img.Image(width: 60, height: 96);
- img.fill(tallCanvas, color: img.ColorRgb8(0, 0, 0));
- img.drawString(
- tallCanvas,
- 'I\nI',
- font: img.arial24,
- x: 0,
- y: 0,
- color: img.ColorRgb8(255, 255, 255),
- );
- int topY1 = 96;
- for (int py = botY0 + 2; py < 96; py++) {
- for (int px = 0; px < 40; px++) {
- if (tallCanvas.getPixel(px, py).r > 128) {
- if (py < topY1) topY1 = py;
- }
- }
- }
- _arial24LineH = (topY1 < 96 && topY1 > topY0)
- ? (topY1 - topY0)
- : (img.arial24.lineHeight > 0 ? img.arial24.lineHeight : 28);
- final int lh = _arial24LineH;
- int measureStringAdvance(String s) {
- final img.Image c = img.Image(width: 260, height: 48);
- img.fill(c, color: img.ColorRgb8(0, 0, 0));
- img.drawString(
- c,
- '${s}I',
- font: img.arial24,
- x: 0,
- y: 0,
- color: img.ColorRgb8(255, 255, 255),
- );
- return max(1, rightmostWhiteX(c) - refMaxX);
+ return sum;
  }
  for (final String pref in ['Lat: ', 'Lng: ', 'Alt: ', 'Azimuth: ', 'Time: ']) {
- advMap[pref] = measureStringAdvance(pref);
+ advMap[pref] = exactStringAdvance(pref);
  }
  const String chars = '0123456789.-:m ';
  for (int i = 0; i < chars.length; i++) {
  final String ch = chars[i];
- final int adv = measureStringAdvance(ch);
+ final int adv = exactStringAdvance(ch);
  advMap[ch] = adv;
  final img.Image canvas = img.Image(width: 48, height: lh + 6);
  img.fill(canvas, color: img.ColorRgb8(0, 0, 0));
@@ -1247,11 +1190,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  );
  final Set<int> onSet = {};
  final List<int> onPts = [];
- final int boxW = min(44, max(6, adv));
+ final int boxW = min(44, max(6, adv + 2));
  for (int py = 0; py < lh; py++) {
  for (int px = 0; px < boxW; px++) {
  final int r = canvas.getPixel(px, py).r.toInt();
- if (r > 125) {
+ if (r > 95) {
  onSet.add(py * 64 + px);
  onPts.add(px);
  onPts.add(py);
@@ -1287,6 +1230,30 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  Map<String, dynamic> _extractGpsFromYellowStamp(Uint8List bytes) {
  final Map<String, dynamic> res = {};
  try {
+ try {
+ final String asciiHead =
+ String.fromCharCodes(bytes.sublist(0, min(bytes.length, 65536)));
+ final int idx = asciiHead.indexOf('GPSCAM_META:{');
+ if (idx >= 0) {
+ final int endIdx = asciiHead.indexOf('}', idx);
+ if (endIdx > idx) {
+ final String jsonStr =
+ asciiHead.substring(idx + 'GPSCAM_META:'.length, endIdx + 1);
+ final Map<String, dynamic> m =
+ jsonDecode(jsonStr) as Map<String, dynamic>;
+ if (m['lat'] != null && m['lng'] != null) {
+ res['lat'] = (m['lat'] as num).toDouble();
+ res['lng'] = (m['lng'] as num).toDouble();
+ if (m['alt'] != null) res['alt'] = (m['alt'] as num).toDouble();
+ if (m['azimuth'] != null) {
+ res['azimuth'] = (m['azimuth'] as num).toDouble();
+ }
+ if (m['time'] != null) res['dateTime'] = m['time'].toString();
+ return res;
+ }
+ }
+ }
+ } catch (_) {}
  final img.Image? decoded = img.decodeImage(bytes);
  if (decoded == null || decoded.width < 260 || decoded.height < 180) return res;
  _ensureArial24Templates();
@@ -1300,7 +1267,14 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  bool isYellowPx(int x, int y) {
  if (x < 0 || y < 0 || x >= decoded.width || y >= decoded.height) return false;
  final p = decoded.getPixel(x, y);
- return p.r > 140 && p.g > 105 && (p.r - p.b) > 40 && (p.g - p.b) > 20;
+ return p.r > 135 && p.g > 95 && (p.r - p.b) > 35 && (p.g - p.b) > 15;
+ }
+ double yellowVal(int x, int y) {
+ if (x < 0 || y < 0 || x >= decoded.width || y >= decoded.height) return 0.0;
+ final p = decoded.getPixel(x, y);
+ final double yScore =
+ (p.r * 0.55 + p.g * 0.45) - p.b * 0.85;
+ return (yScore / 135.0).clamp(0.0, 1.0);
  }
  int yellowHits = 0;
  for (int y = baseY; y < min(decoded.height, baseY + 56); y += 2) {
@@ -1308,84 +1282,110 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  if (isYellowPx(x, y)) yellowHits++;
  }
  }
- if (yellowHits < 15) return res;
- String matchBestCharAt(int curX, int ly, String allowed,
- {double minScore = 0.22}) {
- String bestCh = '';
- double bestScore = minScore;
- int bestOnCount = 0;
- for (int i = 0; i < allowed.length; i++) {
- final String ch = allowed[i];
+ if (yellowHits < 12) return res;
+ double scoreCharAt(int cx, int ly, String ch) {
  final List<int>? onPts = onMap[ch];
  final List<int>? offPts = offMap[ch];
- if (onPts == null || offPts == null) continue;
+ if (onPts == null || offPts == null) return -999.0;
  final int nOn = onPts.length ~/ 2;
  final int nOff = offPts.length ~/ 2;
- if (nOn == 0 || nOff == 0) continue;
- int onHits = 0;
+ if (nOn == 0 || nOff == 0) return -999.0;
+ double best = -999.0;
+ for (int dx = -1; dx <= 1; dx++) {
+ double onSum = 0.0;
  for (int k = 0; k < onPts.length; k += 2) {
- if (isYellowPx(curX + onPts[k], ly + onPts[k + 1])) onHits++;
+ onSum += yellowVal(cx + dx + onPts[k], ly + onPts[k + 1]);
  }
- final double tpRate = onHits / nOn;
- if (tpRate < 0.45) continue;
- int offHits = 0;
+ final double tpRate = onSum / nOn;
+ double offSum = 0.0;
  for (int k = 0; k < offPts.length; k += 2) {
- if (isYellowPx(curX + offPts[k], ly + offPts[k + 1])) offHits++;
+ offSum += yellowVal(cx + dx + offPts[k], ly + offPts[k + 1]);
  }
- final double fpRate = offHits / nOff;
- final double score = tpRate - 1.15 * fpRate;
- if (score > bestScore + 0.02 ||
- ((score - bestScore).abs() <= 0.02 && nOn > bestOnCount)) {
- bestScore = score;
+ final double fpRate = offSum / nOff;
+ final double s = tpRate - 1.10 * fpRate - (dx == 0 ? 0.0 : 0.015);
+ if (s > best) best = s;
+ }
+ return best;
+ }
+ MapEntry<String, double> bestDigitAt(int cx, int ly,
+ {String candidates = '0123456789'}) {
+ String bestCh = candidates[0];
+ double bestScore = -999.0;
+ int bestOnCount = 0;
+ for (int i = 0; i < candidates.length; i++) {
+ final String ch = candidates[i];
+ final double s = scoreCharAt(cx, ly, ch);
+ final int nOn = (onMap[ch]?.length ?? 0) ~/ 2;
+ if (s > bestScore + 0.015 ||
+ ((s - bestScore).abs() <= 0.015 && nOn > bestOnCount)) {
+ bestScore = s;
  bestCh = ch;
  bestOnCount = nOn;
  }
  }
- return bestCh;
+ return MapEntry(bestCh, bestScore);
  }
- String decodeFixedDecimalLine(int lineIdx, String prefix, int fracDigits) {
+ MapEntry<String, double> decodePatternCandidate(
+ int lineIdx, String prefix, int intDigits, int fracDigits) {
  final int ly = baseY + lineIdx * lh;
- if (ly + lh >= decoded.height) return '';
+ if (ly + lh >= decoded.height) return const MapEntry('', -999.0);
  int curX = baseX + (advMap[prefix] ?? 50);
  final StringBuffer sb = StringBuffer();
- bool foundDot = false;
- for (int step = 0; step < 6; step++) {
- if (curX + 14 >= decoded.width) return '';
- final String allowed = (step == 0) ? '0123456789-' : '0123456789.';
- final String ch = matchBestCharAt(curX, ly, allowed);
- if (ch.isEmpty) return '';
- sb.write(ch);
- curX += advMap[ch] ?? 12;
- if (ch == '.') {
- foundDot = true;
- break;
+ double sumScore = 0.0;
+ int count = 0;
+ for (int i = 0; i < intDigits; i++) {
+ final String cand = (i == 0) ? '0123456789-' : '0123456789';
+ final e = bestDigitAt(curX, ly, candidates: cand);
+ sb.write(e.key);
+ sumScore += e.value;
+ count++;
+ curX += advMap[e.key] ?? 13;
  }
- }
- if (!foundDot) return '';
+ sb.write('.');
+ curX += advMap['.'] ?? 7;
  for (int f = 0; f < fracDigits; f++) {
- if (curX + 14 >= decoded.width) return '';
- final String ch =
- matchBestCharAt(curX, ly, '0123456789', minScore: 0.10);
- if (ch.isEmpty) return '';
- sb.write(ch);
- curX += advMap[ch] ?? 12;
+ final e = bestDigitAt(curX, ly);
+ sb.write(e.key);
+ sumScore += e.value;
+ count++;
+ curX += advMap[e.key] ?? 13;
  }
- return sb.toString();
+ return MapEntry(sb.toString(), count > 0 ? (sumScore / count) : -999.0);
+ }
+ String decodeBestDecimalLine(
+ int lineIdx, String prefix, List<int> intDigitOptions, int fracDigits) {
+ String bestStr = '';
+ double bestScore = -999.0;
+ for (final int id in intDigitOptions) {
+ final cand = decodePatternCandidate(lineIdx, prefix, id, fracDigits);
+ if (cand.value > bestScore) {
+ bestScore = cand.value;
+ bestStr = cand.key;
+ }
+ }
+ return bestScore > -0.15 ? bestStr : '';
  }
  String decodeTimeLine(int lineIdx) {
  final int ly = baseY + lineIdx * lh;
  if (ly + lh >= decoded.height) return '';
  int curX = baseX + (advMap['Time: '] ?? 66);
  const List<String> pat = [
- '0123456789', '0123456789', '0123456789', '0123456789',
+ '2',
+ '0',
+ '0123456789',
+ '0123456789',
  '-',
- '0123456789', '0123456789',
+ '01',
+ '0123456789',
  '-',
- '0123456789', '0123456789',
+ '0123',
+ '0123456789',
  ' ',
- '0123456789', '0123456789',
+ '012',
+ '0123456789',
  ':',
- '0123456789', '0123456789',
+ '012345',
+ '0123456789',
  ];
  final StringBuffer sb = StringBuffer();
  for (int i = 0; i < pat.length; i++) {
@@ -1394,18 +1394,17 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  sb.write(p);
  curX += advMap[p] ?? 8;
  } else {
- final String ch = matchBestCharAt(curX, ly, p, minScore: 0.10);
- if (ch.isEmpty) return '';
- sb.write(ch);
- curX += advMap[ch] ?? 12;
+ final e = bestDigitAt(curX, ly, candidates: p);
+ sb.write(e.key);
+ curX += advMap[e.key] ?? 13;
  }
  }
  return sb.toString();
  }
- final String latStr = decodeFixedDecimalLine(0, 'Lat: ', 6);
- final String lngStr = decodeFixedDecimalLine(1, 'Lng: ', 6);
- final String altStr = decodeFixedDecimalLine(2, 'Alt: ', 1);
- final String azStr = decodeFixedDecimalLine(3, 'Azimuth: ', 1);
+ final String latStr = decodeBestDecimalLine(0, 'Lat: ', [2, 1], 6);
+ final String lngStr = decodeBestDecimalLine(1, 'Lng: ', [3, 2], 6);
+ final String altStr = decodeBestDecimalLine(2, 'Alt: ', [2, 3, 1], 1);
+ final String azStr = decodeBestDecimalLine(3, 'Azimuth: ', [3, 2, 1], 1);
  final String timeStr = decodeTimeLine(5);
  final double? la = double.tryParse(latStr);
  final double? lo = double.tryParse(lngStr);
@@ -1473,6 +1472,24 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  if (marker == 0xDA || marker == 0xD9) break;
  final int segLen = (bytes[offset + 2] << 8) | bytes[offset + 3];
  if (segLen < 2 || offset + 2 + segLen > bytes.length) break;
+ if (marker == 0xFE && segLen > 14) {
+ try {
+ final String comStr =
+ utf8.decode(bytes.sublist(offset + 4, offset + 2 + segLen), allowMalformed: true);
+ if (comStr.startsWith('GPSCAM_META:')) {
+ final Map<String, dynamic> m =
+ jsonDecode(comStr.substring('GPSCAM_META:'.length)) as Map<String, dynamic>;
+ if (m['lat'] != null && m['lng'] != null) {
+ res['lat'] = (m['lat'] as num).toDouble();
+ res['lng'] = (m['lng'] as num).toDouble();
+ if (m['alt'] != null) res['alt'] = (m['alt'] as num).toDouble();
+ if (m['azimuth'] != null) res['azimuth'] = (m['azimuth'] as num).toDouble();
+ if (m['time'] != null) res['dateTime'] = m['time'].toString();
+ return res;
+ }
+ }
+ } catch (_) {}
+ }
  if (marker == 0xE1 && segLen >= 14) {
  if (bytes[offset + 4] == 0x45 &&
  bytes[offset + 5] == 0x78 &&
@@ -1539,6 +1556,24 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  } else if (tag == 0x0132 && cnt >= 10) {
  final String dt = readAscii(tiffStart + valOff, cnt);
  if (dt.isNotEmpty) res['dateTime'] = dt;
+ } else if (tag == 0x010E && cnt > 12) {
+ final String desc = readAscii(tiffStart + valOff, cnt);
+ if (desc.startsWith('GPSCAM_META:')) {
+ try {
+ final Map<String, dynamic> m =
+ jsonDecode(desc.substring('GPSCAM_META:'.length))
+ as Map<String, dynamic>;
+ if (m['lat'] != null && m['lng'] != null) {
+ res['lat'] = (m['lat'] as num).toDouble();
+ res['lng'] = (m['lng'] as num).toDouble();
+ if (m['alt'] != null) res['alt'] = (m['alt'] as num).toDouble();
+ if (m['azimuth'] != null) {
+ res['azimuth'] = (m['azimuth'] as num).toDouble();
+ }
+ if (m['time'] != null) res['dateTime'] = m['time'].toString();
+ }
+ } catch (_) {}
+ }
  }
  }
  if (exifIfdRel != null) {
@@ -1605,17 +1640,18 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  azVal = readRational(tiffStart + valOff);
  }
  }
- if (latAbs != null &&
+ final bool hasValidCoords = latAbs != null &&
  lngAbs != null &&
- (latAbs > 0.0001 || lngAbs > 0.0001)) {
+ (latAbs > 0.0001 || lngAbs > 0.0001);
+ if (hasValidCoords) {
  res['lat'] = (latRef == 'S') ? -latAbs : latAbs;
  res['lng'] = (lngRef == 'W') ? -lngAbs : lngAbs;
- }
  if (altVal != null) {
  res['alt'] = (altRef == 1) ? -altVal.abs() : altVal;
  }
  if (azVal != null && !azVal.isNaN) {
  res['azimuth'] = (azVal % 360 + 360) % 360;
+ }
  }
  }
  }
@@ -1681,6 +1717,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  out['lng'] = lo;
  }
  }
+ if (out['lat'] != null && out['lng'] != null) {
  if (out['alt'] == null && attrs['GPSAltitude'] != null) {
  final double? a = _parseRationalToken(attrs['GPSAltitude'].toString());
  if (a != null) out['alt'] = a;
@@ -1689,6 +1726,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  final double? az =
  _parseRationalToken(attrs['GPSImgDirection'].toString());
  if (az != null && !az.isNaN) out['azimuth'] = (az % 360 + 360) % 360;
+ }
  }
  if (out['dateTime'] == null) {
  final String? rawDt =
@@ -1762,6 +1800,25 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  try {
  pickedSize = await File(picked.path).length();
  } catch (_) {}
+ if (pickedSize > 0) {
+ for (final PhotoItem existing in widget.photos) {
+ try {
+ final File ef = File(existing.path);
+ if (ef.existsSync() &&
+ (ef.lengthSync() - pickedSize).abs() <= 512 &&
+ existing.lat.abs() > 0.001 &&
+ existing.lng.abs() > 0.001) {
+ return {
+ 'lat': existing.lat,
+ 'lng': existing.lng,
+ 'alt': existing.alt,
+ 'azimuth': existing.azimuth,
+ 'dateTime': existing.timestamp,
+ };
+ }
+ } catch (_) {}
+ }
+ }
  String? digits14;
  if (rawDateTime != null) {
  final String d = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
@@ -3210,7 +3267,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  color: Colors.white, fontWeight: FontWeight.bold),
  ),
  subtitle: Text(
- '멀티코어 병렬 압축 (${_visiblePhotos.length}장) + 조치전·조치후 3등분 + 도면 데이터 포함',
+ '원본 고화질 무손실 초고속 전송 (${_visiblePhotos.length}장) + 조치전·조치후 3등분 + 도면 포함',
  style:
  const TextStyle(color: Colors.white70, fontSize: 11.5),
  ),
@@ -3286,11 +3343,17 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  if (globalHtmlBase64Cache.containsKey(path)) {
  return globalHtmlBase64Cache[path];
  }
- final Uint8List? jpgBytes = await encodePhotoForHtmlFast(path);
- if (jpgBytes == null || jpgBytes.isEmpty) return null;
- final String uri = 'data:image/jpeg;base64,${base64Encode(jpgBytes)}';
+ try {
+ final File f = File(path);
+ if (!f.existsSync()) return null;
+ final Uint8List rawBytes = await f.readAsBytes();
+ if (rawBytes.isEmpty) return null;
+ final String uri = 'data:image/jpeg;base64,${base64Encode(rawBytes)}';
  globalHtmlBase64Cache[path] = uri;
  return uri;
+ } catch (_) {
+ return null;
+ }
  }
  Future<void> _exportAsHtmlViewer() async {
  final List<BlueprintItem> allBps = _blueprints.toList();
@@ -3308,7 +3371,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  try {
  final List<Map<String, dynamic>?> results =
  List<Map<String, dynamic>?>.filled(totalPhotos, null);
- const int batchSize = 6;
+ const int batchSize = 20;
  for (int start = 0; start < totalPhotos; start += batchSize) {
  final int end = min(start + batchSize, totalPhotos);
  await Future.wait(List.generate(end - start, (offset) async {
@@ -3419,8 +3482,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  <strong>📍 날짜: $_dateFilter | 분류: $_categoryFilter</strong>
  <button class="app-copy-btn" onclick="copyProjectForApp()">📲 앱에 업로드용 데이터 복사</button>
  </div>
- <span id="info-txt" style="font-size:12px; color:#ffc107;"></span>
+ <div id="info-txt" style="width:100%; font-size:16.5px; font-weight:bold; color:#ffc107; line-height:1.35; padding-top:2px; word-break:keep-all;"></div>
 </header>
+<div id="copy-toast" style="display:none; position:fixed; top:56px; left:50%; transform:translateX(-50%); background:rgba(0,200,83,0.96); color:#000; font-weight:bold; font-size:13.5px; padding:10px 16px; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.65); z-index:9999; text-align:center; width:86%; max-width:400px;"></div>
 <div class="main-wrap">
  <div id="photo-pane" class="img-pane">
  <div id="before-badge" class="pane-badge" style="display:none;">조치전 사진</div>
@@ -3443,20 +3507,29 @@ function copyProjectForApp() {
  const payload = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
  const ta = document.createElement('textarea');
  ta.value = payload;
+ ta.setAttribute('readonly', '');
  ta.style.position = 'fixed';
+ ta.style.top = '0';
  ta.style.left = '-9999px';
+ ta.style.opacity = '0';
  document.body.appendChild(ta);
  ta.focus();
  ta.select();
+ ta.setSelectionRange(0, payload.length);
  let ok = false;
  try { ok = document.execCommand('copy'); } catch (e) {}
  document.body.removeChild(ta);
- if (navigator.clipboard && navigator.clipboard.writeText) {
- navigator.clipboard.writeText(payload).catch(() => {});
+ if (!ok && navigator.clipboard && navigator.clipboard.writeText) {
+ try { navigator.clipboard.writeText(payload).catch(() => {}); } catch (e) {}
  }
  const btn = document.querySelector('.app-copy-btn');
  if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
- alert('✅ 사진(' + photos.length + '장)과 도면(' + bps.length + '개) 데이터가 복사되었습니다! 이제 GPS 카메라 앱을 열고 상단 [공유] -> [④ 받은 HTML·ZIP 업로드해서 보기]를 누르세요.');
+ const toast = document.getElementById('copy-toast');
+ if (toast) {
+ toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
+ toast.style.display = 'block';
+ setTimeout(() => { toast.style.display = 'none'; }, 4000);
+ }
 }
 function bindPinchZoom(paneEl, imgEl) {
  let scale = 1.0, tx = 0, ty = 0;
@@ -3555,8 +3628,8 @@ function selectPhoto(idx) {
  beforeBadge.style.display = 'none';
  }
  setTimeout(() => { map.invalidateSize(); }, 60);
- document.getElementById('info-txt').innerText =
- `[\${p.category}] 위도: \${p.lat.toFixed(6)} | 경도: \${p.lng.toFixed(6)} | 방위각: \${p.azimuth.toFixed(1)}° | \${p.time}` + (p.memo ? ` | 메모: \${p.memo}` : '');
+ const memoClean = (p.memo && p.memo.trim().length > 0) ? (' ' + p.memo.trim()) : '';
+ document.getElementById('info-txt').innerText = `[\${p.category}]\${memoClean}`;
  renderThumbnails();
  renderMarkers();
  map.panTo([p.lat, p.lng]);
