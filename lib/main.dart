@@ -1504,7 +1504,7 @@ if (bytes[pos] == 0x45 &&
  }
  }
  }
- break;
+ if (res['lat'] != null && res['lng'] != null) break;
 }
 }
 return res;
@@ -1516,7 +1516,7 @@ final File f = File(path);
 final int len = await f.length();
 if (len > 16) {
  final RandomAccessFile raf = await f.open();
- final Uint8List headBytes = await raf.read(min(len, 131072));
+ final Uint8List headBytes = await raf.read(min(len, 262144));
  await raf.close();
  out.addAll(_parseBinaryExifFromBytes(headBytes));
 }
@@ -1641,6 +1641,7 @@ try {
   low.endsWith('.heic') ||
   low.endsWith('.png')) &&
   !low.contains('bp_saved_') &&
+  !low.contains('imported_') &&
   !low.endsWith('.fast.png') &&
   !low.endsWith('.fast_hq.png')) {
  seenPaths.add(p);
@@ -1653,11 +1654,12 @@ try {
 for (final String r in roots) {
 scanDir(r, 0);
 }
-final RegExp digitRe = RegExp(r'\d{8,14}');
 String sortKey(File f) {
 final String name = f.path.split('/').last;
-final RegExpMatch? m = digitRe.firstMatch(name);
-if (m != null) return m.group(0)!.padRight(14, '0');
+final String digits = name.replaceAll(RegExp(r'[^0-9]'), '');
+if (digits.length >= 8) {
+ return digits.substring(0, min(14, digits.length)).padRight(14, '0');
+}
 return name;
 }
 out.sort((a, b) => sortKey(b).compareTo(sortKey(a)));
@@ -1673,14 +1675,14 @@ int pickedSize = 0;
 try {
 pickedSize = await File(picked.path).length();
 } catch (_) {}
-final List<String> secTokens = [];
-String? minToken;
+final List<String> secDigitTokens = [];
+String? minDigitToken;
 String? compactTargetDt;
 if (rawDateTime != null) {
 final String digits = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
 if (digits.length >= 14) {
  compactTargetDt = digits.substring(0, 14);
- minToken = '${digits.substring(0, 8)}_${digits.substring(8, 12)}';
+ minDigitToken = digits.substring(0, 12);
  final int? yr = int.tryParse(digits.substring(0, 4));
  final int? mo = int.tryParse(digits.substring(4, 6));
  final int? dy = int.tryParse(digits.substring(6, 8));
@@ -1692,60 +1694,71 @@ if (digits.length >= 14) {
  for (final int dSec in [0, 1, -1, 2, -2, 3, -3, 4, 5]) {
  final DateTime d = baseDt.add(Duration(seconds: dSec));
  final String s =
-  '${d.year.toString().padLeft(4, '0')}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}_'
+  '${d.year.toString().padLeft(4, '0')}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}'
   '${d.hour.toString().padLeft(2, '0')}${d.minute.toString().padLeft(2, '0')}${d.second.toString().padLeft(2, '0')}';
- secTokens.add(s);
+ secDigitTokens.add(s);
  }
  }
 }
 }
 for (final File f in cachedGalleryFiles) {
-final String fname = f.path.split('/').last;
-bool hit = (fname == pickedName);
-if (!hit && secTokens.isNotEmpty) {
- for (final String st in secTokens) {
- if (fname.contains(st)) {
- hit = true;
- break;
- }
- }
-}
-if (hit) {
+if (f.path.split('/').last == pickedName) {
  final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
  if (m['lat'] != null && m['lng'] != null) return m;
 }
 }
-if (minToken != null) {
+for (final String st in secDigitTokens) {
 for (final File f in cachedGalleryFiles) {
- final String fname = f.path.split('/').last;
- if (fname.contains(minToken)) {
+ final String fDigits =
+ f.path.split('/').last.replaceAll(RegExp(r'[^0-9]'), '');
+ if (fDigits.contains(st)) {
+ final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
+ if (m['lat'] != null && m['lng'] != null) return m;
+ }
+}
+}
+if (minDigitToken != null) {
+for (final File f in cachedGalleryFiles) {
+ final String fDigits =
+ f.path.split('/').last.replaceAll(RegExp(r'[^0-9]'), '');
+ if (fDigits.contains(minDigitToken)) {
  final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
  if (m['lat'] != null && m['lng'] != null) {
  if (compactTargetDt == null || m['dateTime'] == null) return m;
- final String d = m['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
+ final String d =
+  m['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
  if (d.length >= 14 && d.substring(0, 14) == compactTargetDt) return m;
  }
  }
 }
 }
 if (pickedSize > 1024) {
+final List<File> approxMatches = [];
 int checked = 0;
 for (final File f in cachedGalleryFiles) {
- if (checked > 2500) break;
+ if (checked > 3500) break;
  try {
  final int len = f.lengthSync();
  checked++;
- if ((len - pickedSize).abs() <= 512) {
+ if (len == pickedSize) {
+ final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
+ if (m['lat'] != null && m['lng'] != null) return m;
+ } else if ((len - pickedSize).abs() <= 512) {
+ approxMatches.add(f);
+ }
+ } catch (_) {}
+}
+for (final File f in approxMatches) {
  final Map<String, dynamic> m = await _extractPhotoMetaFromPath(f.path);
  if (m['lat'] != null && m['lng'] != null) {
  if (compactTargetDt == null || m['dateTime'] == null) return m;
- final String d = m['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
- if (d.length >= 12 && d.substring(0, 12) == compactTargetDt.substring(0, 12)) {
-  return m;
+ final String d =
+ m['dateTime'].toString().replaceAll(RegExp(r'[^0-9]'), '');
+ if (d.length >= 12 &&
+ d.substring(0, 12) == compactTargetDt.substring(0, 12)) {
+ return m;
  }
  }
- }
- } catch (_) {}
 }
 }
 return {};
@@ -1865,11 +1878,15 @@ if (addedCount > 0) {
  _panMapKeepZoom(lastAdded.lat, lastAdded.lng);
  if (mounted) {
  String msg;
- if (exifGpsCount > 0) {
- msg = '📍 $addedCount장 중 $exifGpsCount장 실제 촬영 GPS 위치에 자동으로 꽂혔습니다!';
+ if (exifGpsCount == addedCount) {
+ msg = '📍 $addedCount장 모두 실제 촬영 GPS 위치에 자동으로 꽂혔습니다!';
+ } else if (exifGpsCount > 0) {
+ msg = '📍 $addedCount장 중 $exifGpsCount장 GPS 자동 배치 완료! (나머지는 권한(사진:$hasPhotoPerm, 위치원본:$hasMediaLocPerm) 또는 GPS 미포함)';
  } else if (redactedCount > 0) {
- if (!hasPhotoPerm || !hasMediaLocPerm) {
-  msg = '⚠️ 일반 사진의 위치원본 권한이 잠겨 있습니다. [권한설정] → 사진 및 동영상 → [허용 안함]으로 바꾼 뒤 앱으로 돌아와 [사진] 버튼을 눌러 [모두 허용]을 눌러주세요.';
+ if (!hasPhotoPerm) {
+  msg = '⚠️ 현재 [사진 및 동영상] 권한이 [허용 안함]으로 꺼져 있습니다! 우측 [권한설정] → 권한 → 사진 및 동영상을 [항상 모두 허용]으로 켜주세요.';
+ } else if (!hasMediaLocPerm) {
+  msg = '⚠️ 위치원본 권한이 꺼져 있습니다(사진:$hasPhotoPerm, 위치원본:$hasMediaLocPerm). 앱을 한 번 삭제 후 재설치하거나 [권한설정]에서 사진 권한을 [항상 모두 허용]으로 켜주세요.';
  } else {
   msg = '⚠️ 기본 피커가 GPS를 가렸습니다. 우측 상단 [사진위치 이동] 버튼을 눌러 원하는 지점에 배치하세요.';
  }
