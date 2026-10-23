@@ -571,29 +571,24 @@ class _CameraScreenState extends State<CameraScreen> {
  final String targetPath =
  '${dayDir.path}/${prefix}_${DateTime.now().millisecondsSinceEpoch}.jpg';
  await File(targetPath).writeAsBytes(jpgBytes);
- String toDmsRational(double degVal) {
- final double absVal = degVal.abs();
- final int d = absVal.floor();
- final double minFull = (absVal - d) * 60.0;
- final int m = minFull.floor();
- final int s10000 = ((minFull - m) * 60.0 * 10000.0).round();
- return '$d/1,$m/1,$s10000/10000';
- }
  final int azRational = (_heading.clamp(0.0, 360.0) * 100).round();
  final int altRational = (_pos!.altitude.abs() * 100).round();
+ try {
  final exif = await Exif.fromPath(targetPath);
  await exif.writeAttributes({
- 'GPSLatitude': toDmsRational(useLat),
+ 'GPSLatitude': useLat.abs().toString(),
  'GPSLatitudeRef': useLat >= 0 ? 'N' : 'S',
- 'GPSLongitude': toDmsRational(useLng),
+ 'GPSLongitude': useLng.abs().toString(),
  'GPSLongitudeRef': useLng >= 0 ? 'E' : 'W',
  'GPSAltitude': '$altRational/100',
  'GPSAltitudeRef': _pos!.altitude >= 0 ? '0' : '1',
  'GPSImgDirection': '$azRational/100',
  'GPSImgDirectionRef': 'T',
- 'UserComment': 'GPS:${useLat.toStringAsFixed(6)},${useLng.toStringAsFixed(6)},${_pos!.altitude.toStringAsFixed(1)},${_heading.toStringAsFixed(1)}',
  });
  await exif.close();
+ } catch (exifErr) {
+ debugPrint('EXIF write warning: $exifErr');
+ }
  await Gal.putImage(targetPath);
  encodePhotoForHtmlFast(targetPath);
  if (isAfterShot) {
@@ -1151,127 +1146,284 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  debugPrint('Photo meta save error: $e');
  }
  }
- static Map<String, List<int>>? _arial24GlyphMasks;
+ static Map<String, List<int>>? _arial24OnPts;
+ static Map<String, List<int>>? _arial24OffPts;
+ static Map<String, int>? _arial24AdvMap;
  static int _arial24LineH = 28;
- Map<String, List<int>> _getArial24GlyphMasks() {
- if (_arial24GlyphMasks != null) return _arial24GlyphMasks!;
- final Map<String, List<int>> masks = {};
- _arial24LineH = img.arial24.lineHeight > 0 ? img.arial24.lineHeight : 28;
- const String chars = '0123456789.-+():LatngAlzmuhdegTim ';
+ void _ensureArial24Templates() {
+ if (_arial24OnPts != null &&
+ _arial24OffPts != null &&
+ _arial24AdvMap != null) {
+ return;
+ }
+ final Map<String, List<int>> onMap = {};
+ final Map<String, List<int>> offMap = {};
+ final Map<String, int> advMap = {};
+ int rightmostWhiteX(img.Image c) {
+ int maxX = 0;
+ for (int py = 0; py < c.height; py++) {
+ for (int px = c.width - 1; px > maxX; px--) {
+ if (c.getPixel(px, py).r > 128) {
+ maxX = px;
+ break;
+ }
+ }
+ }
+ return maxX;
+ }
+ final img.Image refCanvas = img.Image(width: 60, height: 44);
+ img.fill(refCanvas, color: img.ColorRgb8(0, 0, 0));
+ img.drawString(
+ refCanvas,
+ 'I',
+ font: img.arial24,
+ x: 0,
+ y: 0,
+ color: img.ColorRgb8(255, 255, 255),
+ );
+ final int refMaxX = rightmostWhiteX(refCanvas);
+ int topY0 = 44;
+ int botY0 = 0;
+ for (int py = 0; py < 44; py++) {
+ for (int px = 0; px < 40; px++) {
+ if (refCanvas.getPixel(px, py).r > 128) {
+ if (py < topY0) topY0 = py;
+ if (py > botY0) botY0 = py;
+ }
+ }
+ }
+ final img.Image tallCanvas = img.Image(width: 60, height: 96);
+ img.fill(tallCanvas, color: img.ColorRgb8(0, 0, 0));
+ img.drawString(
+ tallCanvas,
+ 'I\nI',
+ font: img.arial24,
+ x: 0,
+ y: 0,
+ color: img.ColorRgb8(255, 255, 255),
+ );
+ int topY1 = 96;
+ for (int py = botY0 + 2; py < 96; py++) {
+ for (int px = 0; px < 40; px++) {
+ if (tallCanvas.getPixel(px, py).r > 128) {
+ if (py < topY1) topY1 = py;
+ }
+ }
+ }
+ _arial24LineH = (topY1 < 96 && topY1 > topY0)
+ ? (topY1 - topY0)
+ : (img.arial24.lineHeight > 0 ? img.arial24.lineHeight : 28);
+ final int lh = _arial24LineH;
+ int measureStringAdvance(String s) {
+ final img.Image c = img.Image(width: 260, height: 48);
+ img.fill(c, color: img.ColorRgb8(0, 0, 0));
+ img.drawString(
+ c,
+ '${s}I',
+ font: img.arial24,
+ x: 0,
+ y: 0,
+ color: img.ColorRgb8(255, 255, 255),
+ );
+ return max(1, rightmostWhiteX(c) - refMaxX);
+ }
+ for (final String pref in ['Lat: ', 'Lng: ', 'Alt: ', 'Azimuth: ', 'Time: ']) {
+ advMap[pref] = measureStringAdvance(pref);
+ }
+ const String chars = '0123456789.-:m ';
  for (int i = 0; i < chars.length; i++) {
- final int code = chars.codeUnitAt(i);
- final chObj = img.arial24.characters[code];
- if (chObj == null) continue;
- final int w = chObj.width;
- final int h = chObj.height;
- final int xOff = chObj.xOffset;
- final int yOff = chObj.yOffset;
- final int xAdv = chObj.xAdvance;
- final List<int> pts = [xAdv, w + xOff, h + yOff];
- for (int py = 0; py < h; py++) {
- for (int px = 0; px < w; px++) {
- final p = chObj.image.getPixel(px, py);
- if (p.a > 128 && p.r > 128) {
- pts.add(px + xOff);
- pts.add(py + yOff);
+ final String ch = chars[i];
+ final int adv = measureStringAdvance(ch);
+ advMap[ch] = adv;
+ final img.Image canvas = img.Image(width: 48, height: lh + 6);
+ img.fill(canvas, color: img.ColorRgb8(0, 0, 0));
+ img.drawString(
+ canvas,
+ ch,
+ font: img.arial24,
+ x: 0,
+ y: 0,
+ color: img.ColorRgb8(255, 255, 255),
+ );
+ final Set<int> onSet = {};
+ final List<int> onPts = [];
+ final int boxW = min(44, max(6, adv));
+ for (int py = 0; py < lh; py++) {
+ for (int px = 0; px < boxW; px++) {
+ final int r = canvas.getPixel(px, py).r.toInt();
+ if (r > 125) {
+ onSet.add(py * 64 + px);
+ onPts.add(px);
+ onPts.add(py);
  }
  }
  }
- masks[chars[i]] = pts;
+ final List<int> offPts = [];
+ for (int py = 0; py < lh; py++) {
+ for (int px = 0; px < boxW; px++) {
+ if (onSet.contains(py * 64 + px)) continue;
+ bool nearOn = false;
+ for (int dy = -1; dy <= 1 && !nearOn; dy++) {
+ for (int dx = -1; dx <= 1; dx++) {
+ if (onSet.contains((py + dy) * 64 + (px + dx))) {
+ nearOn = true;
+ break;
  }
- _arial24GlyphMasks = masks;
- return masks;
+ }
+ }
+ if (!nearOn && canvas.getPixel(px, py).r < 25) {
+ offPts.add(px);
+ offPts.add(py);
+ }
+ }
+ }
+ onMap[ch] = onPts;
+ offMap[ch] = offPts;
+ }
+ _arial24OnPts = onMap;
+ _arial24OffPts = offMap;
+ _arial24AdvMap = advMap;
  }
  Map<String, dynamic> _extractGpsFromYellowStamp(Uint8List bytes) {
  final Map<String, dynamic> res = {};
  try {
  final img.Image? decoded = img.decodeImage(bytes);
  if (decoded == null || decoded.width < 260 || decoded.height < 180) return res;
+ _ensureArial24Templates();
+ final Map<String, List<int>> onMap = _arial24OnPts!;
+ final Map<String, List<int>> offMap = _arial24OffPts!;
+ final Map<String, int> advMap = _arial24AdvMap!;
+ final int lh = _arial24LineH;
  final int baseX = 20;
  final int baseY = max(20, decoded.height - 220);
  if (baseY + 120 >= decoded.height) return res;
- bool isYellow(int x, int y) {
+ bool isYellowPx(int x, int y) {
  if (x < 0 || y < 0 || x >= decoded.width || y >= decoded.height) return false;
  final p = decoded.getPixel(x, y);
- return p.r > 195 && p.g > 145 && p.b < 115 && (p.r - p.b) > 100;
+ return p.r > 140 && p.g > 105 && (p.r - p.b) > 40 && (p.g - p.b) > 20;
  }
  int yellowHits = 0;
- for (int y = baseY; y < min(decoded.height, baseY + 60); y += 2) {
+ for (int y = baseY; y < min(decoded.height, baseY + 56); y += 2) {
  for (int x = baseX; x < min(decoded.width, baseX + 180); x += 2) {
- if (isYellow(x, y)) yellowHits++;
+ if (isYellowPx(x, y)) yellowHits++;
  }
  }
- if (yellowHits < 18) return res;
- final Map<String, List<int>> masks = _getArial24GlyphMasks();
- final int lh = _arial24LineH;
- String readLineAt(int lineIdx, String allowedChars) {
+ if (yellowHits < 15) return res;
+ String matchBestCharAt(int curX, int ly, String allowed,
+ {double minScore = 0.22}) {
+ String bestCh = '';
+ double bestScore = minScore;
+ int bestOnCount = 0;
+ for (int i = 0; i < allowed.length; i++) {
+ final String ch = allowed[i];
+ final List<int>? onPts = onMap[ch];
+ final List<int>? offPts = offMap[ch];
+ if (onPts == null || offPts == null) continue;
+ final int nOn = onPts.length ~/ 2;
+ final int nOff = offPts.length ~/ 2;
+ if (nOn == 0 || nOff == 0) continue;
+ int onHits = 0;
+ for (int k = 0; k < onPts.length; k += 2) {
+ if (isYellowPx(curX + onPts[k], ly + onPts[k + 1])) onHits++;
+ }
+ final double tpRate = onHits / nOn;
+ if (tpRate < 0.45) continue;
+ int offHits = 0;
+ for (int k = 0; k < offPts.length; k += 2) {
+ if (isYellowPx(curX + offPts[k], ly + offPts[k + 1])) offHits++;
+ }
+ final double fpRate = offHits / nOff;
+ final double score = tpRate - 1.15 * fpRate;
+ if (score > bestScore + 0.02 ||
+ ((score - bestScore).abs() <= 0.02 && nOn > bestOnCount)) {
+ bestScore = score;
+ bestCh = ch;
+ bestOnCount = nOn;
+ }
+ }
+ return bestCh;
+ }
+ String decodeFixedDecimalLine(int lineIdx, String prefix, int fracDigits) {
  final int ly = baseY + lineIdx * lh;
  if (ly + lh >= decoded.height) return '';
+ int curX = baseX + (advMap[prefix] ?? 50);
  final StringBuffer sb = StringBuffer();
- int curX = baseX;
- final int maxX = min(decoded.width - 10, baseX + 460);
- while (curX < maxX) {
- String bestCh = '';
- double bestScore = 0.58;
- int bestAdv = 8;
- for (int cIdx = 0; cIdx < allowedChars.length; cIdx++) {
- final String ch = allowedChars[cIdx];
- final List<int>? m = masks[ch];
- if (m == null || m.length <= 3) continue;
- final int totalPts = (m.length - 3) ~/ 2;
- if (totalPts == 0) continue;
- int hits = 0;
- for (int k = 3; k < m.length; k += 2) {
- if (isYellow(curX + m[k], ly + m[k + 1])) hits++;
- }
- final double ratio = hits / totalPts;
- if (ratio > bestScore || (ratio == bestScore && m.length > (masks[bestCh]?.length ?? 0))) {
- bestScore = ratio;
- bestCh = ch;
- bestAdv = m[0];
+ bool foundDot = false;
+ for (int step = 0; step < 6; step++) {
+ if (curX + 14 >= decoded.width) return '';
+ final String allowed = (step == 0) ? '0123456789-' : '0123456789.';
+ final String ch = matchBestCharAt(curX, ly, allowed);
+ if (ch.isEmpty) return '';
+ sb.write(ch);
+ curX += advMap[ch] ?? 12;
+ if (ch == '.') {
+ foundDot = true;
+ break;
  }
  }
- if (bestCh.isNotEmpty) {
- sb.write(bestCh);
- curX += max(4, bestAdv);
+ if (!foundDot) return '';
+ for (int f = 0; f < fracDigits; f++) {
+ if (curX + 14 >= decoded.width) return '';
+ final String ch =
+ matchBestCharAt(curX, ly, '0123456789', minScore: 0.10);
+ if (ch.isEmpty) return '';
+ sb.write(ch);
+ curX += advMap[ch] ?? 12;
+ }
+ return sb.toString();
+ }
+ String decodeTimeLine(int lineIdx) {
+ final int ly = baseY + lineIdx * lh;
+ if (ly + lh >= decoded.height) return '';
+ int curX = baseX + (advMap['Time: '] ?? 66);
+ const List<String> pat = [
+ '0123456789', '0123456789', '0123456789', '0123456789',
+ '-',
+ '0123456789', '0123456789',
+ '-',
+ '0123456789', '0123456789',
+ ' ',
+ '0123456789', '0123456789',
+ ':',
+ '0123456789', '0123456789',
+ ];
+ final StringBuffer sb = StringBuffer();
+ for (int i = 0; i < pat.length; i++) {
+ final String p = pat[i];
+ if (p.length == 1) {
+ sb.write(p);
+ curX += advMap[p] ?? 8;
  } else {
- curX += 4;
+ final String ch = matchBestCharAt(curX, ly, p, minScore: 0.10);
+ if (ch.isEmpty) return '';
+ sb.write(ch);
+ curX += advMap[ch] ?? 12;
  }
  }
  return sb.toString();
  }
- final String l0 = readLineAt(0, 'Lat:0123456789.-+()m');
- final String l1 = readLineAt(1, 'Lng:0123456789.-+()m');
- final String l2 = readLineAt(2, 'Alt:0123456789.-+()m');
- final String l3 = readLineAt(3, 'Azimuth:0123456789.-deg');
- final String l5 = readLineAt(5, 'Time:0123456789-');
- final RegExp coordRe = RegExp(r'-?\d{1,3}\.\d{4,7}');
- final m0 = coordRe.firstMatch(l0);
- final m1 = coordRe.firstMatch(l1);
- if (m0 != null && m1 != null) {
- final double? la = double.tryParse(m0.group(0)!);
- final double? lo = double.tryParse(m1.group(0)!);
- if (la != null && lo != null && la.abs() <= 90 && lo.abs() <= 180) {
+ final String latStr = decodeFixedDecimalLine(0, 'Lat: ', 6);
+ final String lngStr = decodeFixedDecimalLine(1, 'Lng: ', 6);
+ final String altStr = decodeFixedDecimalLine(2, 'Alt: ', 1);
+ final String azStr = decodeFixedDecimalLine(3, 'Azimuth: ', 1);
+ final String timeStr = decodeTimeLine(5);
+ final double? la = double.tryParse(latStr);
+ final double? lo = double.tryParse(lngStr);
+ if (la != null &&
+ lo != null &&
+ la.abs() > 0.001 &&
+ lo.abs() > 0.001 &&
+ la.abs() <= 90 &&
+ lo.abs() <= 180) {
  res['lat'] = la;
  res['lng'] = lo;
  }
- }
- final RegExp numRe = RegExp(r'-?\d+\.\d+');
- final m2 = numRe.firstMatch(l2);
- if (m2 != null) {
- final double? al = double.tryParse(m2.group(0)!);
+ final double? al = double.tryParse(altStr);
  if (al != null) res['alt'] = al;
- }
- final m3 = numRe.firstMatch(l3);
- if (m3 != null) {
- final double? az = double.tryParse(m3.group(0)!);
+ final double? az = double.tryParse(azStr);
  if (az != null && az >= 0 && az <= 360) res['azimuth'] = az;
- }
- final RegExp dtRe = RegExp(r'20\d{2}-\d{2}-\d{2}\d{2}:\d{2}');
- final m5 = dtRe.firstMatch(l5);
- if (m5 != null) {
- final String rawT = m5.group(0)!;
- res['dateTime'] = '${rawT.substring(0, 10)} ${rawT.substring(10)}';
+ if (timeStr.length == 16 && timeStr.startsWith('20')) {
+ res['dateTime'] = timeStr;
  }
  } catch (_) {}
  return res;
@@ -1476,12 +1628,20 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  return res;
  }
  Future<Map<String, dynamic>> _extractPhotoMetaFromPath(String path,
- {bool allowYellowOcr = true}) async {
+ {bool allowYellowOcr = false}) async {
  final Map<String, dynamic> out = {};
  Uint8List? rawBytes;
  try {
+ if (allowYellowOcr) {
  rawBytes = await File(path).readAsBytes();
  out.addAll(_parseBinaryExifFromBytes(rawBytes));
+ } else {
+ final RandomAccessFile raf = await File(path).open();
+ final int len = await raf.length();
+ final Uint8List headerBytes = await raf.read(min(len, 65536));
+ await raf.close();
+ out.addAll(_parseBinaryExifFromBytes(headerBytes));
+ }
  } catch (_) {}
  try {
  final Exif exif = await Exif.fromPath(path);
@@ -1521,20 +1681,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  out['lng'] = lo;
  }
  }
- if (out['lat'] == null && attrs['UserComment'] != null) {
- final String uc = attrs['UserComment'].toString();
- if (uc.startsWith('GPS:')) {
- final List<String> sp = uc.substring(4).split(',');
- if (sp.length >= 2) {
- final double? la = double.tryParse(sp[0]);
- final double? lo = double.tryParse(sp[1]);
- if (la != null && lo != null) {
- out['lat'] = la;
- out['lng'] = lo;
- }
- }
- }
- }
  if (out['alt'] == null && attrs['GPSAltitude'] != null) {
  final double? a = _parseRationalToken(attrs['GPSAltitude'].toString());
  if (a != null) out['alt'] = a;
@@ -1560,9 +1706,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  await exif.close();
  } catch (_) {}
- if (allowYellowOcr &&
- (out['lat'] == null || out['lng'] == null) &&
- rawBytes != null) {
+ if (allowYellowOcr && (out['lat'] == null || out['lng'] == null)) {
+ rawBytes ??= await File(path).readAsBytes();
  final Map<String, dynamic> yellow = _extractGpsFromYellowStamp(rawBytes);
  if (yellow['lat'] != null && yellow['lng'] != null) {
  out.addAll(yellow);
@@ -1620,7 +1765,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  String? digits14;
  if (rawDateTime != null) {
  final String d = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
- if (d.length >= 14) digits14 = d.substring(0, 14);
+ if (d.length >= 14) {
+ digits14 = d.substring(0, 14);
+ } else if (d.length >= 12) {
+ digits14 = '${d.substring(0, 12)}00';
+ }
  }
  if (digits14 == null) {
  final RegExp fnRe = RegExp(r'(20\d{6})[_\-]?(\d{6})');
@@ -1636,10 +1785,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  if (digits14 != null) {
  final String ymd = digits14.substring(0, 8);
  final String hms = digits14.substring(8, 14);
+ final String ymdhm = digits14.substring(0, 12);
  final int targetSec = (int.tryParse(hms.substring(0, 2)) ?? 0) * 3600 +
  (int.tryParse(hms.substring(2, 4)) ?? 0) * 60 +
  (int.tryParse(hms.substring(4, 6)) ?? 0);
- for (int tol = 0; tol <= 5; tol++) {
+ for (int tol = 0; tol <= 10; tol++) {
  for (final String p in allGalleryPaths) {
  final String fn = p.split('/').last;
  if (!fn.contains(ymd)) continue;
@@ -1657,18 +1807,34 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  }
  }
+ for (final String p in allGalleryPaths) {
+ final String fn = p.split('/').last;
+ final String fnDigits = fn.replaceAll(RegExp(r'[^0-9]'), '');
+ if (fnDigits.contains(ymdhm)) {
+ final meta = await _extractPhotoMetaFromPath(p, allowYellowOcr: false);
+ if (meta['lat'] != null && meta['lng'] != null) return meta;
+ }
+ }
  }
  if (pickedSize > 0) {
  int checked = 0;
+ final List<String> nearSizePaths = [];
  for (final String p in allGalleryPaths) {
  if (checked++ > 3500) break;
  try {
  final int len = File(p).lengthSync();
- if (len == pickedSize) {
+ final int diff = (len - pickedSize).abs();
+ if (diff == 0) {
  final meta = await _extractPhotoMetaFromPath(p, allowYellowOcr: false);
  if (meta['lat'] != null && meta['lng'] != null) return meta;
+ } else if (diff <= 512) {
+ nearSizePaths.add(p);
  }
  } catch (_) {}
+ }
+ for (final String p in nearSizePaths) {
+ final meta = await _extractPhotoMetaFromPath(p, allowYellowOcr: false);
+ if (meta['lat'] != null && meta['lng'] != null) return meta;
  }
  }
  return {};
@@ -1704,13 +1870,29 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  for (int i = 0; i < pickedFiles.length; i++) {
  final XFile picked = pickedFiles[i];
- Map<String, dynamic> meta = await _extractPhotoMetaFromPath(picked.path);
+ if (mounted) {
+ setState(() {
+ _exportStatusMsg =
+ '사진 위치정보 분석 중... (${i + 1} / ${pickedFiles.length}장)';
+ });
+ }
+ Map<String, dynamic> meta =
+ await _extractPhotoMetaFromPath(picked.path, allowYellowOcr: false);
  if (meta['lat'] == null || meta['lng'] == null) {
  final Map<String, dynamic> recovered = await _fastPinpointOriginalGps(
  picked, meta['dateTime'] as String?, galleryPaths);
  if (recovered['lat'] != null && recovered['lng'] != null) {
  meta = {...meta, ...recovered};
  }
+ }
+ if (meta['lat'] == null || meta['lng'] == null) {
+ try {
+ final Uint8List rawBytes = await File(picked.path).readAsBytes();
+ final Map<String, dynamic> yellow = _extractGpsFromYellowStamp(rawBytes);
+ if (yellow['lat'] != null && yellow['lng'] != null) {
+ meta = {...meta, ...yellow};
+ }
+ } catch (_) {}
  }
  final double? lat = meta['lat'] as double?;
  final double? lng = meta['lng'] as double?;
@@ -3272,7 +3454,9 @@ function copyProjectForApp() {
  if (navigator.clipboard && navigator.clipboard.writeText) {
  navigator.clipboard.writeText(payload).catch(() => {});
  }
- alert('✅ 사진(' + photos.length + '장)과 도면(' + bps.length + '개) 데이터가 복사되었습니다!\n\n이제 [GPS 카메라 앱]을 열고 상단 [공유] ➔ [④ 받은 HTML·ZIP 업로드해서 보기]를 누르면 도면과 사진이 앱에 그대로 등록됩니다.');
+ const btn = document.querySelector('.app-copy-btn');
+ if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
+ alert('✅ 사진(' + photos.length + '장)과 도면(' + bps.length + '개) 데이터가 복사되었습니다! 이제 GPS 카메라 앱을 열고 상단 [공유] -> [④ 받은 HTML·ZIP 업로드해서 보기]를 누르세요.');
 }
 function bindPinchZoom(paneEl, imgEl) {
  let scale = 1.0, tx = 0, ty = 0;
@@ -3472,8 +3656,11 @@ if (photos.length > 0) {
  final ClipboardData? cdata = await Clipboard.getData('text/plain');
  final String? txt = cdata?.text?.trim();
  if (txt != null &&
+ !txt.contains('class GalleryMapDashboard') &&
  (txt.startsWith('GPS_CAMERA_HTML_V2:') ||
- (txt.contains('const photos =') && txt.contains('const bps =')))) {
+ (txt.contains('<!DOCTYPE html>') &&
+ txt.contains('const photos =') &&
+ txt.contains('const bps =')))) {
  clipboardPayload = txt;
  }
  } catch (_) {}
