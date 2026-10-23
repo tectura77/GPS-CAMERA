@@ -3,7 +3,6 @@ import 'dart:math';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:async';
-import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -53,39 +52,46 @@ Future<void> loadDefaultCategory(List<PhotoItem> photos) async {
 final Map<String, NOverlayImage> globalMarkerIconCache = {};
 final Map<String, NOverlayImage> globalBpOverlayCache = {};
 final Map<String, String> globalHtmlBase64Cache = {};
-Uint8List? _encodeSinglePhotoTopLevel(String path) {
+Future<Uint8List?> normalizeToAppCameraResolution(Uint8List raw) async {
  try {
- final File f = File(path);
- final Uint8List raw = f.readAsBytesSync();
- if (raw.length <= 360 * 1024) {
- try {
- File('$path.web.jpg').writeAsBytesSync(raw);
- } catch (_) {}
- return raw;
+ if (raw.length <= 550 * 1024) {
+ final String head =
+ String.fromCharCodes(raw.sublist(0, min(raw.length, 8192)));
+ if (head.contains('GPSCAM_META:')) return raw;
  }
  final img.Image? decoded = img.decodeImage(raw);
  if (decoded == null) return raw;
- final img.Image resized = decoded.width > 960
+ final img.Image baked = img.bakeOrientation(decoded);
+ final int maxSide = max(baked.width, baked.height);
+ if (maxSide <= 1280 && raw.length <= 600 * 1024) {
+ return raw;
+ }
+ final img.Image targetImg = maxSide > 1280
  ? img.copyResize(
- decoded,
- width: 960,
+ baked,
+ width: baked.width >= baked.height ? 1280 : null,
+ height: baked.height > baked.width ? 1280 : null,
  interpolation: img.Interpolation.linear,
  )
- : decoded;
- final Uint8List out = Uint8List.fromList(img.encodeJpg(resized, quality: 80));
- try {
- File('$path.web.jpg').writeAsBytesSync(out);
- } catch (_) {}
- return out;
+ : baked;
+ return Uint8List.fromList(img.encodeJpg(targetImg, quality: 90));
  } catch (_) {
- return null;
+ return raw;
  }
 }
 Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  try {
  final File origFile = File(path);
  if (!origFile.existsSync()) return null;
- final File cacheFile = File('$path.web.jpg');
+ final String fn = path.split('/').last;
+ if (fn.startsWith('photo_') || fn.startsWith('after_photo_')) {
+ final Uint8List raw = await origFile.readAsBytes();
+ if (raw.isNotEmpty) {
+ globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(raw)}';
+ return raw;
+ }
+ }
+ final File cacheFile = File('$path.appcam.jpg');
  if (cacheFile.existsSync()) {
  final Uint8List cached = await cacheFile.readAsBytes();
  if (cached.isNotEmpty) {
@@ -95,46 +101,17 @@ Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  return cached;
  }
  }
- final Uint8List? jpg =
- await Isolate.run(() => _encodeSinglePhotoTopLevel(path));
- if (jpg != null && jpg.isNotEmpty) {
- globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(jpg)}';
- }
- return jpg;
+ final Uint8List raw = await origFile.readAsBytes();
+ if (raw.isEmpty) return null;
+ final Uint8List out = (await normalizeToAppCameraResolution(raw)) ?? raw;
+ try {
+ await cacheFile.writeAsBytes(out);
+ } catch (_) {}
+ globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(out)}';
+ return out;
  } catch (_) {
  return null;
  }
-}
-Map<String, dynamic> _parseHtmlProjectTopLevel(String rawText) {
- List<dynamic> photosRaw = [];
- List<dynamic> bpsRaw = [];
- if (rawText.startsWith('GPS_CAMERA_HTML_V2:')) {
- final Map<String, dynamic> decoded =
- jsonDecode(rawText.substring('GPS_CAMERA_HTML_V2:'.length))
- as Map<String, dynamic>;
- photosRaw = (decoded['photos'] as List<dynamic>?) ?? [];
- bpsRaw = (decoded['bps'] as List<dynamic>?) ?? [];
- } else {
- final int pMarker = rawText.indexOf('const photos =');
- final int bMarker = rawText.indexOf('const bps =');
- if (pMarker >= 0 && bMarker > pMarker) {
- final int pStart = rawText.indexOf('[', pMarker);
- final int pEnd = rawText.lastIndexOf('];', bMarker);
- if (pStart >= 0 && pEnd > pStart) {
- photosRaw = jsonDecode(rawText.substring(pStart, pEnd + 1)) as List<dynamic>;
- }
- }
- if (bMarker >= 0) {
- final int bStart = rawText.indexOf('[', bMarker);
- final int afterBps = rawText.indexOf('let selectedIdx', bMarker);
- final int searchUntil = afterBps > bStart ? afterBps : rawText.length;
- final int bEnd = rawText.lastIndexOf('];', searchUntil);
- if (bStart >= 0 && bEnd > bStart) {
- bpsRaw = jsonDecode(rawText.substring(bStart, bEnd + 1)) as List<dynamic>;
- }
- }
- }
- return {'photos': photosRaw, 'bps': bpsRaw};
 }
 Future<void> main() async {
  WidgetsFlutterBinding.ensureInitialized();
@@ -1055,8 +1032,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  try {
  final List<String> paths = [];
  for (final p in widget.photos) {
- if (!File('${p.path}.web.jpg').existsSync()) paths.add(p.path);
- if (p.hasAfterPhoto && !File('${p.afterPath}.web.jpg').existsSync()) {
+ if (!File('${p.path}.appcam.jpg').existsSync()) paths.add(p.path);
+ if (p.hasAfterPhoto && !File('${p.afterPath}.appcam.jpg').existsSync()) {
  paths.add(p.afterPath!);
  }
  }
@@ -1560,7 +1537,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  final String fn = p.split('/').last;
  if (fn.startsWith('imported_') ||
  fn.startsWith('bp_saved_') ||
- low.endsWith('.web.jpg')) {
+ (low.endsWith('.web.jpg') || low.endsWith('.appcam.jpg'))) {
  continue;
  }
  if (seen.add(p)) out.add(p);
@@ -1773,8 +1750,13 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  final int nowMs = DateTime.now().millisecondsSinceEpoch + i;
  final String targetPath = '${dayDir.path}/imported_$nowMs.jpg';
- await File(picked.path).copy(targetPath);
- encodePhotoForHtmlFast(targetPath);
+ final Uint8List pickedBytes = await File(picked.path).readAsBytes();
+ final Uint8List normalizedBytes =
+ (await normalizeToAppCameraResolution(pickedBytes)) ?? pickedBytes;
+ await File(targetPath).writeAsBytes(normalizedBytes);
+ await File('$targetPath.appcam.jpg').writeAsBytes(normalizedBytes);
+ globalHtmlBase64Cache[targetPath] =
+ 'data:image/jpeg;base64,${base64Encode(normalizedBytes)}';
  widget.photos.add(PhotoItem(
  path: targetPath,
  lat: finalLat,
@@ -1891,8 +1873,13 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  final String destPath =
  '${dayDir.path}/after_imp_${DateTime.now().millisecondsSinceEpoch}.jpg';
- await File(picked.path).copy(destPath);
- encodePhotoForHtmlFast(destPath);
+ final Uint8List pickedBytes = await File(picked.path).readAsBytes();
+ final Uint8List normalizedBytes =
+ (await normalizeToAppCameraResolution(pickedBytes)) ?? pickedBytes;
+ await File(destPath).writeAsBytes(normalizedBytes);
+ await File('$destPath.appcam.jpg').writeAsBytes(normalizedBytes);
+ globalHtmlBase64Cache[destPath] =
+ 'data:image/jpeg;base64,${base64Encode(normalizedBytes)}';
  setState(() {
  targetPhoto.afterPath = destPath;
  });
@@ -1931,7 +1918,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  try {
  final f = File(oldAfter);
  if (await f.exists()) await f.delete();
- final wf = File('$oldAfter.web.jpg');
+ final wf = File('$oldAfter.appcam.jpg');
  if (await wf.exists()) await wf.delete();
  } catch (_) {}
  }
@@ -1949,12 +1936,12 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  try {
  final file = File(targetPhoto.path);
  if (await file.exists()) await file.delete();
- final webCache = File('${targetPhoto.path}.web.jpg');
+ final webCache = File('${targetPhoto.path}.appcam.jpg');
  if (await webCache.exists()) await webCache.delete();
  if (targetPhoto.afterPath != null && targetPhoto.afterPath!.isNotEmpty) {
  final af = File(targetPhoto.afterPath!);
  if (await af.exists()) await af.delete();
- final awf = File('${targetPhoto.afterPath!}.web.jpg');
+ final awf = File('${targetPhoto.afterPath!}.appcam.jpg');
  if (await awf.exists()) await awf.delete();
  }
  } catch (e) {
@@ -3289,6 +3276,19 @@ const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = 0;
 function copyProjectForApp() {
+ const btn = document.querySelector('.app-copy-btn');
+ if (btn) {
+ btn.innerText = '✅ 복사완료! 앱에서 업로드하세요';
+ btn.style.background = '#ffc107';
+ }
+ const toast = document.getElementById('copy-toast');
+ if (toast) {
+ toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
+ toast.style.display = 'block';
+ setTimeout(() => { toast.style.display = 'none'; }, 4000);
+ }
+ setTimeout(() => {
+ try {
  const payload = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
  const ta = document.createElement('textarea');
  ta.value = payload;
@@ -3308,14 +3308,8 @@ function copyProjectForApp() {
  try { document.execCommand('copy'); } catch (e) {}
  }
  document.body.removeChild(ta);
- const btn = document.querySelector('.app-copy-btn');
- if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
- const toast = document.getElementById('copy-toast');
- if (toast) {
- toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
- toast.style.display = 'block';
- setTimeout(() => { toast.style.display = 'none'; }, 4000);
- }
+ } catch (e) {}
+ }, 15);
 }
 function bindPinchZoom(paneEl, imgEl) {
  let scale = 1.0, tx = 0, ty = 0;
@@ -3782,10 +3776,35 @@ if (photos.length > 0) {
  _exportStatusMsg = '⚡ HTML 데이터를 초고속 분석하는 중...';
  });
  try {
- final Map<String, dynamic> parsed =
- await Isolate.run(() => _parseHtmlProjectTopLevel(inputText));
- final List<dynamic> photosRaw = parsed['photos'] as List<dynamic>;
- final List<dynamic> bpsRaw = parsed['bps'] as List<dynamic>;
+ await Future.delayed(const Duration(milliseconds: 16));
+ List<dynamic> photosRaw = [];
+ List<dynamic> bpsRaw = [];
+ if (inputText.startsWith('GPS_CAMERA_HTML_V2:')) {
+ final Map<String, dynamic> decoded =
+ jsonDecode(inputText.substring('GPS_CAMERA_HTML_V2:'.length))
+ as Map<String, dynamic>;
+ photosRaw = (decoded['photos'] as List<dynamic>?) ?? [];
+ bpsRaw = (decoded['bps'] as List<dynamic>?) ?? [];
+ } else {
+ final int pMarker = inputText.indexOf('const photos =');
+ final int bMarker = inputText.indexOf('const bps =');
+ if (pMarker >= 0 && bMarker > pMarker) {
+ final int pStart = inputText.indexOf('[', pMarker);
+ final int pEnd = inputText.lastIndexOf('];', bMarker);
+ if (pStart >= 0 && pEnd > pStart) {
+ photosRaw = jsonDecode(inputText.substring(pStart, pEnd + 1)) as List<dynamic>;
+ }
+ }
+ if (bMarker >= 0) {
+ final int bStart = inputText.indexOf('[', bMarker);
+ final int afterBps = inputText.indexOf('let selectedIdx', bMarker);
+ final int searchUntil = afterBps > bStart ? afterBps : inputText.length;
+ final int bEnd = inputText.lastIndexOf('];', searchUntil);
+ if (bStart >= 0 && bEnd > bStart) {
+ bpsRaw = jsonDecode(inputText.substring(bStart, bEnd + 1)) as List<dynamic>;
+ }
+ }
+ }
  if (photosRaw.isEmpty && bpsRaw.isEmpty) {
  throw Exception('유효한 GPS 카메라 HTML 데이터가 아닙니다.');
  }
@@ -3824,7 +3843,7 @@ if (photos.length > 0) {
  }
  final String targetPath = '${dayDir.path}/html_imp_${baseMs}_$i.jpg';
  await File(targetPath).writeAsBytes(jpgBytes);
- await File('$targetPath.web.jpg').writeAsBytes(jpgBytes);
+ await File('$targetPath.appcam.jpg').writeAsBytes(jpgBytes);
  globalHtmlBase64Cache[targetPath] = b64;
  String? afterPath;
  final String? afterB64 = m['afterB64'] as String?;
@@ -3833,7 +3852,7 @@ if (photos.length > 0) {
  if (afterBytes != null && afterBytes.isNotEmpty) {
  afterPath = '${dayDir.path}/html_after_${baseMs}_$i.jpg';
  await File(afterPath).writeAsBytes(afterBytes);
- await File('$afterPath.web.jpg').writeAsBytes(afterBytes);
+ await File('$afterPath.appcam.jpg').writeAsBytes(afterBytes);
  globalHtmlBase64Cache[afterPath] = afterB64;
  }
  }
