@@ -22,8 +22,6 @@ import 'package:archive/archive.dart';
 List<CameraDescription> appCameras = [];
 String? naverAuthErrorMsg;
 String currentDefaultCategory = '미분류';
-double? forcedUserLat;
-double? forcedUserLng;
 Future<void> saveDefaultCategory(String cat) async {
  currentDefaultCategory = cat.trim().isEmpty ? '미분류' : cat.trim();
  try {
@@ -55,6 +53,34 @@ Future<void> loadDefaultCategory(List<PhotoItem> photos) async {
 final Map<String, NOverlayImage> globalMarkerIconCache = {};
 final Map<String, NOverlayImage> globalBpOverlayCache = {};
 final Map<String, String> globalHtmlBase64Cache = {};
+Uint8List? _encodeSinglePhotoTopLevel(String path) {
+ try {
+ final File f = File(path);
+ final Uint8List raw = f.readAsBytesSync();
+ if (raw.length <= 360 * 1024) {
+ try {
+ File('$path.web.jpg').writeAsBytesSync(raw);
+ } catch (_) {}
+ return raw;
+ }
+ final img.Image? decoded = img.decodeImage(raw);
+ if (decoded == null) return raw;
+ final img.Image resized = decoded.width > 960
+ ? img.copyResize(
+ decoded,
+ width: 960,
+ interpolation: img.Interpolation.linear,
+ )
+ : decoded;
+ final Uint8List out = Uint8List.fromList(img.encodeJpg(resized, quality: 80));
+ try {
+ File('$path.web.jpg').writeAsBytesSync(out);
+ } catch (_) {}
+ return out;
+ } catch (_) {
+ return null;
+ }
+}
 Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  try {
  final File origFile = File(path);
@@ -69,34 +95,8 @@ Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  return cached;
  }
  }
- final Uint8List? jpg = await Isolate.run(() {
- try {
- final File f = File(path);
- final Uint8List raw = f.readAsBytesSync();
- if (raw.length <= 480 * 1024) {
- try {
- File('$path.web.jpg').writeAsBytesSync(raw);
- } catch (_) {}
- return raw;
- }
- final img.Image? decoded = img.decodeImage(raw);
- if (decoded == null) return raw;
- final img.Image resized = decoded.width > 1280
- ? img.copyResize(
- decoded,
- width: 1280,
- interpolation: img.Interpolation.linear,
- )
- : decoded;
- final Uint8List out = Uint8List.fromList(img.encodeJpg(resized, quality: 84));
- try {
- File('$path.web.jpg').writeAsBytesSync(out);
- } catch (_) {}
- return out;
- } catch (_) {
- return null;
- }
- });
+ final Uint8List? jpg =
+ await Isolate.run(() => _encodeSinglePhotoTopLevel(path));
  if (jpg != null && jpg.isNotEmpty) {
  globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(jpg)}';
  }
@@ -104,6 +104,37 @@ Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  } catch (_) {
  return null;
  }
+}
+Map<String, dynamic> _parseHtmlProjectTopLevel(String rawText) {
+ List<dynamic> photosRaw = [];
+ List<dynamic> bpsRaw = [];
+ if (rawText.startsWith('GPS_CAMERA_HTML_V2:')) {
+ final Map<String, dynamic> decoded =
+ jsonDecode(rawText.substring('GPS_CAMERA_HTML_V2:'.length))
+ as Map<String, dynamic>;
+ photosRaw = (decoded['photos'] as List<dynamic>?) ?? [];
+ bpsRaw = (decoded['bps'] as List<dynamic>?) ?? [];
+ } else {
+ final int pMarker = rawText.indexOf('const photos =');
+ final int bMarker = rawText.indexOf('const bps =');
+ if (pMarker >= 0 && bMarker > pMarker) {
+ final int pStart = rawText.indexOf('[', pMarker);
+ final int pEnd = rawText.lastIndexOf('];', bMarker);
+ if (pStart >= 0 && pEnd > pStart) {
+ photosRaw = jsonDecode(rawText.substring(pStart, pEnd + 1)) as List<dynamic>;
+ }
+ }
+ if (bMarker >= 0) {
+ final int bStart = rawText.indexOf('[', bMarker);
+ final int afterBps = rawText.indexOf('let selectedIdx', bMarker);
+ final int searchUntil = afterBps > bStart ? afterBps : rawText.length;
+ final int bEnd = rawText.lastIndexOf('];', searchUntil);
+ if (bStart >= 0 && bEnd > bStart) {
+ bpsRaw = jsonDecode(rawText.substring(bStart, bEnd + 1)) as List<dynamic>;
+ }
+ }
+ }
+ return {'photos': photosRaw, 'bps': bpsRaw};
 }
 Future<void> main() async {
  WidgetsFlutterBinding.ensureInitialized();
@@ -550,9 +581,9 @@ class _CameraScreenState extends State<CameraScreen> {
  final String nowStr = DateTime.now().toString().substring(0, 16);
  final String folderDate = nowStr.substring(0, 10);
  final String dirEn = _compassLabel(_heading, korean: false);
- final double useLat = forcedUserLat ?? _pos!.latitude;
- final double useLng = forcedUserLng ?? _pos!.longitude;
- final double hAcc = forcedUserLat != null ? 1.0 : _pos!.accuracy;
+ final double useLat = _pos!.latitude;
+ final double useLng = _pos!.longitude;
+ final double hAcc = _pos!.accuracy;
  final double vAcc = hAcc * 1.5;
  final bool isAfterShot = _pendingAfterTarget != null;
  final String stamp =
@@ -716,11 +747,10 @@ class _CameraScreenState extends State<CameraScreen> {
  final String dirKr = _compassLabel(_heading, korean: true);
  String locInfo = '위치 정보 수신 중...';
  if (_pos != null) {
- final double dLat = forcedUserLat ?? _pos!.latitude;
- final double dLng = forcedUserLng ?? _pos!.longitude;
- final double acc = forcedUserLat != null ? 1.0 : _pos!.accuracy;
- final String tag =
- forcedUserLat != null ? '강제위치' : '±${acc.toStringAsFixed(1)}m';
+ final double dLat = _pos!.latitude;
+ final double dLng = _pos!.longitude;
+ final double acc = _pos!.accuracy;
+ final String tag = '±${acc.toStringAsFixed(1)}m';
  locInfo =
  '위도: ${dLat.toStringAsFixed(6)} ($tag)\n'
  '경도: ${dLng.toStringAsFixed(6)} ($tag)\n'
@@ -1687,9 +1717,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  final List<String> galleryPaths = _listGalleryFilePathsFast(docDir.path);
  int addedCount = 0;
  int exifGpsCount = 0;
- double defaultLat = forcedUserLat ?? _myCurrentPos?.latitude ?? 37.4984;
- double defaultLng = forcedUserLng ?? _myCurrentPos?.longitude ?? 127.1324;
- if (_mapCtrl != null && forcedUserLat == null) {
+ double defaultLat = _myCurrentPos?.latitude ?? 37.4984;
+ double defaultLng = _myCurrentPos?.longitude ?? 127.1324;
+ if (_mapCtrl != null) {
  try {
  final camPos = await _mapCtrl!.getCameraPosition();
  defaultLat = camPos.target.latitude;
@@ -1985,10 +2015,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  Offset? _tapDownPos;
  int _tapDownMs = 0;
+ bool _moveSelectedPhotoMode = false;
  Future<void> _updateMyLocationMarkerOnly() async {
  if (_mapCtrl == null || !_showMyLocation) return;
- final double? lat = forcedUserLat ?? _myCurrentPos?.latitude;
- final double? lng = forcedUserLng ?? _myCurrentPos?.longitude;
+ final double? lat = _myCurrentPos?.latitude;
+ final double? lng = _myCurrentPos?.longitude;
  if (lat == null || lng == null) return;
  try {
  final icon = await _getMyLocationIcon();
@@ -2008,8 +2039,6 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  _myLocStreamSub = null;
  setState(() {
  _showMyLocation = false;
- forcedUserLat = null;
- forcedUserLng = null;
  });
  await _refreshAllOverlays(includeBlueprint: true);
  return;
@@ -3260,14 +3289,9 @@ const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = 0;
 function copyProjectForApp() {
- const shortToken = 'GPS_CAMERA_HTML_FILE:' + window.location.href + '|COUNT:' + photos.length;
- let copied = false;
- if (navigator.clipboard && navigator.clipboard.writeText) {
- try { navigator.clipboard.writeText(shortToken).catch(() => {}); copied = true; } catch (e) {}
- }
- if (!copied) {
+ const payload = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
  const ta = document.createElement('textarea');
- ta.value = shortToken;
+ ta.value = payload;
  ta.setAttribute('readonly', '');
  ta.style.position = 'fixed';
  ta.style.top = '0';
@@ -3276,26 +3300,19 @@ function copyProjectForApp() {
  document.body.appendChild(ta);
  ta.focus();
  ta.select();
+ let ok = false;
+ try { ok = document.execCommand('copy'); } catch (e) {}
+ if (!ok) {
+ ta.value = 'GPS_CAMERA_HTML_FILE:' + window.location.href;
+ ta.select();
  try { document.execCommand('copy'); } catch (e) {}
- document.body.removeChild(ta);
  }
- try {
- const payload = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
- const blob = new Blob([payload], { type: 'text/plain;charset=utf-8' });
- const url = URL.createObjectURL(blob);
- const a = document.createElement('a');
- a.href = url;
- a.download = 'gps_camera_sync_latest.gpssync';
- document.body.appendChild(a);
- a.click();
- document.body.removeChild(a);
- setTimeout(() => URL.revokeObjectURL(url), 3000);
- } catch (e) {}
+ document.body.removeChild(ta);
  const btn = document.querySelector('.app-copy-btn');
- if (btn) { btn.innerText = '✅ 준비완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
+ if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
  const toast = document.getElementById('copy-toast');
  if (toast) {
- toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 준비 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
+ toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
  toast.style.display = 'block';
  setTimeout(() => { toast.style.display = 'none'; }, 4000);
  }
@@ -3516,8 +3533,7 @@ if (photos.length > 0) {
  for (final FileSystemEntity e in d.listSync(followLinks: false)) {
  if (e is File) {
  final String low = e.path.toLowerCase();
- if ((low.endsWith('.gpssync') ||
- low.endsWith('.html') ||
+ if ((low.endsWith('.html') ||
  low.endsWith('.htm') ||
  low.endsWith('.zip')) &&
  seenPaths.add(e.path)) {
@@ -3540,32 +3556,34 @@ if (photos.length > 0) {
  return 0;
  }
  });
- for (final File f in foundFiles) {
- if (f.path.toLowerCase().endsWith('.gpssync')) {
- autoReadyFile = f;
- break;
- }
- }
  try {
  final ClipboardData? cdata = await Clipboard.getData('text/plain');
  final String? txt = cdata?.text?.trim();
  if (txt != null && !txt.contains('class GalleryMapDashboard')) {
- if (txt.startsWith('GPS_CAMERA_HTML_FILE:')) {
+ if (txt.startsWith('GPS_CAMERA_HTML_V2:') ||
+ (txt.contains('<!DOCTYPE html>') &&
+ txt.contains('const photos =') &&
+ txt.contains('const bps ='))) {
+ clipboardPayload = txt;
+ } else if (txt.startsWith('GPS_CAMERA_HTML_FILE:')) {
+ final String rawUri =
+ Uri.decodeFull(txt.substring('GPS_CAMERA_HTML_FILE:'.length).trim());
+ final int extIdx = rawUri.indexOf('/emulated/0/');
+ if (extIdx >= 0) {
+ final File directF =
+ File('/storage${rawUri.substring(extIdx)}');
+ if (directF.existsSync()) autoReadyFile = directF;
+ }
  if (autoReadyFile == null && foundFiles.isNotEmpty) {
  autoReadyFile = foundFiles.firstWhere(
  (f) => !f.path.toLowerCase().endsWith('.zip'),
  orElse: () => foundFiles.first,
  );
  }
- } else if (txt.startsWith('GPS_CAMERA_HTML_V2:') ||
- (txt.contains('<!DOCTYPE html>') &&
- txt.contains('const photos =') &&
- txt.contains('const bps ='))) {
- clipboardPayload = txt;
  }
  }
  } catch (_) {}
- if (autoReadyFile == null && foundFiles.isNotEmpty) {
+ if (clipboardPayload == null && autoReadyFile == null && foundFiles.isNotEmpty) {
  for (final File f in foundFiles) {
  if (f.path.toLowerCase().contains('gps_map_viewer')) {
  autoReadyFile = f;
@@ -3640,32 +3658,27 @@ if (photos.length > 0) {
  ],
  ),
  ),
- if (autoReadyFile != null || clipboardPayload != null) ...[
+ if (clipboardPayload != null || autoReadyFile != null) ...[
  const SizedBox(height: 10),
  ElevatedButton.icon(
  onPressed: () async {
  Navigator.pop(ctx);
- if (autoReadyFile != null && autoReadyFile!.existsSync()) {
+ if (clipboardPayload != null) {
+ await _importProjectFromHtmlOrPayload(
+ clipboardPayload!,
+ replaceExisting: replaceExisting,
+ );
+ } else if (autoReadyFile != null && autoReadyFile!.existsSync()) {
  final String content = await autoReadyFile!.readAsString();
  await _importProjectFromHtmlOrPayload(
  content,
  replaceExisting: replaceExisting,
  );
- if (autoReadyFile!.path.toLowerCase().endsWith('.gpssync')) {
- try {
- await autoReadyFile!.delete();
- } catch (_) {}
- }
- } else if (clipboardPayload != null) {
- await _importProjectFromHtmlOrPayload(
- clipboardPayload!,
- replaceExisting: replaceExisting,
- );
  }
  },
- icon: const Icon(Icons.flash_on, size: 18),
+ icon: const Icon(Icons.content_paste_go, size: 18),
  label: const Text(
- '⚡ 방금 웹 뷰어(.html)에서 준비한 데이터 초고속 업로드!',
+ '📋 방금 웹 뷰어(.html)에서 복사한 데이터 즉시 업로드!',
  style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
  ),
  style: ElevatedButton.styleFrom(
@@ -3677,7 +3690,7 @@ if (photos.length > 0) {
  ],
  const SizedBox(height: 10),
  const Text(
- '📥 발견된 공유 파일 목록 (터치하여 즉시 업로드):',
+ '📥 다운로드 / 카카오톡 폴더에서 발견된 파일 (터치하여 업로드):',
  style: TextStyle(color: Colors.white70, fontSize: 11.5),
  ),
  const SizedBox(height: 6),
@@ -3692,7 +3705,7 @@ if (photos.length > 0) {
  border: Border.all(color: Colors.white24),
  ),
  child: const Text(
- '👉 받은 .html 파일을 브라우저(또는 크롬)로 열어 상단의 초록색 [📲 앱에 업로드용 데이터 복사] 버튼을 누른 뒤 이 창을 다시 열면 초고속 업로드 버튼이 활성화됩니다!',
+ '👉 받은 .html 파일을 열어 상단의 초록색 [📲 앱에 업로드용 데이터 복사] 버튼을 누른 뒤 이 창을 다시 열면 [복사한 데이터 즉시 업로드] 버튼이 나타납니다!',
  style: TextStyle(color: Colors.amberAccent, fontSize: 11.5),
  ),
  )
@@ -3761,7 +3774,7 @@ if (photos.length > 0) {
  }
  }
  Future<void> _importProjectFromHtmlOrPayload(
- String rawText, {
+ String inputText, {
  bool replaceExisting = false,
  }) async {
  setState(() {
@@ -3769,37 +3782,8 @@ if (photos.length > 0) {
  _exportStatusMsg = '⚡ HTML 데이터를 초고속 분석하는 중...';
  });
  try {
- final Map<String, dynamic> parsed = await Isolate.run(() {
- List<dynamic> photosRaw = [];
- List<dynamic> bpsRaw = [];
- if (rawText.startsWith('GPS_CAMERA_HTML_V2:')) {
- final Map<String, dynamic> decoded =
- jsonDecode(rawText.substring('GPS_CAMERA_HTML_V2:'.length))
- as Map<String, dynamic>;
- photosRaw = (decoded['photos'] as List<dynamic>?) ?? [];
- bpsRaw = (decoded['bps'] as List<dynamic>?) ?? [];
- } else {
- final int pMarker = rawText.indexOf('const photos =');
- final int bMarker = rawText.indexOf('const bps =');
- if (pMarker >= 0 && bMarker > pMarker) {
- final int pStart = rawText.indexOf('[', pMarker);
- final int pEnd = rawText.lastIndexOf('];', bMarker);
- if (pStart >= 0 && pEnd > pStart) {
- photosRaw = jsonDecode(rawText.substring(pStart, pEnd + 1)) as List<dynamic>;
- }
- }
- if (bMarker >= 0) {
- final int bStart = rawText.indexOf('[', bMarker);
- final int afterBps = rawText.indexOf('let selectedIdx', bMarker);
- final int searchUntil = afterBps > bStart ? afterBps : rawText.length;
- final int bEnd = rawText.lastIndexOf('];', searchUntil);
- if (bStart >= 0 && bEnd > bStart) {
- bpsRaw = jsonDecode(rawText.substring(bStart, bEnd + 1)) as List<dynamic>;
- }
- }
- }
- return {'photos': photosRaw, 'bps': bpsRaw};
- });
+ final Map<String, dynamic> parsed =
+ await Isolate.run(() => _parseHtmlProjectTopLevel(inputText));
  final List<dynamic> photosRaw = parsed['photos'] as List<dynamic>;
  final List<dynamic> bpsRaw = parsed['bps'] as List<dynamic>;
  if (photosRaw.isEmpty && bpsRaw.isEmpty) {
@@ -3840,6 +3824,7 @@ if (photos.length > 0) {
  }
  final String targetPath = '${dayDir.path}/html_imp_${baseMs}_$i.jpg';
  await File(targetPath).writeAsBytes(jpgBytes);
+ await File('$targetPath.web.jpg').writeAsBytes(jpgBytes);
  globalHtmlBase64Cache[targetPath] = b64;
  String? afterPath;
  final String? afterB64 = m['afterB64'] as String?;
@@ -3848,6 +3833,7 @@ if (photos.length > 0) {
  if (afterBytes != null && afterBytes.isNotEmpty) {
  afterPath = '${dayDir.path}/html_after_${baseMs}_$i.jpg';
  await File(afterPath).writeAsBytes(afterBytes);
+ await File('$afterPath.web.jpg').writeAsBytes(afterBytes);
  globalHtmlBase64Cache[afterPath] = afterB64;
  }
  }
@@ -5289,16 +5275,17 @@ if (photos.length > 0) {
  _tapDownMs = DateTime.now().millisecondsSinceEpoch;
  },
  onPointerUp: (e) async {
- if (!_showMyLocation || _bpEditMode || _mapCtrl == null) {
+ if (!_moveSelectedPhotoMode || _bpEditMode || _mapCtrl == null) {
  return;
  }
  final Offset? down = _tapDownPos;
  if (down == null) return;
  if (DateTime.now().millisecondsSinceEpoch - _tapDownMs <
- 260 &&
- (e.localPosition - down).distance < 10.0 &&
+ 280 &&
+ (e.localPosition - down).distance < 12.0 &&
  _mapWidgetSize.width > 10 &&
- _mapWidgetSize.height > 10) {
+ _mapWidgetSize.height > 10 &&
+ _visiblePhotos.isNotEmpty) {
  final bounds = _currentMapBounds ??
  await _mapCtrl!.getContentBounds();
  final double tLat = bounds.northEast.latitude -
@@ -5309,19 +5296,35 @@ if (photos.length > 0) {
  (e.localPosition.dx / _mapWidgetSize.width) *
  (bounds.northEast.longitude -
  bounds.southWest.longitude);
+ final PhotoItem cur = _visiblePhotos[
+ _selectedIdx.clamp(0, _visiblePhotos.length - 1)];
+ final int masterIdx = widget.photos.indexOf(cur);
+ if (masterIdx >= 0) {
  setState(() {
- forcedUserLat = tLat;
- forcedUserLng = tLng;
+ widget.photos[masterIdx] = PhotoItem(
+ path: cur.path,
+ lat: tLat,
+ lng: tLng,
+ alt: cur.alt,
+ acc: cur.acc,
+ azimuth: cur.azimuth,
+ pitch: cur.pitch,
+ timestamp: cur.timestamp,
+ category: cur.category,
+ memo: cur.memo,
+ afterPath: cur.afterPath,
+ );
  });
- await _updateMyLocationMarkerOnly();
+ await _persistPhotoMetadata();
+ await _refreshAllOverlays(includeBlueprint: true);
  if (mounted) {
  ScaffoldMessenger.of(context).showSnackBar(
  const SnackBar(
- content: Text(
- '내 위치가 강제 이동되었습니다. 촬영 시 이 좌표가 기록됩니다.'),
- duration: Duration(milliseconds: 1200),
+ content: Text('📍 현재 사진의 동그라미 위치가 터치한 지점으로 이동되었습니다.'),
+ duration: Duration(milliseconds: 1000),
  ),
  );
+ }
  }
  }
  },
@@ -5378,36 +5381,52 @@ if (photos.length > 0) {
  child: Row(
  mainAxisSize: MainAxisSize.min,
  children: [
- if (activePhoto != null) ...[
+ if (_visiblePhotos.isNotEmpty) ...[
  InkWell(
  onTap: () {
- _panMapKeepZoom(activePhoto.lat, activePhoto.lng);
+ setState(() {
+ _moveSelectedPhotoMode = !_moveSelectedPhotoMode;
+ });
+ if (_moveSelectedPhotoMode && mounted) {
+ ScaffoldMessenger.of(context).showSnackBar(
+ const SnackBar(
+ content: Text('📍 지도나 도면 위 원하는 위치를 터치하면 현재 사진의 동그라미가 그곳으로 이동합니다.'),
+ duration: Duration(milliseconds: 1400),
+ ),
+ );
+ }
  },
  borderRadius: BorderRadius.circular(8),
  child: Container(
  padding: const EdgeInsets.symmetric(
  horizontal: 9, vertical: 7),
  decoration: BoxDecoration(
- color: Colors.black87,
+ color: _moveSelectedPhotoMode
+ ? Colors.lightGreenAccent
+ : Colors.black87,
  borderRadius: BorderRadius.circular(8),
  border: Border.all(
  color: Colors.lightGreenAccent,
  width: 1.2,
  ),
  ),
- child: const Row(
+ child: Row(
  mainAxisSize: MainAxisSize.min,
  children: [
  Icon(
- Icons.place,
- color: Colors.lightGreenAccent,
+ Icons.edit_location_alt,
+ color: _moveSelectedPhotoMode
+ ? Colors.black
+ : Colors.lightGreenAccent,
  size: 15,
  ),
- SizedBox(width: 3),
+ const SizedBox(width: 3),
  Text(
- '사진위치 이동',
+ _moveSelectedPhotoMode ? '사진이동 ON' : '사진위치 이동',
  style: TextStyle(
- color: Colors.white,
+ color: _moveSelectedPhotoMode
+ ? Colors.black
+ : Colors.white,
  fontSize: 11,
  fontWeight: FontWeight.bold,
  ),
@@ -5449,11 +5468,7 @@ if (photos.length > 0) {
  ),
  const SizedBox(width: 4),
  Text(
- _showMyLocation
- ? (forcedUserLat != null
- ? '강제위치 ON'
- : '내 위치 ON')
- : '내 위치 표기',
+ _showMyLocation ? '내 위치 ON' : '내 위치 표기',
  style: TextStyle(
  color: _showMyLocation
  ? Colors.black
