@@ -1,5 +1,4 @@
 name: Build Android App Bundle (AAB)
-
 on:
   push:
     branches: [ main, master ]
@@ -208,6 +207,16 @@ jobs:
                   f.write("\n".join(kt_lines))
           EOF
 
+      - name: Create Keystore & key.properties
+        run: |
+          keytool -genkeypair -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload -storepass "${{ secrets.KEYSTORE_PASSWORD }}" -keypass "${{ secrets.KEYSTORE_PASSWORD }}" -dname "CN=tectura, OU=Dev, O=Personal, L=Seoul, S=Seoul, C=KR"
+          cat <<EOF > android/key.properties
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyAlias=upload
+          storeFile=upload-keystore.jks
+          EOF
+          
       - name: Build App Bundle (AAB)
         run: flutter build appbundle --release
 
