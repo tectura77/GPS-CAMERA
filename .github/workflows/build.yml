@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android App Bundle (AAB)
 
 on:
   push:
@@ -208,11 +208,11 @@ jobs:
                   f.write("\n".join(kt_lines))
           EOF
 
-      - name: Build APK
-        run: flutter build apk --release
+      - name: Build App Bundle (AAB)
+        run: flutter build appbundle --release
 
-      - name: Upload APK Artifact
+      - name: Upload AAB Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: release-aab
+          path: build/app/outputs/bundle/release/app-release.aab
