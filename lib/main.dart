@@ -53,84 +53,76 @@ Future<void> loadDefaultCategory(List<PhotoItem> photos) async {
 final Map<String, NOverlayImage> globalMarkerIconCache = {};
 final Map<String, NOverlayImage> globalBpOverlayCache = {};
 final Map<String, String> globalHtmlBase64Cache = {};
-Uint8List _normalizeLargePhotoIsolate(Uint8List raw) {
- try {
- final int headLen = min(raw.length, 16384);
- final String head = String.fromCharCodes(raw.sublist(0, headLen));
- if (head.contains('GPSCAM_META:')) {
- return raw;
- }
- if (raw.length <= 550 * 1024) {
- return raw;
- }
- final img.Image? decoded = img.decodeImage(raw);
- if (decoded == null) return raw;
- final img.Image baked = img.bakeOrientation(decoded);
- final int maxSide = max(baked.width, baked.height);
- if (maxSide <= 1280 && raw.length <= 650 * 1024) {
- return raw;
- }
- final img.Image targetImg = maxSide > 1280
- ? img.copyResize(
- baked,
- width: baked.width >= baked.height ? 1280 : null,
- height: baked.height > baked.width ? 1280 : null,
- interpolation: img.Interpolation.linear,
- )
- : baked;
- return Uint8List.fromList(img.encodeJpg(targetImg, quality: 90));
- } catch (_) {
- return raw;
- }
-}
 Future<Uint8List?> normalizeToAppCameraResolution(Uint8List raw) async {
- try {
- if (raw.length <= 550 * 1024) return raw;
- final String head =
- String.fromCharCodes(raw.sublist(0, min(raw.length, 16384)));
- if (head.contains('GPSCAM_META:')) return raw;
- return await Isolate.run(() => _normalizeLargePhotoIsolate(raw));
- } catch (_) {
  return raw;
- }
 }
 Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  try {
- final File origFile = File(path);
- if (!origFile.existsSync()) return null;
- final String fn = path.split('/').last;
- if (fn.startsWith('photo_') ||
- fn.startsWith('after_') ||
- fn.startsWith('html_imp_') ||
- fn.startsWith('html_after_')) {
- final Uint8List raw = await origFile.readAsBytes();
- if (raw.isNotEmpty) {
- globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(raw)}';
- return raw;
- }
- }
- final File cacheFile = File('$path.appcam.jpg');
- if (cacheFile.existsSync()) {
- final Uint8List cached = await cacheFile.readAsBytes();
- if (cached.isNotEmpty) {
- globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(cached)}';
- return cached;
- }
- }
- final Uint8List raw = await origFile.readAsBytes();
- if (raw.isEmpty) return null;
- final Uint8List out = (await normalizeToAppCameraResolution(raw)) ?? raw;
- try {
- await cacheFile.writeAsBytes(out);
- } catch (_) {}
- globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(out)}';
- return out;
+  final File origFile = File(path);
+  if (!origFile.existsSync()) return null;
+  final Uint8List raw = await origFile.readAsBytes();
+  if (raw.isEmpty) return null;
+  globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(raw)}';
+  return raw;
  } catch (_) {
- return null;
+  return null;
  }
 }
+HttpServer? _localHtmlBridgeServer;
+String? latestLoopbackHtmlPath;
+
+Future<void> startLocalHtmlBridgeServer() async {
+ if (_localHtmlBridgeServer != null) return;
+ try {
+  final server = await HttpServer.bind(
+   InternetAddress.loopbackIPv4,
+   45821,
+   shared: true,
+  );
+  _localHtmlBridgeServer = server;
+  server.listen((HttpRequest req) async {
+   try {
+    req.response.headers.set('Access-Control-Allow-Origin', '*');
+    req.response.headers.set('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    req.response.headers.set('Access-Control-Allow-Headers', '*');
+    req.response.headers.set('Access-Control-Allow-Private-Network', 'true');
+    if (req.method == 'OPTIONS') {
+     req.response.statusCode = 200;
+     await req.response.close();
+     return;
+    }
+    if (req.method == 'POST') {
+     final BytesBuilder bb = BytesBuilder(copy: false);
+     await for (final List<int> chunk in req) {
+      bb.add(chunk);
+     }
+     final Uint8List bodyBytes = bb.toBytes();
+     if (bodyBytes.length > 200) {
+      final Directory tmpDir = await getTemporaryDirectory();
+      final File outF = File('${tmpDir.path}/loopback_latest_hq.html');
+      await outF.writeAsBytes(bodyBytes, flush: true);
+      latestLoopbackHtmlPath = outF.path;
+     }
+     req.response.statusCode = 200;
+     req.response.write('OK');
+     await req.response.close();
+     return;
+    }
+    req.response.statusCode = 200;
+    req.response.write('READY');
+    await req.response.close();
+   } catch (_) {
+    try { await req.response.close(); } catch (_) {}
+   }
+  });
+ } catch (e) {
+  debugPrint('Local HTML bridge server warning: $e');
+ }
+}
+
 Future<void> main() async {
  WidgetsFlutterBinding.ensureInitialized();
+ startLocalHtmlBridgeServer();
  try {
  appCameras = await availableCameras();
  } catch (e) {
@@ -3495,63 +3487,27 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = 0;
-let cachedClipboardStr = null;
-const sharedCanvas = document.createElement('canvas');
-const sharedCtx = sharedCanvas.getContext('2d');
+let cachedRawStr = null;
+let bridgeRetryTimer = null;
 
-function encodeImgFittingBudget(dataUri, maxDim, qual) {
- return new Promise((resolve) => {
-  if (!dataUri || dataUri.length < 100) { resolve(dataUri); return; }
-  const im = new Image();
-  im.onload = () => {
-   try {
-    let w = im.width, h = im.height;
-    if (w > maxDim || h > maxDim) {
-     if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
-     else { w = Math.round(w * maxDim / h); h = maxDim; }
-    }
-    sharedCanvas.width = w;
-    sharedCanvas.height = h;
-    sharedCtx.fillStyle = '#ffffff';
-    sharedCtx.fillRect(0, 0, w, h);
-    sharedCtx.drawImage(im, 0, 0, w, h);
-    resolve(sharedCanvas.toDataURL('image/jpeg', qual));
-   } catch (e) { resolve(dataUri); }
-  };
-  im.onerror = () => resolve(dataUri);
-  im.src = dataUri;
- });
+function getRawPayloadStr() {
+ if (!cachedRawStr) {
+  cachedRawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
+ }
+ return cachedRawStr;
 }
+setTimeout(() => { try { getRawPayloadStr(); } catch (e) {} }, 60);
 
-async function prepareHighQualityClipboard() {
+function sendToLocalAppBridge(rawStr) {
  try {
-  const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
-  if (rawStr.length <= 740000) {
-   cachedClipboardStr = rawStr;
-   return;
-  }
-  const n = Math.max(1, photos.length);
-  const pDim = n <= 6 ? 1280 : (n <= 15 ? 1024 : (n <= 30 ? 840 : 720));
-  const pQual = n <= 6 ? 0.85 : (n <= 15 ? 0.78 : (n <= 30 ? 0.70 : 0.62));
-  const compPhotos = [];
-  for (let i = 0; i < photos.length; i++) {
-   const p = Object.assign({}, photos[i]);
-   p.b64 = await encodeImgFittingBudget(p.b64, pDim, pQual);
-   if (p.afterB64 && p.afterB64.length > 80) {
-    p.afterB64 = await encodeImgFittingBudget(p.afterB64, pDim, pQual);
-   }
-   compPhotos.push(p);
-  }
-  const compBps = [];
-  for (let i = 0; i < bps.length; i++) {
-   const b = Object.assign({}, bps[i]);
-   b.b64 = await encodeImgFittingBudget(b.b64, 1100, 0.78);
-   compBps.push(b);
-  }
-  cachedClipboardStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
+  fetch('http://127.0.0.1:45821/upload', {
+   method: 'POST',
+   mode: 'no-cors',
+   headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+   body: rawStr
+  }).catch(() => {});
  } catch (e) {}
 }
-setTimeout(prepareHighQualityClipboard, 120);
 
 function doSyncCopy(textToCopy) {
  let ok = false;
@@ -3589,23 +3545,28 @@ function triggerSilentHqSave() {
 }
 
 function copyProjectForApp() {
- const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
- const markerPrefix = 'GPS_CAMERA_HTML_META:' + photos.length + ':' + bps.length + ':' + encodeURIComponent(window.location.href) + '|';
+ const rawStr = getRawPayloadStr();
+ // 1. Send 100% uncompressed original data directly to the app's localhost bridge (works for any size, even 50MB!)
+ sendToLocalAppBridge(rawStr);
+ if (bridgeRetryTimer) clearInterval(bridgeRetryTimer);
+ let retries = 0;
+ bridgeRetryTimer = setInterval(() => {
+  retries++;
+  if (retries > 30) { clearInterval(bridgeRetryTimer); return; }
+  sendToLocalAppBridge(rawStr);
+ }, 1500);
+ // 2. Never downscale photos! Either copy rawStr if <= 740KB, or copy the file URI + trigger HQ download
  if (rawStr.length <= 740000) {
   doSyncCopy(rawStr);
  } else {
+  doSyncCopy('GPS_CAMERA_HTML_FILE:' + photos.length + ':' + window.location.href);
   triggerSilentHqSave();
-  if (cachedClipboardStr && cachedClipboardStr.length <= 760000) {
-   doSyncCopy(cachedClipboardStr);
-  } else {
-   doSyncCopy('GPS_CAMERA_HTML_FILE:' + photos.length + ':' + window.location.href);
-  }
  }
  const btn = document.querySelector('.app-copy-btn');
  if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
  const toast = document.getElementById('copy-toast');
  if (toast) {
-  toast.innerHTML = '✅ 원본 화질 그대로 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 준비 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
+  toast.innerHTML = '✅ 100% 원본 화질 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 전송 준비 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
   toast.style.display = 'block';
   setTimeout(() => { toast.style.display = 'none'; }, 4000);
  }
@@ -3893,6 +3854,12 @@ if (photos.length > 0) {
  .replaceAll(RegExp(r'[:\-\s]'), '');
  final File htmlFile = File('${dir.path}/GPS_Map_Viewer_$stamp.html');
  await htmlFile.writeAsString(htmlContent);
+ try {
+  final Directory dlDir = Directory('/storage/emulated/0/Download');
+  if (dlDir.existsSync()) {
+   await File('${dlDir.path}/GPS_Map_Viewer_$stamp.html').writeAsString(htmlContent);
+  }
+ } catch (_) {}
  await Share.shareXFiles(
  [XFile(htmlFile.path)],
  text: '📍 GPS 도면 & 현장 촬영 사진 웹 뷰어(.html)입니다. (브라우저에서 열거나 GPS 카메라 앱에 그대로 업로드할 수 있습니다)',
@@ -3988,71 +3955,96 @@ if (photos.length > 0) {
  }
  });
  int? expectedPhotoCount;
+ // 1. Check localhost loopback HQ file first
  try {
- const MethodChannel ch = MethodChannel('gps_camera/shutter');
- final String? mediaHtmlPath =
- await ch.invokeMethod<String>('findLatestHtmlInDownloads');
- if (mediaHtmlPath != null && mediaHtmlPath.isNotEmpty) {
- final File mf = File(mediaHtmlPath);
- if (mf.existsSync() && seenPaths.add(mf.path)) {
- foundFiles.insert(0, mf);
- }
- }
+  final Directory tmpDir = await getTemporaryDirectory();
+  final File loopF = File('${tmpDir.path}/loopback_latest_hq.html');
+  if (loopF.existsSync() && loopF.lengthSync() > 200) {
+   final int ageSec = DateTime.now().difference(loopF.lastModifiedSync()).inSeconds.abs();
+   if (ageSec <= 600) {
+    autoReadyFile = loopF;
+   }
+   if (seenPaths.add(loopF.path)) {
+    foundFiles.insert(0, loopF);
+   }
+  }
  } catch (_) {}
+ // 2. Check MediaStore.Downloads latest HTML file
  try {
- final ClipboardData? cdata = await Clipboard.getData('text/plain');
- final String? txt = cdata?.text?.trim();
- if (txt != null &&
- !txt.contains('class GalleryMapDashboard') &&
- !txt.contains("import 'package:flutter")) {
- if (txt.startsWith('GPS_CAMERA_HTML_V2:') ||
- (txt.contains('const photos =') && txt.contains('const bps ='))) {
- clipboardPayload = txt;
- } else if (txt.startsWith('GPS_CAMERA_HTML_FILE:')) {
- String rest = txt.substring('GPS_CAMERA_HTML_FILE:'.length).trim();
- final RegExp cntRx = RegExp(r'^(\d+):(.*)$');
- final Match? cm = cntRx.firstMatch(rest);
- if (cm != null) {
- expectedPhotoCount = int.tryParse(cm.group(1)!);
- rest = cm.group(2)!;
- }
- final String rawUri = Uri.decodeFull(rest);
- final int extIdx = rawUri.indexOf('/emulated/0/');
- if (extIdx >= 0) {
- final File directF =
- File('/storage${rawUri.substring(extIdx)}');
- if (directF.existsSync()) autoReadyFile = directF;
- }
- final int extFilesIdx = rawUri.indexOf('/external_files/');
- if (autoReadyFile == null && extFilesIdx >= 0) {
- final String subPath =
- rawUri.substring(extFilesIdx + '/external_files/'.length);
- final File directF2 = File('/storage/emulated/0/$subPath');
- if (directF2.existsSync()) autoReadyFile = directF2;
- }
- }
- }
+  const MethodChannel ch = MethodChannel('gps_camera/shutter');
+  final String? mediaHtmlPath =
+   await ch.invokeMethod<String>('findLatestHtmlInDownloads');
+  if (mediaHtmlPath != null && mediaHtmlPath.isNotEmpty) {
+   final File mf = File(mediaHtmlPath);
+   if (mf.existsSync() && seenPaths.add(mf.path)) {
+    foundFiles.insert(0, mf);
+   }
+  }
  } catch (_) {}
- // Only auto-select a file from Downloads if it was just saved (within last 90 seconds)
- // or matches expectedPhotoCount! Never overwrite a newer clipboard with an old Download file!
+ // 3. Check Clipboard
+ try {
+  final ClipboardData? cdata = await Clipboard.getData('text/plain');
+  final String? txt = cdata?.text?.trim();
+  if (txt != null &&
+   !txt.contains('class GalleryMapDashboard') &&
+   !txt.contains("import 'package:flutter")) {
+   if (txt.startsWith('GPS_CAMERA_HTML_V2:') ||
+    (txt.contains('const photos =') && txt.contains('const bps ='))) {
+    clipboardPayload = txt;
+   } else if (txt.startsWith('GPS_CAMERA_HTML_FILE:')) {
+    String rest = txt.substring('GPS_CAMERA_HTML_FILE:'.length).trim();
+    final RegExp cntRx = RegExp(r'^(\d+):(.*)$');
+    final Match? cm = cntRx.firstMatch(rest);
+    if (cm != null) {
+     expectedPhotoCount = int.tryParse(cm.group(1)!);
+     rest = cm.group(2)!;
+    }
+    if (autoReadyFile == null && (rest.startsWith('content://') || rest.startsWith('file://'))) {
+     try {
+      const MethodChannel ch = MethodChannel('gps_camera/shutter');
+      final String? copiedUriPath =
+       await ch.invokeMethod<String>('readContentUri', {'uri': rest});
+      if (copiedUriPath != null && copiedUriPath.isNotEmpty) {
+       final File uf = File(copiedUriPath);
+       if (uf.existsSync()) autoReadyFile = uf;
+      }
+     } catch (_) {}
+    }
+    final String rawUri = Uri.decodeFull(rest);
+    final int extIdx = rawUri.indexOf('/emulated/0/');
+    if (autoReadyFile == null && extIdx >= 0) {
+     final File directF = File('/storage${rawUri.substring(extIdx)}');
+     if (directF.existsSync()) autoReadyFile = directF;
+    }
+    final int extFilesIdx = rawUri.indexOf('/external_files/');
+    if (autoReadyFile == null && extFilesIdx >= 0) {
+     final String subPath =
+      rawUri.substring(extFilesIdx + '/external_files/'.length);
+     final File directF2 = File('/storage/emulated/0/$subPath');
+     if (directF2.existsSync()) autoReadyFile = directF2;
+    }
+   }
+  }
+ } catch (_) {}
+ // 4. Match in foundFiles by expectedPhotoCount or recent timestamp
  if (autoReadyFile == null && foundFiles.isNotEmpty) {
- final DateTime nowDt = DateTime.now();
- for (final File f in foundFiles) {
- if (f.path.toLowerCase().endsWith('.zip')) continue;
- try {
- final DateTime mod = f.lastModifiedSync();
- final int ageSec = nowDt.difference(mod).inSeconds.abs();
- final String fname = f.path.split('/').last.toLowerCase();
- if (expectedPhotoCount != null && fname.contains('_${expectedPhotoCount}p_')) {
- autoReadyFile = f;
- break;
- }
- if (ageSec <= 90 && (fname.contains('gps_map_viewer') || fname.contains('auto_latest_import'))) {
- autoReadyFile = f;
- break;
- }
- } catch (_) {}
- }
+  final DateTime nowDt = DateTime.now();
+  for (final File f in foundFiles) {
+   if (f.path.toLowerCase().endsWith('.zip')) continue;
+   try {
+    final DateTime mod = f.lastModifiedSync();
+    final int ageSec = nowDt.difference(mod).inSeconds.abs();
+    final String fname = f.path.split('/').last.toLowerCase();
+    if (expectedPhotoCount != null && fname.contains('_${expectedPhotoCount}p_')) {
+     autoReadyFile = f;
+     break;
+    }
+    if (ageSec <= 180 && (fname.contains('gps_map_viewer') || fname.contains('auto_latest_import') || fname.contains('loopback_latest_hq'))) {
+     autoReadyFile = f;
+     break;
+    }
+   } catch (_) {}
+  }
  }
  bool replaceExisting = false;
  if (!mounted) return;
@@ -4124,38 +4116,69 @@ if (photos.length > 0) {
  const SizedBox(height: 10),
  ElevatedButton.icon(
  onPressed: () async {
- if (autoReadyFile != null && autoReadyFile!.existsSync()) {
+ // Re-check loopback HQ file in case background retry just arrived!
  try {
- final String fileContent = await autoReadyFile!.readAsString();
- if (clipboardPayload == null) {
- Navigator.pop(ctx);
- await _importProjectFromHtmlOrPayload(
- fileContent,
- replaceExisting: replaceExisting,
- );
- return;
- }
- // Both autoReadyFile and clipboardPayload exist:
- // Compare photo count so an older Download file with fewer photos is NEVER used!
- final int filePhotos = '"b64":'.allMatches(fileContent).length;
- final int clipPhotos = '"b64":'.allMatches(clipboardPayload!).length;
- if (filePhotos >= clipPhotos && fileContent.length >= clipboardPayload!.length) {
- Navigator.pop(ctx);
- await _importProjectFromHtmlOrPayload(
- fileContent,
- replaceExisting: replaceExisting,
- );
- return;
- }
+  final Directory tmpDir = await getTemporaryDirectory();
+  final File loopF = File('${tmpDir.path}/loopback_latest_hq.html');
+  if (loopF.existsSync() && loopF.lengthSync() > 200) {
+   final int ageSec = DateTime.now().difference(loopF.lastModifiedSync()).inSeconds.abs();
+   if (ageSec <= 600) {
+    autoReadyFile = loopF;
+   }
+  }
  } catch (_) {}
+ if (autoReadyFile != null && autoReadyFile!.existsSync()) {
+  try {
+   final String fileContent = await autoReadyFile!.readAsString();
+   if (clipboardPayload == null) {
+    Navigator.pop(ctx);
+    await _importProjectFromHtmlOrPayload(
+     fileContent,
+     replaceExisting: replaceExisting,
+    );
+    return;
+   }
+   final int filePhotos = '"b64":'.allMatches(fileContent).length;
+   final int clipPhotos = '"b64":'.allMatches(clipboardPayload!).length;
+   if (filePhotos == clipPhotos && fileContent.length >= clipboardPayload!.length) {
+    Navigator.pop(ctx);
+    await _importProjectFromHtmlOrPayload(
+     fileContent,
+     replaceExisting: replaceExisting,
+    );
+    return;
+   }
+  } catch (_) {}
  }
  if (clipboardPayload != null) {
- Navigator.pop(ctx);
- await _importProjectFromHtmlOrPayload(
- clipboardPayload!,
- replaceExisting: replaceExisting,
- );
- return;
+  final int clipPhotos = max(1, '"b64":'.allMatches(clipboardPayload!).length);
+  final int avgCharsPerPhoto = clipboardPayload!.length ~/ clipPhotos;
+  // If clipboardPayload came from an older HTML that compressed photos (< 160KB base64 per photo),
+  // search ALL foundFiles for an uncompressed HTML file with the same photo count!
+  if (avgCharsPerPhoto < 165000) {
+   for (final File f in foundFiles) {
+    if (f.path.toLowerCase().endsWith('.zip')) continue;
+    try {
+     if (f.lengthSync() <= clipboardPayload!.length) continue;
+     final String fc = await f.readAsString();
+     final int fp = '"b64":'.allMatches(fc).length;
+     if (fp == clipPhotos && fc.length > clipboardPayload!.length) {
+      Navigator.pop(ctx);
+      await _importProjectFromHtmlOrPayload(
+       fc,
+       replaceExisting: replaceExisting,
+      );
+      return;
+     }
+    } catch (_) {}
+   }
+  }
+  Navigator.pop(ctx);
+  await _importProjectFromHtmlOrPayload(
+   clipboardPayload!,
+   replaceExisting: replaceExisting,
+  );
+  return;
  }
  try {
  final ClipboardData? latestClip =
