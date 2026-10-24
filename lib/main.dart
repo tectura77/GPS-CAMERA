@@ -3292,18 +3292,65 @@ const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = 0;
 let cachedPayloadStr = null;
-setTimeout(() => {
+
+function compressDataUriAsync(dataUri, maxDim, qual, mimeOut) {
+ return new Promise((resolve) => {
+  if (!dataUri || dataUri.length < 100) { resolve(dataUri); return; }
+  const im = new Image();
+  im.onload = () => {
+   try {
+    let w = im.width, h = im.height;
+    if (w > maxDim || h > maxDim) {
+     if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+     else { w = Math.round(w * maxDim / h); h = maxDim; }
+    }
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(im, 0, 0, w, h);
+    resolve(c.toDataURL(mimeOut || 'image/jpeg', qual));
+   } catch (e) { resolve(dataUri); }
+  };
+  im.onerror = () => resolve(dataUri);
+  im.src = dataUri;
+ });
+}
+
+async function prepareCompactPayload() {
  try {
-  cachedPayloadStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
+  const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
+  if (rawStr.length <= 720000) {
+   cachedPayloadStr = rawStr;
+   return;
+  }
+  const totalImgs = Math.max(1, photos.length + bps.length);
+  const maxDim = totalImgs <= 10 ? 960 : (totalImgs <= 25 ? 720 : (totalImgs <= 45 ? 560 : 440));
+  const qual = totalImgs <= 10 ? 0.72 : (totalImgs <= 25 ? 0.62 : 0.52);
+  const compPhotos = [];
+  for (let i = 0; i < photos.length; i++) {
+   const p = Object.assign({}, photos[i]);
+   p.b64 = await compressDataUriAsync(p.b64, maxDim, qual, 'image/jpeg');
+   if (p.afterB64 && p.afterB64.length > 50) {
+    p.afterB64 = await compressDataUriAsync(p.afterB64, maxDim, qual, 'image/jpeg');
+   }
+   compPhotos.push(p);
+  }
+  const compBps = [];
+  for (let i = 0; i < bps.length; i++) {
+   const b = Object.assign({}, bps[i]);
+   b.b64 = await compressDataUriAsync(b.b64, 900, 0.75, 'image/png');
+   compBps.push(b);
+  }
+  cachedPayloadStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
  } catch (e) {}
-}, 80);
-function copyProjectForApp() {
- const payload = cachedPayloadStr || ('GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps }));
- cachedPayloadStr = payload;
+}
+setTimeout(prepareCompactPayload, 40);
+
+function copyTextViaTextarea(str) {
  let ok = false;
  try {
   const ta = document.createElement('textarea');
-  ta.value = payload;
+  ta.value = str;
   ta.setAttribute('readonly', '');
   ta.style.position = 'fixed';
   ta.style.top = '0';
@@ -3321,22 +3368,33 @@ function copyProjectForApp() {
   ta.select();
   ta.setSelectionRange(0, ta.value.length);
   try { ok = document.execCommand('copy'); } catch (e) {}
-  if (!ok) {
-   ta.value = 'GPS_CAMERA_HTML_FILE:' + window.location.href;
-   ta.select();
-   ta.setSelectionRange(0, ta.value.length);
-   try { document.execCommand('copy'); } catch (e) {}
-  }
   document.body.removeChild(ta);
  } catch (e) {}
+ return ok;
+}
+
+function copyProjectForApp() {
  const btn = document.querySelector('.app-copy-btn');
- if (btn) {
-  btn.innerText = '✅ 복사완료! 앱에서 업로드하세요';
-  btn.style.background = '#ffc107';
+ if (!cachedPayloadStr) {
+  if (btn) btn.innerText = '⏳ 데이터 준비 중...';
+  prepareCompactPayload().then(() => {
+   const payload = cachedPayloadStr || ('GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps }));
+   copyTextViaTextarea(payload);
+   if (btn) {
+    btn.innerText = '✅ 복사완료! 앱에서 업로드하세요';
+    btn.style.background = '#ffc107';
+   }
+  });
+ } else {
+  copyTextViaTextarea(cachedPayloadStr);
+  if (btn) {
+   btn.innerText = '✅ 복사완료! 앱에서 업로드하세요';
+   btn.style.background = '#ffc107';
+  }
  }
  const toast = document.getElementById('copy-toast');
  if (toast) {
-  toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요 (만약 클라우드 앱에서 복사가 막히면 우측 [💾 다운로드 폴더에 저장]을 누르세요)</span>';
+  toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">이제 GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요!</span>';
   toast.style.display = 'block';
   setTimeout(() => { toast.style.display = 'none'; }, 4500);
  }
@@ -3723,9 +3781,7 @@ if (photos.length > 0) {
  final String? txt = cdata?.text?.trim();
  if (txt != null && !txt.contains('class GalleryMapDashboard')) {
  if (txt.startsWith('GPS_CAMERA_HTML_V2:') ||
- (txt.contains('<!DOCTYPE html>') &&
- txt.contains('const photos =') &&
- txt.contains('const bps ='))) {
+ (txt.contains('const photos =') && txt.contains('const bps ='))) {
  clipboardPayload = txt;
  } else if (txt.startsWith('GPS_CAMERA_HTML_FILE:')) {
  final String rawUri =
@@ -3997,23 +4053,35 @@ if (photos.length > 0) {
  final int scriptIdx = inputText.lastIndexOf('<script>');
  final String scriptBody = scriptIdx >= 0 ? inputText.substring(scriptIdx) : inputText;
  final int pMarker = scriptBody.indexOf('const photos =');
- final int bMarker = scriptBody.indexOf('const bps =');
- if (pMarker >= 0 && bMarker > pMarker) {
+ if (pMarker >= 0) {
  final int pStart = scriptBody.indexOf('[', pMarker);
+ final int bMarker = scriptBody.indexOf('const bps =', pStart >= 0 ? pStart : pMarker);
+ if (pStart >= 0 && bMarker > pStart) {
  final String pSegment = scriptBody.substring(pStart, bMarker).trimRight();
  if (pSegment.endsWith(';')) {
  final String pJson = pSegment.substring(0, pSegment.length - 1).trimRight();
  photosRaw = jsonDecode(pJson) as List<dynamic>;
+ } else {
+ final int lastBracket = pSegment.lastIndexOf(']');
+ if (lastBracket > 0) {
+ photosRaw = jsonDecode(pSegment.substring(0, lastBracket + 1)) as List<dynamic>;
+ }
  }
  }
  if (bMarker >= 0) {
  final int bStart = scriptBody.indexOf('[', bMarker);
- final int afterBps = scriptBody.indexOf('let selectedIdx', bMarker);
+ final int afterBps = scriptBody.indexOf('let selectedIdx', bStart >= 0 ? bStart : bMarker);
  if (bStart >= 0 && afterBps > bStart) {
  final String bSegment = scriptBody.substring(bStart, afterBps).trimRight();
  if (bSegment.endsWith(';')) {
  final String bJson = bSegment.substring(0, bSegment.length - 1).trimRight();
  bpsRaw = jsonDecode(bJson) as List<dynamic>;
+ } else {
+ final int lastBracket = bSegment.lastIndexOf(']');
+ if (lastBracket > 0) {
+ bpsRaw = jsonDecode(bSegment.substring(0, lastBracket + 1)) as List<dynamic>;
+ }
+ }
  }
  }
  }
