@@ -976,6 +976,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  bool _showMyLocation = false;
  Position? _myCurrentPos;
  StreamSubscription<Position>? _myLocStreamSub;
+ double _photoRatio = 0.50;
+ bool _isDraggingDivider = false;
  BlueprintItem? get _activeBp =>
  (_blueprints.isNotEmpty &&
  _activeBpIdx >= 0 &&
@@ -3224,6 +3226,7 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
+<meta name="referrer" content="origin">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>GPS 도면 & 현장 사진 대시보드</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -3233,9 +3236,18 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  header { padding: 8px 12px; background: #000; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; flex-wrap: wrap; gap: 6px; }
  .hdr-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
  .app-copy-btn { background: #00e676; color: #000; border: none; border-radius: 6px; padding: 5px 10px; font-size: 11.5px; font-weight: bold; cursor: pointer; }
- .main-wrap { flex: 1; display: flex; flex-direction: row; overflow: hidden; gap: 3px; background: #222; }
- @media (max-width: 768px) { .main-wrap { flex-direction: column; } }
- .img-pane { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; touch-action: none; }
+ .main-wrap { flex: 1; display: flex; flex-direction: row; overflow: hidden; position: relative; }
+ #photos-wrap { flex: 0 0 50%; display: flex; flex-direction: row; overflow: hidden; min-width: 12%; min-height: 12%; }
+ .img-pane { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; touch-action: none; border-bottom: 1px solid #222; border-right: 1px solid #222; }
+ #split-bar { flex: 0 0 14px; background: #1b1b1b; border-left: 1px solid #3a3a3a; border-right: 1px solid #3a3a3a; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; z-index: 500; }
+ #split-bar .grip { width: 4px; height: 44px; background: #ffc107; border-radius: 4px; opacity: 0.85; }
+ #split-bar.dragging { background: rgba(255,193,7,0.28); }
+ @media (max-width: 768px) {
+  .main-wrap { flex-direction: column; }
+  #photos-wrap { flex-direction: column; }
+  #split-bar { cursor: row-resize; border-left: none; border-right: none; border-top: 1px solid #3a3a3a; border-bottom: 1px solid #3a3a3a; }
+  #split-bar .grip { width: 44px; height: 4px; }
+ }
  .img-pane img { max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center center; user-select: none; -webkit-user-drag: none; }
  .pane-badge { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.75); color: #ffc107; border: 1px solid #ffc107; font-size: 11px; font-weight: bold; padding: 3px 8px; border-radius: 6px; z-index: 10; pointer-events: none; }
  .pane-badge.after { color: #00e676; border-color: #00e676; }
@@ -3253,11 +3265,13 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  <div class="hdr-left">
  <strong>📍 날짜: $_dateFilter | 분류: $_categoryFilter</strong>
  <button class="app-copy-btn" onclick="copyProjectForApp()">📲 앱에 업로드용 데이터 복사</button>
+ <button class="app-dl-btn" onclick="downloadHtmlForApp()" style="background:#29b6f6;color:#000;border:none;border-radius:6px;padding:5px 9px;font-size:11.5px;font-weight:bold;cursor:pointer;">💾 다운로드 폴더에 저장</button>
  </div>
  <div id="info-txt" style="width:100%; font-size:16.5px; font-weight:bold; color:#ffc107; line-height:1.35; padding-top:2px; word-break:keep-all;"></div>
 </header>
 <div id="copy-toast" style="display:none; position:fixed; top:56px; left:50%; transform:translateX(-50%); background:rgba(0,200,83,0.96); color:#000; font-weight:bold; font-size:13.5px; padding:10px 16px; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.65); z-index:9999; text-align:center; width:86%; max-width:400px;"></div>
-<div class="main-wrap">
+<div class="main-wrap" id="main-wrap">
+ <div id="photos-wrap">
  <div id="photo-pane" class="img-pane">
  <div id="before-badge" class="pane-badge" style="display:none;">조치전 사진</div>
  <img id="main-photo" src="" alt="현장 사진"/>
@@ -3268,6 +3282,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  <img id="after-photo" src="" alt="조치후 사진"/>
  <div class="zoom-hint">조치후 완료 사진</div>
  </div>
+ </div>
+ <div id="split-bar" title="드래그하여 사진/지도 비율 조절 (더블터치 초기화)"><div class="grip"></div></div>
  <div id="map-pane"></div>
 </div>
 <div id="thumbs"></div>
@@ -3275,41 +3291,75 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = 0;
+let cachedPayloadStr = null;
+setTimeout(() => {
+ try {
+  cachedPayloadStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
+ } catch (e) {}
+}, 80);
 function copyProjectForApp() {
+ const payload = cachedPayloadStr || ('GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps }));
+ cachedPayloadStr = payload;
+ let ok = false;
+ try {
+  const ta = document.createElement('textarea');
+  ta.value = payload;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = '0';
+  ta.style.width = '2em';
+  ta.style.height = '2em';
+  ta.style.padding = '0';
+  ta.style.border = 'none';
+  ta.style.outline = 'none';
+  ta.style.boxShadow = 'none';
+  ta.style.background = 'transparent';
+  ta.style.opacity = '0.01';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  ta.setSelectionRange(0, ta.value.length);
+  try { ok = document.execCommand('copy'); } catch (e) {}
+  if (!ok) {
+   ta.value = 'GPS_CAMERA_HTML_FILE:' + window.location.href;
+   ta.select();
+   ta.setSelectionRange(0, ta.value.length);
+   try { document.execCommand('copy'); } catch (e) {}
+  }
+  document.body.removeChild(ta);
+ } catch (e) {}
  const btn = document.querySelector('.app-copy-btn');
  if (btn) {
- btn.innerText = '✅ 복사완료! 앱에서 업로드하세요';
- btn.style.background = '#ffc107';
+  btn.innerText = '✅ 복사완료! 앱에서 업로드하세요';
+  btn.style.background = '#ffc107';
  }
  const toast = document.getElementById('copy-toast');
  if (toast) {
- toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
- toast.style.display = 'block';
- setTimeout(() => { toast.style.display = 'none'; }, 4000);
+  toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요 (만약 클라우드 앱에서 복사가 막히면 우측 [💾 다운로드 폴더에 저장]을 누르세요)</span>';
+  toast.style.display = 'block';
+  setTimeout(() => { toast.style.display = 'none'; }, 4500);
  }
- setTimeout(() => {
+}
+function downloadHtmlForApp() {
  try {
- const payload = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
- const ta = document.createElement('textarea');
- ta.value = payload;
- ta.setAttribute('readonly', '');
- ta.style.position = 'fixed';
- ta.style.top = '0';
- ta.style.left = '-9999px';
- ta.style.opacity = '0';
- document.body.appendChild(ta);
- ta.focus();
- ta.select();
- let ok = false;
- try { ok = document.execCommand('copy'); } catch (e) {}
- if (!ok) {
- ta.value = 'GPS_CAMERA_HTML_FILE:' + window.location.href;
- ta.select();
- try { document.execCommand('copy'); } catch (e) {}
- }
- document.body.removeChild(ta);
+  const fullHtml = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'GPS_Map_Viewer_Import_' + Date.now() + '.html';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  const toast = document.getElementById('copy-toast');
+  if (toast) {
+   toast.innerHTML = '💾 다운로드 폴더에 HTML 파일이 저장되었습니다!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]에서 바로 선택하세요</span>';
+   toast.style.display = 'block';
+   setTimeout(() => { toast.style.display = 'none'; }, 4500);
+  }
  } catch (e) {}
- }, 15);
 }
 function bindPinchZoom(paneEl, imgEl) {
  let scale = 1.0, tx = 0, ty = 0;
@@ -3355,14 +3405,99 @@ function bindPinchZoom(paneEl, imgEl) {
 }
 const resetMainZoom = bindPinchZoom(document.getElementById('photo-pane'), document.getElementById('main-photo'));
 const resetAfterZoom = bindPinchZoom(document.getElementById('after-pane'), document.getElementById('after-photo'));
+(function initSplitBar() {
+ const mainWrap = document.getElementById('main-wrap');
+ const photosWrap = document.getElementById('photos-wrap');
+ const splitBar = document.getElementById('split-bar');
+ let draggingSplit = false;
+ let lastSplitTap = 0;
+ function updateSplitPos(clientX, clientY) {
+  const rect = mainWrap.getBoundingClientRect();
+  const isCol = window.getComputedStyle(mainWrap).flexDirection === 'column';
+  const total = isCol ? rect.height : rect.width;
+  if (total <= 40) return;
+  const pos = isCol ? (clientY - rect.top) : (clientX - rect.left);
+  const pct = Math.min(85, Math.max(15, (pos / total) * 100));
+  photosWrap.style.flex = '0 0 ' + pct.toFixed(1) + '%';
+  if (typeof map !== 'undefined' && map) map.invalidateSize();
+ }
+ splitBar.addEventListener('touchstart', (e) => {
+  const now = Date.now();
+  if (now - lastSplitTap < 300) {
+   photosWrap.style.flex = '0 0 50%';
+   if (typeof map !== 'undefined' && map) setTimeout(() => map.invalidateSize(), 30);
+   lastSplitTap = 0;
+   return;
+  }
+  lastSplitTap = now;
+  draggingSplit = true;
+  splitBar.classList.add('dragging');
+ }, { passive: true });
+ window.addEventListener('touchmove', (e) => {
+  if (!draggingSplit || e.touches.length === 0) return;
+  e.preventDefault();
+  updateSplitPos(e.touches[0].clientX, e.touches[0].clientY);
+ }, { passive: false });
+ window.addEventListener('touchend', () => {
+  if (!draggingSplit) return;
+  draggingSplit = false;
+  splitBar.classList.remove('dragging');
+  if (typeof map !== 'undefined' && map) setTimeout(() => map.invalidateSize(), 50);
+ });
+ splitBar.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  draggingSplit = true;
+  splitBar.classList.add('dragging');
+ });
+ splitBar.addEventListener('dblclick', () => {
+  photosWrap.style.flex = '0 0 50%';
+  if (typeof map !== 'undefined' && map) setTimeout(() => map.invalidateSize(), 30);
+ });
+ window.addEventListener('mousemove', (e) => {
+  if (!draggingSplit) return;
+  updateSplitPos(e.clientX, e.clientY);
+ });
+ window.addEventListener('mouseup', () => {
+  if (!draggingSplit) return;
+  draggingSplit = false;
+  splitBar.classList.remove('dragging');
+  if (typeof map !== 'undefined' && map) setTimeout(() => map.invalidateSize(), 50);
+ });
+})();
 const initLat = photos.length > 0 ? photos[0].lat : (bps.length > 0 ? bps[0].lat : 37.4984);
 const initLng = photos.length > 0 ? photos[0].lng : (bps.length > 0 ? bps[0].lng : 127.1324);
 const map = L.map('map-pane', { maxZoom: 22 }).setView([initLat, initLng], ${currentMapZoom.toStringAsFixed(1)});
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
- maxNativeZoom: 19,
- maxZoom: 22,
- attribution: '© OpenStreetMap'
-}).addTo(map);
+const tileProviders = [
+ { url: 'https://xdworld.vworld.kr/2d/Base/service/{z}/{x}/{y}.png', maxNative: 19, attr: '© VWorld / 국토교통부' },
+ { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', maxNative: 20, attr: '© CARTO / OpenStreetMap' },
+ { url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png', maxNative: 18, attr: '© OpenStreetMap DE' },
+ { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, attr: '© OpenStreetMap' }
+];
+let currentProviderIdx = 0;
+let tileErrorCount = 0;
+let activeTileLayer = null;
+function loadTileProvider(idx) {
+ if (idx >= tileProviders.length) return;
+ currentProviderIdx = idx;
+ tileErrorCount = 0;
+ if (activeTileLayer) {
+  try { map.removeLayer(activeTileLayer); } catch (e) {}
+ }
+ const p = tileProviders[idx];
+ activeTileLayer = L.tileLayer(p.url, {
+  maxNativeZoom: p.maxNative,
+  maxZoom: 22,
+  attribution: p.attr
+ });
+ activeTileLayer.on('tileerror', () => {
+  tileErrorCount++;
+  if (tileErrorCount >= 3 && currentProviderIdx + 1 < tileProviders.length) {
+   loadTileProvider(currentProviderIdx + 1);
+  }
+ });
+ activeTileLayer.addTo(map);
+}
+loadTileProvider(0);
 bps.forEach((bp) => {
  if (bp.isVisible === false) return;
  const bpImg = new Image();
@@ -3512,9 +3647,18 @@ if (photos.length > 0) {
  '/storage/emulated/0/Download',
  '/storage/emulated/0/Download/KakaoTalk',
  '/storage/emulated/0/KakaoTalkDownload',
+ '/storage/emulated/0/NaverMYBOX',
+ '/storage/emulated/0/MYBOX',
+ '/storage/emulated/0/Ndrive',
+ '/storage/emulated/0/Download/MYBOX',
+ '/storage/emulated/0/Download/NaverMYBOX',
+ '/storage/emulated/0/Documents',
+ '/storage/emulated/0/Android/data/com.nhn.android.ndrive/cache',
+ '/storage/emulated/0/Android/data/com.nhn.android.ndrive/files',
+ '/storage/emulated/0/Android/data/com.google.android.apps.docs/cache',
+ '/storage/emulated/0/Android/data/com.google.android.apps.docs/files',
  '/storage/emulated/0/Android/data/com.kakao.talk/files',
  '/storage/emulated/0/Android/data/com.kakao.talk/cache',
- '/storage/emulated/0/Documents',
  ];
  try {
  final Directory tmp = await getTemporaryDirectory();
@@ -3567,6 +3711,13 @@ if (photos.length > 0) {
  final File directF =
  File('/storage${rawUri.substring(extIdx)}');
  if (directF.existsSync()) autoReadyFile = directF;
+ }
+ final int extFilesIdx = rawUri.indexOf('/external_files/');
+ if (autoReadyFile == null && extFilesIdx >= 0) {
+ final String subPath =
+ rawUri.substring(extFilesIdx + '/external_files/'.length);
+ final File directF2 = File('/storage/emulated/0/$subPath');
+ if (directF2.existsSync()) autoReadyFile = directF2;
  }
  if (autoReadyFile == null && foundFiles.isNotEmpty) {
  autoReadyFile = foundFiles.firstWhere(
@@ -3652,39 +3803,113 @@ if (photos.length > 0) {
  ],
  ),
  ),
- if (clipboardPayload != null || autoReadyFile != null) ...[
  const SizedBox(height: 10),
  ElevatedButton.icon(
  onPressed: () async {
- Navigator.pop(ctx);
  if (clipboardPayload != null) {
+ Navigator.pop(ctx);
  await _importProjectFromHtmlOrPayload(
  clipboardPayload!,
  replaceExisting: replaceExisting,
  );
- } else if (autoReadyFile != null && autoReadyFile!.existsSync()) {
+ return;
+ }
+ if (autoReadyFile != null && autoReadyFile!.existsSync()) {
+ Navigator.pop(ctx);
  final String content = await autoReadyFile!.readAsString();
  await _importProjectFromHtmlOrPayload(
  content,
  replaceExisting: replaceExisting,
  );
+ return;
+ }
+ try {
+ final ClipboardData? latestClip =
+ await Clipboard.getData('text/plain');
+ final String? latestTxt = latestClip?.text?.trim();
+ if (latestTxt != null &&
+ (latestTxt.startsWith('GPS_CAMERA_HTML_V2:') ||
+ (latestTxt.contains('const photos =') &&
+ latestTxt.contains('const bps =')))) {
+ Navigator.pop(ctx);
+ await _importProjectFromHtmlOrPayload(
+ latestTxt,
+ replaceExisting: replaceExisting,
+ );
+ return;
+ }
+ } catch (_) {}
+ if (mounted) {
+ ScaffoldMessenger.of(context).showSnackBar(
+ const SnackBar(
+ content: Text(
+ '⚠️ 클립보드에 복사된 데이터가 없거나 브라우저 용량 제한으로 차단되었습니다. HTML 화면 상단의 파란색 [💾 다운로드 폴더에 저장] 버튼이나 아래 [📂 파일 탐색기에서 직접 선택]을 눌러주세요!',
+ ),
+ duration: Duration(seconds: 4),
+ ),
+ );
  }
  },
  icon: const Icon(Icons.content_paste_go, size: 18),
- label: const Text(
- '📋 방금 웹 뷰어(.html)에서 복사한 데이터 즉시 업로드!',
- style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+ label: Text(
+ (clipboardPayload != null || autoReadyFile != null)
+ ? '📋 방금 웹 뷰어(.html)에서 복사한 데이터 즉시 업로드!'
+ : '📋 클립보드에 복사한 HTML 데이터 붙여넣기 업로드',
+ style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
  ),
  style: ElevatedButton.styleFrom(
- backgroundColor: Colors.greenAccent[400],
+ backgroundColor: (clipboardPayload != null || autoReadyFile != null)
+ ? Colors.greenAccent[400]
+ : Colors.amber,
  foregroundColor: Colors.black,
  padding: const EdgeInsets.symmetric(vertical: 11),
  ),
  ),
- ],
+ const SizedBox(height: 8),
+ ElevatedButton.icon(
+ onPressed: () async {
+ try {
+ final ImagePicker picker = ImagePicker();
+ final XFile? picked = await picker.pickMedia();
+ if (picked == null) return;
+ final String lowName = picked.name.toLowerCase();
+ final String lowPath = picked.path.toLowerCase();
+ Navigator.pop(ctx);
+ if (lowName.endsWith('.zip') || lowPath.endsWith('.zip')) {
+ await _importFromZipFile(
+ File(picked.path),
+ replaceExisting: replaceExisting,
+ );
+ } else {
+ final Uint8List rawBytes = await picked.readAsBytes();
+ final String content = utf8.decode(rawBytes, allowMalformed: true);
+ await _importProjectFromHtmlOrPayload(
+ content,
+ replaceExisting: replaceExisting,
+ );
+ }
+ } catch (e) {
+ if (mounted) {
+ ScaffoldMessenger.of(context).showSnackBar(
+ SnackBar(content: Text('파일 선택 오류: $e')),
+ );
+ }
+ }
+ },
+ icon: const Icon(Icons.folder_open, size: 18),
+ label: const Text(
+ '📂 태블릿/휴대폰 파일 탐색기(MYBOX·드라이브·다운로드)에서 직접 선택',
+ style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold),
+ ),
+ style: ElevatedButton.styleFrom(
+ backgroundColor: Colors.lightBlueAccent,
+ foregroundColor: Colors.black,
+ padding: const EdgeInsets.symmetric(vertical: 10),
+ ),
+ ),
  const SizedBox(height: 10),
  const Text(
- '📥 다운로드 / 카카오톡 폴더에서 발견된 파일 (터치하여 업로드):',
+ '📥 다운로드 / MYBOX / 카카오톡 폴더에서 발견된 파일 (터치하여 업로드):',
  style: TextStyle(color: Colors.white70, fontSize: 11.5),
  ),
  const SizedBox(height: 6),
@@ -5748,36 +5973,131 @@ if (photos.length > 0) {
  Column(
  children: [
  Expanded(
- child: portrait
+ child: LayoutBuilder(
+ builder: (context, splitConstraints) {
+ final double totalSpan = portrait
+ ? splitConstraints.maxHeight
+ : splitConstraints.maxWidth;
+ final double clampedRatio = _photoRatio.clamp(0.15, 0.85);
+ final int photoFlex = (clampedRatio * 1000).round().clamp(150, 850);
+ final int mapFlex = ((1.0 - clampedRatio) * 1000).round().clamp(150, 850);
+ final Widget combinedPhotoArea = isThreeSplit
+ ? (portrait
  ? Column(
- children: isThreeSplit
- ? [
- Expanded(flex: 1, child: leftOrTopPane),
- const SizedBox(height: 3),
- Expanded(flex: 1, child: afterPhotoPane),
- const SizedBox(height: 3),
- Expanded(flex: 1, child: mapPane),
- ]
- : [
- Expanded(flex: 5, child: leftOrTopPane),
- const SizedBox(height: 4),
- Expanded(flex: 5, child: mapPane),
+ children: [
+ Expanded(child: leftOrTopPane),
+ Container(height: 2, color: Colors.white24),
+ Expanded(child: afterPhotoPane),
  ],
  )
  : Row(
- children: isThreeSplit
- ? [
- Expanded(flex: 1, child: leftOrTopPane),
- const SizedBox(width: 3),
- Expanded(flex: 1, child: afterPhotoPane),
- const SizedBox(width: 3),
- Expanded(flex: 1, child: mapPane),
- ]
- : [
- Expanded(flex: 5, child: leftOrTopPane),
- const SizedBox(width: 4),
- Expanded(flex: 5, child: mapPane),
+ children: [
+ Expanded(child: leftOrTopPane),
+ Container(width: 2, color: Colors.white24),
+ Expanded(child: afterPhotoPane),
  ],
+ ))
+ : leftOrTopPane;
+ final Widget dividerBar = GestureDetector(
+ behavior: HitTestBehavior.opaque,
+ onDoubleTap: () {
+ setState(() {
+ _photoRatio = isThreeSplit ? 0.64 : 0.50;
+ });
+ Future.delayed(const Duration(milliseconds: 50), () {
+ _updateMapViewportInfo();
+ });
+ },
+ onPanStart: (_) {
+ setState(() => _isDraggingDivider = true);
+ },
+ onPanUpdate: (details) {
+ if (totalSpan <= 40) return;
+ final double delta =
+ portrait ? details.delta.dy : details.delta.dx;
+ setState(() {
+ _photoRatio =
+ (_photoRatio + delta / totalSpan).clamp(0.15, 0.85);
+ });
+ },
+ onPanEnd: (_) {
+ setState(() => _isDraggingDivider = false);
+ Future.delayed(const Duration(milliseconds: 50), () {
+ _updateMapViewportInfo();
+ });
+ },
+ onPanCancel: () {
+ setState(() => _isDraggingDivider = false);
+ },
+ child: Container(
+ width: portrait ? double.infinity : 16,
+ height: portrait ? 16 : double.infinity,
+ decoration: BoxDecoration(
+ color: _isDraggingDivider
+ ? Colors.amber.withOpacity(0.28)
+ : const Color(0xFF1B1B1B),
+ border: Border(
+ top: portrait
+ ? BorderSide(
+ color: _isDraggingDivider
+ ? Colors.amber
+ : Colors.white24,
+ width: 1.0,
+ )
+ : BorderSide.none,
+ bottom: portrait
+ ? BorderSide(
+ color: _isDraggingDivider
+ ? Colors.amber
+ : Colors.white24,
+ width: 1.0,
+ )
+ : BorderSide.none,
+ left: !portrait
+ ? BorderSide(
+ color: _isDraggingDivider
+ ? Colors.amber
+ : Colors.white24,
+ width: 1.0,
+ )
+ : BorderSide.none,
+ right: !portrait
+ ? BorderSide(
+ color: _isDraggingDivider
+ ? Colors.amber
+ : Colors.white24,
+ width: 1.0,
+ )
+ : BorderSide.none,
+ ),
+ ),
+ alignment: Alignment.center,
+ child: Container(
+ width: portrait ? 48 : 4,
+ height: portrait ? 4 : 48,
+ decoration: BoxDecoration(
+ color: _isDraggingDivider ? Colors.amber : Colors.amber.withOpacity(0.75),
+ borderRadius: BorderRadius.circular(4),
+ ),
+ ),
+ ),
+ );
+ return portrait
+ ? Column(
+ children: [
+ Expanded(flex: photoFlex, child: combinedPhotoArea),
+ dividerBar,
+ Expanded(flex: mapFlex, child: mapPane),
+ ],
+ )
+ : Row(
+ children: [
+ Expanded(flex: photoFlex, child: combinedPhotoArea),
+ dividerBar,
+ Expanded(flex: mapFlex, child: mapPane),
+ ],
+ );
+ },
  ),
  ),
  if (_visiblePhotos.isNotEmpty)
