@@ -164,7 +164,7 @@ jobs:
               kt_path = kt_files[0]
               with open(kt_path, "r", encoding="utf-8") as f:
                   first_line = f.readline().strip()
-              pkg_line = first_line if first_line.startswith("package ") else "package com.maplocation.fieldcam"
+              pkg_line = first_line if first_line.startswith("package ") else "package com.maplocation.fieldcam2"
 
               kt_lines = [
                   pkg_line,
