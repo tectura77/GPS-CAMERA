@@ -53,17 +53,80 @@ Future<void> loadDefaultCategory(List<PhotoItem> photos) async {
 final Map<String, NOverlayImage> globalMarkerIconCache = {};
 final Map<String, NOverlayImage> globalBpOverlayCache = {};
 final Map<String, String> globalHtmlBase64Cache = {};
-Future<Uint8List?> normalizeToAppCameraResolution(Uint8List raw) async {
- return raw;
+Uint8List _convertNormalPhotoToAppCameraQualityIsolate(Uint8List raw) {
+ try {
+  final int headLen = min(raw.length, 16384);
+  final String head = String.fromCharCodes(raw.sublist(0, headLen));
+  if (head.contains('GPSCAM_META:')) {
+   return raw;
+  }
+  if (raw.length <= 650 * 1024) {
+   return raw;
+  }
+  final img.Image? decoded = img.decodeImage(raw);
+  if (decoded == null) return raw;
+  final img.Image baked = img.bakeOrientation(decoded);
+  final int maxSide = max(baked.width, baked.height);
+  if (maxSide <= 1920 && raw.length <= 750 * 1024) {
+   return raw;
+  }
+  final img.Image targetImg = maxSide > 1920
+   ? img.copyResize(
+      baked,
+      width: baked.width >= baked.height ? 1920 : null,
+      height: baked.height > baked.width ? 1920 : null,
+      interpolation: img.Interpolation.linear,
+     )
+   : baked;
+  return Uint8List.fromList(img.encodeJpg(targetImg, quality: 90));
+ } catch (_) {
+  return raw;
+ }
 }
+
+Future<Uint8List?> normalizeToAppCameraResolution(Uint8List raw) async {
+ try {
+  if (raw.length <= 650 * 1024) return raw;
+  final String head =
+   String.fromCharCodes(raw.sublist(0, min(raw.length, 16384)));
+  if (head.contains('GPSCAM_META:')) return raw;
+  return await Isolate.run(() => _convertNormalPhotoToAppCameraQualityIsolate(raw));
+ } catch (_) {
+  return raw;
+ }
+}
+
 Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  try {
   final File origFile = File(path);
   if (!origFile.existsSync()) return null;
+  final String fn = path.split('/').last;
+  if (fn.startsWith('photo_') ||
+   fn.startsWith('after_') ||
+   fn.startsWith('html_imp_') ||
+   fn.startsWith('html_after_')) {
+   final Uint8List raw = await origFile.readAsBytes();
+   if (raw.isNotEmpty) {
+    globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(raw)}';
+    return raw;
+   }
+  }
+  final File cacheFile = File('$path.appcam.jpg');
+  if (cacheFile.existsSync()) {
+   final Uint8List cached = await cacheFile.readAsBytes();
+   if (cached.isNotEmpty) {
+    globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(cached)}';
+    return cached;
+   }
+  }
   final Uint8List raw = await origFile.readAsBytes();
   if (raw.isEmpty) return null;
-  globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(raw)}';
-  return raw;
+  final Uint8List out = (await normalizeToAppCameraResolution(raw)) ?? raw;
+  try {
+   await cacheFile.writeAsBytes(out);
+  } catch (_) {}
+  globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(out)}';
+  return out;
  } catch (_) {
   return null;
  }
@@ -1751,200 +1814,271 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  return out;
  }
+ bool _isSameTimestampWithinSeconds(String? dtA, String? dtB, int maxSecDiff) {
+  if (dtA == null || dtB == null) return false;
+  final String a = dtA.replaceAll(RegExp(r'[^0-9]'), '');
+  final String b = dtB.replaceAll(RegExp(r'[^0-9]'), '');
+  if (a.length < 12 || b.length < 12) return false;
+  if (a.substring(0, 8) != b.substring(0, 8)) return false;
+  final int secA = (int.tryParse(a.substring(8, 10)) ?? 0) * 3600 +
+   (int.tryParse(a.substring(10, 12)) ?? 0) * 60 +
+   (a.length >= 14 ? (int.tryParse(a.substring(12, 14)) ?? 0) : 0);
+  final int secB = (int.tryParse(b.substring(8, 10)) ?? 0) * 3600 +
+   (int.tryParse(b.substring(10, 12)) ?? 0) * 60 +
+   (b.length >= 14 ? (int.tryParse(b.substring(12, 14)) ?? 0) : 0);
+  return (secA - secB).abs() <= maxSecDiff;
+ }
+
  Future<Map<String, dynamic>> _fastPinpointOriginalGps(
- XFile picked,
- String? rawDateTime,
- Map<String, String> pathByName,
- Map<int, String> pathByExactSize,
- List<MapEntry<String, int>> galleryWithSizes,
- List<MapEntry<PhotoItem, int>> existingWithSizes,
+  XFile picked,
+  String? rawDateTime,
+  Map<String, String> pathByName,
+  List<MapEntry<String, int>> galleryWithSizes,
+  List<MapEntry<PhotoItem, int>> existingWithSizes,
  ) async {
- final String pickedName = picked.name;
- int pickedSize = 0;
- try {
- pickedSize = await File(picked.path).length();
- } catch (_) {}
- if (pickedSize > 0) {
- for (final entry in existingWithSizes) {
- if ((entry.value - pickedSize).abs() <= 512) {
- final existing = entry.key;
- return {
- 'lat': existing.lat,
- 'lng': existing.lng,
- 'alt': existing.alt,
- 'azimuth': existing.azimuth,
- 'dateTime': existing.timestamp,
- };
+  final String pickedName = picked.name;
+  int pickedSize = 0;
+  try {
+   pickedSize = await File(picked.path).length();
+  } catch (_) {}
+
+  // 1. Exact filename match (only if timestamp also matches when available)
+  final String? sameNamePath = pathByName[pickedName];
+  if (sameNamePath != null) {
+   final m = await _extractPhotoMetaFromPath(sameNamePath);
+   if (m['lat'] != null && m['lng'] != null) {
+    if (rawDateTime == null ||
+     m['dateTime'] == null ||
+     _isSameTimestampWithinSeconds(rawDateTime, m['dateTime']?.toString(), 60)) {
+     return m;
+    }
+   }
+  }
+
+  // 2. Extract 14-digit YYYYMMDDHHMMSS from EXIF DateTimeOriginal or filename
+  String? digits14;
+  if (rawDateTime != null) {
+   final String d = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
+   if (d.length >= 14) {
+    digits14 = d.substring(0, 14);
+   } else if (d.length >= 12) {
+    digits14 = '${d.substring(0, 12)}00';
+   }
+  }
+  if (digits14 == null) {
+   final RegExp fnRe = RegExp(r'(20\d{6})[_\-]?(\d{6})');
+   final m = fnRe.firstMatch(pickedName);
+   if (m != null) digits14 = '${m.group(1)}${m.group(2)}';
+  }
+
+  // 3. Match by exact date (YYYYMMDD) + closest second (within ±10s) in filename
+  if (digits14 != null) {
+   final String ymd = digits14.substring(0, 8);
+   final String hms = digits14.substring(8, 14);
+   final String ymdhm = digits14.substring(0, 12);
+   final int targetSec = (int.tryParse(hms.substring(0, 2)) ?? 0) * 3600 +
+    (int.tryParse(hms.substring(2, 4)) ?? 0) * 60 +
+    (int.tryParse(hms.substring(4, 6)) ?? 0);
+
+   for (int tol = 0; tol <= 10; tol++) {
+    for (final entry in galleryWithSizes) {
+     final String p = entry.key;
+     final String fn = p.split('/').last;
+     if (!fn.contains(ymd)) continue;
+     final RegExp re = RegExp(ymd + r'[_\-]?(\d{6})');
+     final m = re.firstMatch(fn);
+     if (m != null) {
+      final String fHms = m.group(1)!;
+      final int fSec = (int.tryParse(fHms.substring(0, 2)) ?? 0) * 3600 +
+       (int.tryParse(fHms.substring(2, 4)) ?? 0) * 60 +
+       (int.tryParse(fHms.substring(4, 6)) ?? 0);
+      if ((fSec - targetSec).abs() == tol) {
+       final meta = await _extractPhotoMetaFromPath(p);
+       if (meta['lat'] != null && meta['lng'] != null) return meta;
+      }
+     }
+    }
+   }
+
+   for (final entry in galleryWithSizes) {
+    final String p = entry.key;
+    final String fn = p.split('/').last;
+    if (fn.contains(ymd)) {
+     final String fnDigits = fn.replaceAll(RegExp(r'[^0-9]'), '');
+     if (fnDigits.contains(ymdhm)) {
+      final meta = await _extractPhotoMetaFromPath(p);
+      if (meta['lat'] != null && meta['lng'] != null) return meta;
+     }
+    }
+   }
+  }
+
+  // 4. Size + STRICT Timestamp match (NEVER match by size alone without verifying same date & time!)
+  if (pickedSize > 0 && rawDateTime != null) {
+   for (final entry in existingWithSizes) {
+    if ((entry.value - pickedSize).abs() <= 4096) {
+     final existing = entry.key;
+     if (_isSameTimestampWithinSeconds(rawDateTime, existing.timestamp, 60)) {
+      return {
+       'lat': existing.lat,
+       'lng': existing.lng,
+       'alt': existing.alt,
+       'azimuth': existing.azimuth,
+       'dateTime': existing.timestamp,
+      };
+     }
+    }
+   }
+   for (final entry in galleryWithSizes) {
+    if ((entry.value - pickedSize).abs() <= 8192) {
+     final meta = await _extractPhotoMetaFromPath(entry.key);
+     if (meta['lat'] != null &&
+      meta['lng'] != null &&
+      _isSameTimestampWithinSeconds(rawDateTime, meta['dateTime']?.toString(), 5)) {
+      return meta;
+     }
+    }
+   }
+  }
+
+  // 5. Native MediaStore.setRequireOriginal(uri) lookup by DateTime / FileName
+  try {
+   const MethodChannel ch = MethodChannel('gps_camera/shutter');
+   final String? msHeaderPath = await ch.invokeMethod<String>(
+    'resolveOriginalGps',
+    {'dateTime': rawDateTime ?? '', 'fileName': pickedName},
+   );
+   if (msHeaderPath != null && msHeaderPath.isNotEmpty) {
+    final Map<String, dynamic> msMeta = await _extractPhotoMetaFromPath(msHeaderPath);
+    if (msMeta['lat'] != null && msMeta['lng'] != null) {
+     return msMeta;
+    }
+   }
+  } catch (_) {}
+
+  return {};
  }
- }
- final String? exactMatch = pathByExactSize[pickedSize];
- if (exactMatch != null) {
- final meta = await _extractPhotoMetaFromPath(exactMatch);
- if (meta['lat'] != null && meta['lng'] != null) return meta;
- }
- }
- final String? sameNamePath = pathByName[pickedName];
- if (sameNamePath != null) {
- final m = await _extractPhotoMetaFromPath(sameNamePath);
- if (m['lat'] != null && m['lng'] != null) return m;
- }
- String? digits14;
- if (rawDateTime != null) {
- final String d = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
- if (d.length >= 14) {
- digits14 = d.substring(0, 14);
- } else if (d.length >= 12) {
- digits14 = '${d.substring(0, 12)}00';
- }
- }
- if (digits14 == null) {
- final RegExp fnRe = RegExp(r'(20\d{6})[_\-]?(\d{6})');
- final m = fnRe.firstMatch(pickedName);
- if (m != null) digits14 = '${m.group(1)}${m.group(2)}';
- }
- if (digits14 != null) {
- final String ymd = digits14.substring(0, 8);
- final String ymdhm = digits14.substring(0, 12);
- for (final entry in galleryWithSizes) {
- final String p = entry.key;
- final String fn = p.split('/').last;
- if (fn.contains(ymd)) {
- final String fnDigits = fn.replaceAll(RegExp(r'[^0-9]'), '');
- if (fnDigits.contains(ymdhm)) {
- final meta = await _extractPhotoMetaFromPath(p);
- if (meta['lat'] != null && meta['lng'] != null) return meta;
- }
- }
- }
- }
- if (pickedSize > 0) {
- for (final entry in galleryWithSizes) {
- if ((entry.value - pickedSize).abs() <= 1024) {
- final meta = await _extractPhotoMetaFromPath(entry.key);
- if (meta['lat'] != null && meta['lng'] != null) return meta;
- }
- }
- }
- return {};
- }
+
  Future<void> _importPhotosFromGallery() async {
- try {
- await [
- Permission.photos,
- Permission.storage,
- Permission.accessMediaLocation,
- ].request();
- final ImagePicker picker = ImagePicker();
- final List<XFile> pickedFiles = await picker.pickMultiImage(
- requestFullMetadata: true,
- );
- if (pickedFiles.isEmpty) return;
- setState(() {
- _isExporting = true;
- _exportStatusMsg = '⚡ 사진 ${pickedFiles.length}장 초고속 불러오는 중...';
- });
- final Directory docDir = await getApplicationDocumentsDirectory();
- double defaultLat = _myCurrentPos?.latitude ?? 37.4984;
- double defaultLng = _myCurrentPos?.longitude ?? 127.1324;
- if (_mapCtrl != null) {
- try {
- final camPos = await _mapCtrl!.getCameraPosition();
- defaultLat = camPos.target.latitude;
- defaultLng = camPos.target.longitude;
- } catch (_) {}
- }
- List<String>? galleryPaths;
- Map<String, String>? pathByName;
- Map<int, String>? pathByExactSize;
- List<MapEntry<String, int>>? galleryWithSizes;
- List<MapEntry<PhotoItem, int>>? existingWithSizes;
- void ensureGalleryIndexed() {
- if (galleryPaths != null) return;
- galleryPaths = _listGalleryFilePathsFast(docDir.path);
- pathByName = {};
- pathByExactSize = {};
- galleryWithSizes = [];
- existingWithSizes = [];
- for (final PhotoItem ex in widget.photos) {
- try {
- if (ex.lat.abs() > 0.001 && ex.lng.abs() > 0.001) {
- final int sz = File(ex.path).lengthSync();
- existingWithSizes!.add(MapEntry(ex, sz));
- }
- } catch (_) {}
- }
- int count = 0;
- for (final String p in galleryPaths!) {
- if (count++ > 2500) break;
- try {
- final String fn = p.split('/').last;
- pathByName![fn] = p;
- final int sz = File(p).lengthSync();
- pathByExactSize![sz] = p;
- galleryWithSizes!.add(MapEntry(p, sz));
- } catch (_) {}
- }
- }
- final int total = pickedFiles.length;
- final List<PhotoItem?> importedItems = List<PhotoItem?>.filled(total, null);
- final List<bool> hadExifFlags = List<bool>.filled(total, false);
- final int baseMs = DateTime.now().millisecondsSinceEpoch;
- const int batchSize = 8;
- for (int start = 0; start < total; start += batchSize) {
- final int end = min(start + batchSize, total);
- if (mounted) {
- setState(() {
- _exportStatusMsg = '⚡ 사진 초고속 불러오는 중... ($end / $total장)';
- });
- }
- await Future.wait(List.generate(end - start, (offset) async {
- final int i = start + offset;
- final XFile picked = pickedFiles[i];
- Map<String, dynamic> meta = await _extractPhotoMetaFromPath(picked.path);
- if (meta['lat'] == null || meta['lng'] == null) {
- ensureGalleryIndexed();
- final Map<String, dynamic> recovered = await _fastPinpointOriginalGps(
- picked,
- meta['dateTime'] as String?,
- pathByName!,
- pathByExactSize!,
- galleryWithSizes!,
- existingWithSizes!,
- );
- if (recovered['lat'] != null && recovered['lng'] != null) {
- meta = {...meta, ...recovered};
- }
- }
- final double? lat = meta['lat'] as double?;
- final double? lng = meta['lng'] as double?;
- final double alt = (meta['alt'] as double?) ?? 0.0;
- final double azimuth = (meta['azimuth'] as double?) ?? -1.0;
- String? timeStr;
- final String? rawDt = meta['dateTime'] as String?;
- if (rawDt != null && rawDt.length >= 16) {
- final String sub = rawDt.substring(0, 16);
- timeStr = sub.replaceFirst(':', '-').replaceFirst(':', '-');
- }
- if (timeStr == null || timeStr.length < 10) {
- try {
- final DateTime modDt = await File(picked.path).lastModified();
- timeStr = modDt.toString().substring(0, 16);
- } catch (_) {
- timeStr = DateTime.now().toString().substring(0, 16);
- }
- }
- final bool hasValidExifGps =
- lat != null && lng != null && (lat.abs() > 0.0001 || lng.abs() > 0.0001);
- final double finalLat = hasValidExifGps ? lat : defaultLat;
- final double finalLng = hasValidExifGps ? lng : defaultLng;
- hadExifFlags[i] = hasValidExifGps;
- final String folderDate = timeStr.substring(0, 10);
- final Directory dayDir = Directory('${docDir.path}/$folderDate');
- if (!dayDir.existsSync()) {
- await dayDir.create(recursive: true);
- }
- final String targetPath = '${dayDir.path}/imported_${baseMs}_$i.jpg';
- await File(picked.path).copy(targetPath);
+  try {
+   await [
+    Permission.photos,
+    Permission.storage,
+    Permission.accessMediaLocation,
+   ].request();
+   final ImagePicker picker = ImagePicker();
+   final List<XFile> pickedFiles = await picker.pickMultiImage(
+    requestFullMetadata: true,
+   );
+   if (pickedFiles.isEmpty) return;
+   setState(() {
+    _isExporting = true;
+    _exportStatusMsg = '⚡ 사진 ${pickedFiles.length}장 초고속 불러오는 중...';
+   });
+   final Directory docDir = await getApplicationDocumentsDirectory();
+   double defaultLat = _myCurrentPos?.latitude ?? 37.4984;
+   double defaultLng = _myCurrentPos?.longitude ?? 127.1324;
+   if (_mapCtrl != null) {
+    try {
+     final camPos = await _mapCtrl!.getCameraPosition();
+     defaultLat = camPos.target.latitude;
+     defaultLng = camPos.target.longitude;
+    } catch (_) {}
+   }
+   List<String>? galleryPaths;
+   Map<String, String>? pathByName;
+   List<MapEntry<String, int>>? galleryWithSizes;
+   List<MapEntry<PhotoItem, int>>? existingWithSizes;
+   void ensureGalleryIndexed() {
+    if (galleryPaths != null) return;
+    galleryPaths = _listGalleryFilePathsFast(docDir.path);
+    pathByName = {};
+    galleryWithSizes = [];
+    existingWithSizes = [];
+    for (final PhotoItem ex in widget.photos) {
+     try {
+      if (ex.lat.abs() > 0.001 && ex.lng.abs() > 0.001) {
+       final int sz = File(ex.path).lengthSync();
+       existingWithSizes!.add(MapEntry(ex, sz));
+      }
+     } catch (_) {}
+    }
+    int count = 0;
+    for (final String p in galleryPaths!) {
+     if (count++ > 3500) break;
+     try {
+      final String fn = p.split('/').last;
+      pathByName![fn] = p;
+      final int sz = File(p).lengthSync();
+      galleryWithSizes!.add(MapEntry(p, sz));
+     } catch (_) {}
+    }
+   }
+   final int total = pickedFiles.length;
+   final List<PhotoItem?> importedItems = List<PhotoItem?>.filled(total, null);
+   final List<bool> hadExifFlags = List<bool>.filled(total, false);
+   final int baseMs = DateTime.now().millisecondsSinceEpoch;
+   const int batchSize = 6;
+   for (int start = 0; start < total; start += batchSize) {
+    final int end = min(start + batchSize, total);
+    if (mounted) {
+     setState(() {
+      _exportStatusMsg = '⚡ 사진 초고속 불러오는 중... ($end / $total장)';
+     });
+    }
+    await Future.wait(List.generate(end - start, (offset) async {
+     final int i = start + offset;
+     final XFile picked = pickedFiles[i];
+     Map<String, dynamic> meta = await _extractPhotoMetaFromPath(picked.path);
+     if (meta['lat'] == null || meta['lng'] == null) {
+      ensureGalleryIndexed();
+      final Map<String, dynamic> recovered = await _fastPinpointOriginalGps(
+       picked,
+       meta['dateTime'] as String?,
+       pathByName!,
+       galleryWithSizes!,
+       existingWithSizes!,
+      );
+      if (recovered['lat'] != null && recovered['lng'] != null) {
+       meta = {...meta, ...recovered};
+      }
+     }
+     final double? lat = meta['lat'] as double?;
+     final double? lng = meta['lng'] as double?;
+     final double alt = (meta['alt'] as double?) ?? 0.0;
+     final double azimuth = (meta['azimuth'] as double?) ?? -1.0;
+     String? timeStr;
+     final String? rawDt = meta['dateTime'] as String?;
+     if (rawDt != null && rawDt.length >= 16) {
+      final String sub = rawDt.substring(0, 16);
+      timeStr = sub.replaceFirst(':', '-').replaceFirst(':', '-');
+     }
+     if (timeStr == null || timeStr.length < 10) {
+      try {
+       final DateTime modDt = await File(picked.path).lastModified();
+       timeStr = modDt.toString().substring(0, 16);
+      } catch (_) {
+       timeStr = DateTime.now().toString().substring(0, 16);
+      }
+     }
+     final bool hasValidExifGps =
+      lat != null && lng != null && (lat.abs() > 0.0001 || lng.abs() > 0.0001);
+     final double finalLat = hasValidExifGps ? lat : defaultLat;
+     final double finalLng = hasValidExifGps ? lng : defaultLng;
+     hadExifFlags[i] = hasValidExifGps;
+     final String folderDate = timeStr.substring(0, 10);
+     final Directory dayDir = Directory('${docDir.path}/$folderDate');
+     if (!dayDir.existsSync()) {
+      await dayDir.create(recursive: true);
+     }
+     final String targetPath = '${dayDir.path}/imported_${baseMs}_$i.jpg';
+     // Convert normal high-res photo (> 1920px / > 650KB) to app camera resolution (1920px, quality 90)
+     final Uint8List rawPickedBytes = await File(picked.path).readAsBytes();
+     final Uint8List finalBytes =
+      (await normalizeToAppCameraResolution(rawPickedBytes)) ?? rawPickedBytes;
+     await File(targetPath).writeAsBytes(finalBytes);
+     globalHtmlBase64Cache[targetPath] =
+      'data:image/jpeg;base64,${base64Encode(finalBytes)}';
  importedItems[i] = PhotoItem(
  path: targetPath,
  lat: finalLat,
