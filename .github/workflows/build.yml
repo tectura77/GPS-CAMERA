@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
 
     steps:
       - name: Checkout Repository
@@ -36,7 +38,11 @@ jobs:
       - name: Install Dependencies
         run: flutter pub get
 
-      - name: Configure Android V2 Embedding, Permissions, Naver Map & Shutter Sound
+      - name: Create Keystore
+        run: |
+          keytool -genkeypair -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload -storepass "$KEYSTORE_PASSWORD" -keypass "$KEYSTORE_PASSWORD" -dname "CN=tectura, OU=Dev, O=Personal, L=Seoul, S=Seoul, C=KR"
+
+      - name: Configure Android V2 Embedding, Permissions, Naver Map, Shutter Sound & Signing
         run: |
           python3 - << 'EOF'
           import os, re, glob, json
@@ -112,15 +118,45 @@ jobs:
               with open(deps_file, "w", encoding="utf-8") as f:
                   json.dump(deps_data, f, indent=2)
 
-          # 3. build.gradle / build.gradle.kts minSdk 23 설정
-          for gpath in ["android/app/build.gradle", "android/app/build.gradle.kts"]:
-              if os.path.exists(gpath):
-                  with open(gpath, "r", encoding="utf-8") as f:
-                      g = f.read()
-                  g = re.sub(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 23", g)
-                  g = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", g)
-                  with open(gpath, "w", encoding="utf-8") as f:
-                      f.write(g)
+          # 3. build.gradle.kts / build.gradle 에 minSdk 23 및 정식 Release 서명 설정 주입
+          kts_path = "android/app/build.gradle.kts"
+          if os.path.exists(kts_path):
+              with open(kts_path, "r", encoding="utf-8") as f:
+                  g = f.read()
+              g = re.sub(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 23", g)
+              signing_kts = """    signingConfigs {
+                  create("release") {
+                      keyAlias = "upload"
+                      keyPassword = System.getenv("KEYSTORE_PASSWORD")
+                      storeFile = file("upload-keystore.jks")
+                      storePassword = System.getenv("KEYSTORE_PASSWORD")
+                  }
+              }
+              buildTypes {"""
+              g = re.sub(r"buildTypes\s*\{", signing_kts, g, count=1)
+              g = re.sub(r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)', 'signingConfig = signingConfigs.getByName("release")', g)
+              with open(kts_path, "w", encoding="utf-8") as f:
+                  f.write(g)
+
+          gradle_path = "android/app/build.gradle"
+          if os.path.exists(gradle_path):
+              with open(gradle_path, "r", encoding="utf-8") as f:
+                  g = f.read()
+              g = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 23", g)
+              g = re.sub(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 23", g)
+              signing_groovy = """    signingConfigs {
+                  release {
+                      keyAlias 'upload'
+                      keyPassword System.getenv('KEYSTORE_PASSWORD')
+                      storeFile file('upload-keystore.jks')
+                      storePassword System.getenv('KEYSTORE_PASSWORD')
+                  }
+              }
+              buildTypes {"""
+              g = re.sub(r"buildTypes\s*\{", signing_groovy, g, count=1)
+              g = re.sub(r"signingConfig\s*=?\s*signingConfigs\.debug", "signingConfig signingConfigs.release", g)
+              with open(gradle_path, "w", encoding="utf-8") as f:
+                  f.write(g)
 
           # 4. MainActivity.kt 에 무음/진동 모드에서도 작동하는 셔터음 코드 주입
           kt_files = glob.glob("android/app/src/main/**/MainActivity.kt", recursive=True)
@@ -208,39 +244,6 @@ jobs:
                   f.write("\n".join(kt_lines))
           EOF
 
-      - name: Create Keystore & key.properties
-        run: |
-          keytool -genkeypair -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload -storepass "${{ secrets.KEYSTORE_PASSWORD }}" -keypass "${{ secrets.KEYSTORE_PASSWORD }}" -dname "CN=tectura, OU=Dev, O=Personal, L=Seoul, S=Seoul, C=KR"
-          cat <<EOF > android/key.properties
-          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
-          keyPassword=${{ secrets.KEYSTORE_PASSWORD }}
-          keyAlias=upload
-          storeFile=upload-keystore.jks
-          EOF
-          cat <<EOF >> android/app/build.gradle
-
-          android {
-              signingConfigs {
-                  release {
-                      def keystoreProperties = new Properties()
-                      def keystorePropertiesFile = rootProject.file('key.properties')
-                      if (keystorePropertiesFile.exists()) {
-                          keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
-                      }
-                      keyAlias = keystoreProperties['keyAlias']
-                      keyPassword = keystoreProperties['keyPassword']
-                      storeFile = keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
-                      storePassword = keystoreProperties['storePassword']
-                  }
-              }
-              buildTypes {
-                  release {
-                      signingConfig = signingConfigs.release
-                  }
-              }
-          }
-          EOF
-
       - name: Build App Bundle (AAB)
         run: flutter build appbundle --release
 
@@ -249,3 +252,9 @@ jobs:
         with:
           name: release-aab
           path: build/app/outputs/bundle/release/app-release.aab
+
+      - name: Upload Keystore Backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: upload-keystore-backup
+          path: android/app/upload-keystore.jks
