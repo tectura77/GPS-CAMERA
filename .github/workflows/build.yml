@@ -38,9 +38,10 @@ jobs:
       - name: Install Dependencies
         run: flutter pub get
 
-      - name: Create Keystore
+      - name: Restore Keystore from Secrets
         run: |
-          keytool -genkeypair -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload -storepass "$KEYSTORE_PASSWORD" -keypass "$KEYSTORE_PASSWORD" -dname "CN=tectura, OU=Dev, O=Personal, L=Seoul, S=Seoul, C=KR"
+          mkdir -p android/app
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
 
       - name: Configure Android V2 Embedding, Permissions, Naver Map, Shutter Sound & Signing
         run: |
