@@ -54,27 +54,20 @@ final Map<String, NOverlayImage> globalBpOverlayCache = {};
 final Map<String, String> globalHtmlBase64Cache = {};
 Future<Uint8List?> normalizeToAppCameraResolution(Uint8List raw) async {
  try {
- if (raw.length <= 550 * 1024) {
- final String head =
- String.fromCharCodes(raw.sublist(0, min(raw.length, 8192)));
- if (head.contains('GPSCAM_META:')) return raw;
+ if (raw.length <= 360 * 1024) {
+ return raw;
  }
  final img.Image? decoded = img.decodeImage(raw);
  if (decoded == null) return raw;
  final img.Image baked = img.bakeOrientation(decoded);
- final int maxSide = max(baked.width, baked.height);
- if (maxSide <= 1280 && raw.length <= 600 * 1024) {
- return raw;
- }
- final img.Image targetImg = maxSide > 1280
+ final img.Image resized = baked.width > 960
  ? img.copyResize(
  baked,
- width: baked.width >= baked.height ? 1280 : null,
- height: baked.height > baked.width ? 1280 : null,
+ width: 960,
  interpolation: img.Interpolation.linear,
  )
  : baked;
- return Uint8List.fromList(img.encodeJpg(targetImg, quality: 90));
+ return Uint8List.fromList(img.encodeJpg(resized, quality: 80));
  } catch (_) {
  return raw;
  }
@@ -83,21 +76,11 @@ Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  try {
  final File origFile = File(path);
  if (!origFile.existsSync()) return null;
- final String fn = path.split('/').last;
- if (fn.startsWith('photo_') || fn.startsWith('after_photo_')) {
- final Uint8List raw = await origFile.readAsBytes();
- if (raw.isNotEmpty) {
- globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(raw)}';
- return raw;
- }
- }
- final File cacheFile = File('$path.appcam.jpg');
- if (cacheFile.existsSync()) {
- final Uint8List cached = await cacheFile.readAsBytes();
+ final File webCacheFile = File('$path.web.jpg');
+ if (webCacheFile.existsSync()) {
+ final Uint8List cached = await webCacheFile.readAsBytes();
  if (cached.isNotEmpty) {
- if (!globalHtmlBase64Cache.containsKey(path)) {
  globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(cached)}';
- }
  return cached;
  }
  }
@@ -105,7 +88,7 @@ Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  if (raw.isEmpty) return null;
  final Uint8List out = (await normalizeToAppCameraResolution(raw)) ?? raw;
  try {
- await cacheFile.writeAsBytes(out);
+ await webCacheFile.writeAsBytes(out);
  } catch (_) {}
  globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(out)}';
  return out;
@@ -3237,8 +3220,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  .hdr-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
  .app-copy-btn { background: #00e676; color: #000; border: none; border-radius: 6px; padding: 5px 10px; font-size: 11.5px; font-weight: bold; cursor: pointer; }
  .main-wrap { flex: 1; display: flex; flex-direction: row; overflow: hidden; position: relative; }
- #photos-wrap { flex: 0 0 50%; display: flex; flex-direction: row; overflow: hidden; min-width: 12%; min-height: 12%; }
- .img-pane { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; touch-action: none; border-bottom: 1px solid #222; border-right: 1px solid #222; }
+ #photos-wrap { flex: 1 1 50%; display: flex; flex-direction: row; overflow: hidden; min-width: 15%; min-height: 15%; width: 100%; height: 100%; }
+ .img-pane { flex: 1 1 100%; width: 100%; height: 100%; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; touch-action: none; border-bottom: 1px solid #222; border-right: 1px solid #222; }
  #split-bar { flex: 0 0 14px; background: #1b1b1b; border-left: 1px solid #3a3a3a; border-right: 1px solid #3a3a3a; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; z-index: 500; }
  #split-bar .grip { width: 4px; height: 44px; background: #ffc107; border-radius: 4px; opacity: 0.85; }
  #split-bar.dragging { background: rgba(255,193,7,0.28); }
@@ -3319,13 +3302,13 @@ function compressDataUriAsync(dataUri, maxDim, qual, mimeOut) {
 async function prepareCompactPayload() {
  try {
   const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
-  if (rawStr.length <= 720000) {
+  if (rawStr.length <= 750000) {
    cachedPayloadStr = rawStr;
    return;
   }
   const totalImgs = Math.max(1, photos.length + bps.length);
-  const maxDim = totalImgs <= 10 ? 960 : (totalImgs <= 25 ? 720 : (totalImgs <= 45 ? 560 : 440));
-  const qual = totalImgs <= 10 ? 0.72 : (totalImgs <= 25 ? 0.62 : 0.52);
+  const maxDim = totalImgs <= 12 ? 960 : (totalImgs <= 28 ? 720 : (totalImgs <= 48 ? 560 : 440));
+  const qual = totalImgs <= 12 ? 0.74 : (totalImgs <= 28 ? 0.64 : 0.54);
   const compPhotos = [];
   for (let i = 0; i < photos.length; i++) {
    const p = Object.assign({}, photos[i]);
@@ -3344,59 +3327,37 @@ async function prepareCompactPayload() {
   cachedPayloadStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
  } catch (e) {}
 }
-setTimeout(prepareCompactPayload, 40);
-
-function copyTextViaTextarea(str) {
- let ok = false;
- try {
-  const ta = document.createElement('textarea');
-  ta.value = str;
-  ta.setAttribute('readonly', '');
-  ta.style.position = 'fixed';
-  ta.style.top = '0';
-  ta.style.left = '0';
-  ta.style.width = '2em';
-  ta.style.height = '2em';
-  ta.style.padding = '0';
-  ta.style.border = 'none';
-  ta.style.outline = 'none';
-  ta.style.boxShadow = 'none';
-  ta.style.background = 'transparent';
-  ta.style.opacity = '0.01';
-  document.body.appendChild(ta);
-  ta.focus();
-  ta.select();
-  ta.setSelectionRange(0, ta.value.length);
-  try { ok = document.execCommand('copy'); } catch (e) {}
-  document.body.removeChild(ta);
- } catch (e) {}
- return ok;
-}
+setTimeout(prepareCompactPayload, 30);
 
 function copyProjectForApp() {
- const btn = document.querySelector('.app-copy-btn');
- if (!cachedPayloadStr) {
-  if (btn) btn.innerText = '⏳ 데이터 준비 중...';
-  prepareCompactPayload().then(() => {
-   const payload = cachedPayloadStr || ('GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps }));
-   copyTextViaTextarea(payload);
-   if (btn) {
-    btn.innerText = '✅ 복사완료! 앱에서 업로드하세요';
-    btn.style.background = '#ffc107';
-   }
-  });
- } else {
-  copyTextViaTextarea(cachedPayloadStr);
-  if (btn) {
-   btn.innerText = '✅ 복사완료! 앱에서 업로드하세요';
-   btn.style.background = '#ffc107';
-  }
+ const payload = cachedPayloadStr || ('GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps }));
+ const ta = document.createElement('textarea');
+ ta.value = payload;
+ ta.setAttribute('readonly', '');
+ ta.style.position = 'fixed';
+ ta.style.top = '0';
+ ta.style.left = '-9999px';
+ ta.style.opacity = '0';
+ document.body.appendChild(ta);
+ ta.focus();
+ ta.select();
+ try { ta.setSelectionRange(0, ta.value.length); } catch (e) {}
+ let ok = false;
+ try { ok = document.execCommand('copy'); } catch (e) {}
+ if (!ok) {
+  ta.value = 'GPS_CAMERA_HTML_FILE:' + window.location.href;
+  ta.select();
+  try { ta.setSelectionRange(0, ta.value.length); } catch (e) {}
+  try { document.execCommand('copy'); } catch (e) {}
  }
+ document.body.removeChild(ta);
+ const btn = document.querySelector('.app-copy-btn');
+ if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
  const toast = document.getElementById('copy-toast');
  if (toast) {
-  toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">이제 GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요!</span>';
+  toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
   toast.style.display = 'block';
-  setTimeout(() => { toast.style.display = 'none'; }, 4500);
+  setTimeout(() => { toast.style.display = 'none'; }, 4000);
  }
 }
 function downloadHtmlForApp() {
@@ -3524,66 +3485,72 @@ const resetAfterZoom = bindPinchZoom(document.getElementById('after-pane'), docu
 })();
 const initLat = photos.length > 0 ? photos[0].lat : (bps.length > 0 ? bps[0].lat : 37.4984);
 const initLng = photos.length > 0 ? photos[0].lng : (bps.length > 0 ? bps[0].lng : 127.1324);
-const map = L.map('map-pane', { maxZoom: 22 }).setView([initLat, initLng], ${currentMapZoom.toStringAsFixed(1)});
-const tileProviders = [
- { url: 'https://xdworld.vworld.kr/2d/Base/service/{z}/{x}/{y}.png', maxNative: 19, attr: '© VWorld / 국토교통부' },
- { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', maxNative: 20, attr: '© CARTO / OpenStreetMap' },
- { url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png', maxNative: 18, attr: '© OpenStreetMap DE' },
- { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, attr: '© OpenStreetMap' }
-];
-let currentProviderIdx = 0;
-let tileErrorCount = 0;
-let activeTileLayer = null;
-function loadTileProvider(idx) {
- if (idx >= tileProviders.length) return;
- currentProviderIdx = idx;
- tileErrorCount = 0;
- if (activeTileLayer) {
-  try { map.removeLayer(activeTileLayer); } catch (e) {}
- }
- const p = tileProviders[idx];
- activeTileLayer = L.tileLayer(p.url, {
-  maxNativeZoom: p.maxNative,
-  maxZoom: 22,
-  attribution: p.attr
- });
- activeTileLayer.on('tileerror', () => {
-  tileErrorCount++;
-  if (tileErrorCount >= 3 && currentProviderIdx + 1 < tileProviders.length) {
-   loadTileProvider(currentProviderIdx + 1);
+let map = null;
+let markersLayer = null;
+try {
+ if (typeof L !== 'undefined') {
+  map = L.map('map-pane', { maxZoom: 22 }).setView([initLat, initLng], ${currentMapZoom.toStringAsFixed(1)});
+  const tileProviders = [
+   { url: 'https://xdworld.vworld.kr/2d/Base/service/{z}/{x}/{y}.png', maxNative: 19, attr: '© VWorld / 국토교통부' },
+   { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', maxNative: 20, attr: '© CARTO / OpenStreetMap' },
+   { url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png', maxNative: 18, attr: '© OpenStreetMap DE' },
+   { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, attr: '© OpenStreetMap' }
+  ];
+  let currentProviderIdx = 0;
+  let tileErrorCount = 0;
+  let activeTileLayer = null;
+  function loadTileProvider(idx) {
+   if (!map || idx >= tileProviders.length) return;
+   currentProviderIdx = idx;
+   tileErrorCount = 0;
+   if (activeTileLayer) {
+    try { map.removeLayer(activeTileLayer); } catch (e) {}
+   }
+   const p = tileProviders[idx];
+   activeTileLayer = L.tileLayer(p.url, {
+    maxNativeZoom: p.maxNative,
+    maxZoom: 22,
+    attribution: p.attr
+   });
+   activeTileLayer.on('tileerror', () => {
+    tileErrorCount++;
+    if (tileErrorCount >= 3 && currentProviderIdx + 1 < tileProviders.length) {
+     loadTileProvider(currentProviderIdx + 1);
+    }
+   });
+   activeTileLayer.addTo(map);
   }
- });
- activeTileLayer.addTo(map);
-}
-loadTileProvider(0);
-bps.forEach((bp) => {
- if (bp.isVisible === false) return;
- const bpImg = new Image();
- bpImg.onload = () => {
- const size = 900;
- const pad = 40;
- const inner = size - pad * 2;
- const canvas = document.createElement('canvas');
- canvas.width = size;
- canvas.height = size;
- const ctx = canvas.getContext('2d');
- ctx.clearRect(0, 0, size, size);
- ctx.save();
- ctx.globalAlpha = 1.0;
- ctx.translate(size / 2, size / 2);
- ctx.rotate(bp.rotation * Math.PI / 180.0);
- const scale = Math.min(inner / bpImg.width, inner / bpImg.height);
- const drawW = bpImg.width * scale;
- const drawH = bpImg.height * scale;
- ctx.drawImage(bpImg, -drawW / 2, -drawH / 2, drawW, drawH);
- ctx.restore();
- const bakedUrl = canvas.toDataURL('image/png');
- const bounds = [[bp.swLat, bp.swLng], [bp.neLat, bp.neLng]];
- L.imageOverlay(bakedUrl, bounds, { opacity: 1.0, interactive: false }).addTo(map);
- };
- bpImg.src = bp.b64;
-});
-const markersLayer = L.layerGroup().addTo(map);
+  loadTileProvider(0);
+  bps.forEach((bp) => {
+   if (bp.isVisible === false) return;
+   const bpImg = new Image();
+   bpImg.onload = () => {
+    const size = 900;
+    const pad = 40;
+    const inner = size - pad * 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size, size);
+    ctx.save();
+    ctx.globalAlpha = 1.0;
+    ctx.translate(size / 2, size / 2);
+    ctx.rotate(bp.rotation * Math.PI / 180.0);
+    const scale = Math.min(inner / bpImg.width, inner / bpImg.height);
+    const drawW = bpImg.width * scale;
+    const drawH = bpImg.height * scale;
+    ctx.drawImage(bpImg, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.restore();
+    const bakedUrl = canvas.toDataURL('image/png');
+    const bounds = [[bp.swLat, bp.swLng], [bp.neLat, bp.neLng]];
+    L.imageOverlay(bakedUrl, bounds, { opacity: 1.0, interactive: false }).addTo(map);
+   };
+   bpImg.src = bp.b64;
+  });
+  markersLayer = L.layerGroup().addTo(map);
+ }
+} catch (e) {}
 function selectPhoto(idx) {
  selectedIdx = idx;
  resetMainZoom();
@@ -3593,19 +3560,19 @@ function selectPhoto(idx) {
  const afterPane = document.getElementById('after-pane');
  const beforeBadge = document.getElementById('before-badge');
  if (p.afterB64 && p.afterB64.length > 10) {
- document.getElementById('after-photo').src = p.afterB64;
- afterPane.style.display = 'flex';
- beforeBadge.style.display = 'block';
+  document.getElementById('after-photo').src = p.afterB64;
+  afterPane.style.display = 'flex';
+  beforeBadge.style.display = 'block';
  } else {
- afterPane.style.display = 'none';
- beforeBadge.style.display = 'none';
+  afterPane.style.display = 'none';
+  beforeBadge.style.display = 'none';
  }
- setTimeout(() => { map.invalidateSize(); }, 60);
+ setTimeout(() => { if (map) map.invalidateSize(); }, 60);
  const memoClean = (p.memo && p.memo.trim().length > 0) ? (' ' + p.memo.trim()) : '';
  document.getElementById('info-txt').innerText = `[\${p.category}]\${memoClean}`;
  renderThumbnails();
  renderMarkers();
- map.panTo([p.lat, p.lng]);
+ if (map) map.panTo([p.lat, p.lng]);
 }
 function renderThumbnails() {
  const box = document.getElementById('thumbs');
@@ -3628,6 +3595,7 @@ function renderThumbnails() {
  });
 }
 function renderMarkers() {
+ if (!map || !markersLayer || typeof L === 'undefined') return;
  markersLayer.clearLayers();
  const order = [];
  for (let i = 0; i < photos.length; i++) {
@@ -3779,7 +3747,9 @@ if (photos.length > 0) {
  try {
  final ClipboardData? cdata = await Clipboard.getData('text/plain');
  final String? txt = cdata?.text?.trim();
- if (txt != null && !txt.contains('class GalleryMapDashboard')) {
+ if (txt != null &&
+ !txt.contains('class GalleryMapDashboard') &&
+ !txt.contains("import 'package:flutter")) {
  if (txt.startsWith('GPS_CAMERA_HTML_V2:') ||
  (txt.contains('const photos =') && txt.contains('const bps ='))) {
  clipboardPayload = txt;
@@ -3908,6 +3878,8 @@ if (photos.length > 0) {
  await Clipboard.getData('text/plain');
  final String? latestTxt = latestClip?.text?.trim();
  if (latestTxt != null &&
+ !latestTxt.contains('class GalleryMapDashboard') &&
+ !latestTxt.contains("import 'package:flutter") &&
  (latestTxt.startsWith('GPS_CAMERA_HTML_V2:') ||
  (latestTxt.contains('const photos =') &&
  latestTxt.contains('const bps =')))) {
@@ -4050,40 +4022,50 @@ if (photos.length > 0) {
  photosRaw = (decoded['photos'] as List<dynamic>?) ?? [];
  bpsRaw = (decoded['bps'] as List<dynamic>?) ?? [];
  } else {
+ String? extractJsArrayAfter(String srcText, String marker, int fromIdx) {
+ final int mPos = srcText.indexOf(marker, fromIdx);
+ if (mPos < 0) return null;
+ final int arrStart = srcText.indexOf('[', mPos + marker.length);
+ if (arrStart < 0) return null;
+ int depth = 0;
+ bool inStr = false;
+ bool escaped = false;
+ for (int i = arrStart; i < srcText.length; i++) {
+ final int cu = srcText.codeUnitAt(i);
+ if (escaped) {
+ escaped = false;
+ continue;
+ }
+ if (cu == 92) {
+ if (inStr) escaped = true;
+ continue;
+ }
+ if (cu == 34) {
+ inStr = !inStr;
+ continue;
+ }
+ if (!inStr) {
+ if (cu == 91) {
+ depth++;
+ } else if (cu == 93) {
+ depth--;
+ if (depth == 0) {
+ return srcText.substring(arrStart, i + 1);
+ }
+ }
+ }
+ }
+ return null;
+ }
  final int scriptIdx = inputText.lastIndexOf('<script>');
- final String scriptBody = scriptIdx >= 0 ? inputText.substring(scriptIdx) : inputText;
- final int pMarker = scriptBody.indexOf('const photos =');
- if (pMarker >= 0) {
- final int pStart = scriptBody.indexOf('[', pMarker);
- final int bMarker = scriptBody.indexOf('const bps =', pStart >= 0 ? pStart : pMarker);
- if (pStart >= 0 && bMarker > pStart) {
- final String pSegment = scriptBody.substring(pStart, bMarker).trimRight();
- if (pSegment.endsWith(';')) {
- final String pJson = pSegment.substring(0, pSegment.length - 1).trimRight();
+ final int startFrom = scriptIdx >= 0 ? scriptIdx : 0;
+ final String? pJson = extractJsArrayAfter(inputText, 'const photos =', startFrom);
+ if (pJson != null) {
  photosRaw = jsonDecode(pJson) as List<dynamic>;
- } else {
- final int lastBracket = pSegment.lastIndexOf(']');
- if (lastBracket > 0) {
- photosRaw = jsonDecode(pSegment.substring(0, lastBracket + 1)) as List<dynamic>;
  }
- }
- }
- if (bMarker >= 0) {
- final int bStart = scriptBody.indexOf('[', bMarker);
- final int afterBps = scriptBody.indexOf('let selectedIdx', bStart >= 0 ? bStart : bMarker);
- if (bStart >= 0 && afterBps > bStart) {
- final String bSegment = scriptBody.substring(bStart, afterBps).trimRight();
- if (bSegment.endsWith(';')) {
- final String bJson = bSegment.substring(0, bSegment.length - 1).trimRight();
+ final String? bJson = extractJsArrayAfter(inputText, 'const bps =', startFrom);
+ if (bJson != null) {
  bpsRaw = jsonDecode(bJson) as List<dynamic>;
- } else {
- final int lastBracket = bSegment.lastIndexOf(']');
- if (lastBracket > 0) {
- bpsRaw = jsonDecode(bSegment.substring(0, lastBracket + 1)) as List<dynamic>;
- }
- }
- }
- }
  }
  }
  if (photosRaw.isEmpty && bpsRaw.isEmpty) {
