@@ -1,4 +1,5 @@
 name: Build Android App Bundle (AAB)
+
 on:
   push:
     branches: [ main, master ]
@@ -23,7 +24,7 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: 
+      - name: Create Clean V2 Flutter Project Structure
         run: |
           rm -rf android
           mv pubspec.yaml pubspec.yaml.bak
@@ -239,7 +240,7 @@ jobs:
               }
           }
           EOF
-          
+
       - name: Build App Bundle (AAB)
         run: flutter build appbundle --release
 
