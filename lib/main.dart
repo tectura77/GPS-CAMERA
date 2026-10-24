@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:async';
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -52,22 +53,43 @@ Future<void> loadDefaultCategory(List<PhotoItem> photos) async {
 final Map<String, NOverlayImage> globalMarkerIconCache = {};
 final Map<String, NOverlayImage> globalBpOverlayCache = {};
 final Map<String, String> globalHtmlBase64Cache = {};
-Future<Uint8List?> normalizeToAppCameraResolution(Uint8List raw) async {
+Uint8List _normalizeLargePhotoIsolate(Uint8List raw) {
  try {
- if (raw.length <= 360 * 1024) {
+ final int headLen = min(raw.length, 16384);
+ final String head = String.fromCharCodes(raw.sublist(0, headLen));
+ if (head.contains('GPSCAM_META:')) {
+ return raw;
+ }
+ if (raw.length <= 550 * 1024) {
  return raw;
  }
  final img.Image? decoded = img.decodeImage(raw);
  if (decoded == null) return raw;
  final img.Image baked = img.bakeOrientation(decoded);
- final img.Image resized = baked.width > 960
+ final int maxSide = max(baked.width, baked.height);
+ if (maxSide <= 1280 && raw.length <= 650 * 1024) {
+ return raw;
+ }
+ final img.Image targetImg = maxSide > 1280
  ? img.copyResize(
  baked,
- width: 960,
+ width: baked.width >= baked.height ? 1280 : null,
+ height: baked.height > baked.width ? 1280 : null,
  interpolation: img.Interpolation.linear,
  )
  : baked;
- return Uint8List.fromList(img.encodeJpg(resized, quality: 80));
+ return Uint8List.fromList(img.encodeJpg(targetImg, quality: 90));
+ } catch (_) {
+ return raw;
+ }
+}
+Future<Uint8List?> normalizeToAppCameraResolution(Uint8List raw) async {
+ try {
+ if (raw.length <= 550 * 1024) return raw;
+ final String head =
+ String.fromCharCodes(raw.sublist(0, min(raw.length, 16384)));
+ if (head.contains('GPSCAM_META:')) return raw;
+ return await Isolate.run(() => _normalizeLargePhotoIsolate(raw));
  } catch (_) {
  return raw;
  }
@@ -76,9 +98,20 @@ Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  try {
  final File origFile = File(path);
  if (!origFile.existsSync()) return null;
- final File webCacheFile = File('$path.web.jpg');
- if (webCacheFile.existsSync()) {
- final Uint8List cached = await webCacheFile.readAsBytes();
+ final String fn = path.split('/').last;
+ if (fn.startsWith('photo_') ||
+ fn.startsWith('after_') ||
+ fn.startsWith('html_imp_') ||
+ fn.startsWith('html_after_')) {
+ final Uint8List raw = await origFile.readAsBytes();
+ if (raw.isNotEmpty) {
+ globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(raw)}';
+ return raw;
+ }
+ }
+ final File cacheFile = File('$path.appcam.jpg');
+ if (cacheFile.existsSync()) {
+ final Uint8List cached = await cacheFile.readAsBytes();
  if (cached.isNotEmpty) {
  globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(cached)}';
  return cached;
@@ -88,7 +121,7 @@ Future<Uint8List?> encodePhotoForHtmlFast(String path) async {
  if (raw.isEmpty) return null;
  final Uint8List out = (await normalizeToAppCameraResolution(raw)) ?? raw;
  try {
- await webCacheFile.writeAsBytes(out);
+ await cacheFile.writeAsBytes(out);
  } catch (_) {}
  globalHtmlBase64Cache[path] = 'data:image/jpeg;base64,${base64Encode(out)}';
  return out;
@@ -1539,20 +1572,22 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  return out;
  }
  Future<Map<String, dynamic>> _fastPinpointOriginalGps(
- XFile picked, String? rawDateTime, List<String> allGalleryPaths) async {
+ XFile picked,
+ String? rawDateTime,
+ Map<String, String> pathByName,
+ Map<int, String> pathByExactSize,
+ List<MapEntry<String, int>> galleryWithSizes,
+ List<MapEntry<PhotoItem, int>> existingWithSizes,
+ ) async {
  final String pickedName = picked.name;
  int pickedSize = 0;
  try {
  pickedSize = await File(picked.path).length();
  } catch (_) {}
  if (pickedSize > 0) {
- for (final PhotoItem existing in widget.photos) {
- try {
- final File ef = File(existing.path);
- if (ef.existsSync() &&
- (ef.lengthSync() - pickedSize).abs() <= 512 &&
- existing.lat.abs() > 0.001 &&
- existing.lng.abs() > 0.001) {
+ for (final entry in existingWithSizes) {
+ if ((entry.value - pickedSize).abs() <= 512) {
+ final existing = entry.key;
  return {
  'lat': existing.lat,
  'lng': existing.lng,
@@ -1561,16 +1596,18 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  'dateTime': existing.timestamp,
  };
  }
- } catch (_) {}
+ }
+ final String? exactMatch = pathByExactSize[pickedSize];
+ if (exactMatch != null) {
+ final meta = await _extractPhotoMetaFromPath(exactMatch);
+ if (meta['lat'] != null && meta['lng'] != null) return meta;
  }
  }
- for (final String p in allGalleryPaths) {
- if (p.split('/').last == pickedName) {
- final m = await _extractPhotoMetaFromPath(p);
+ final String? sameNamePath = pathByName[pickedName];
+ if (sameNamePath != null) {
+ final m = await _extractPhotoMetaFromPath(sameNamePath);
  if (m['lat'] != null && m['lng'] != null) return m;
  }
- }
- final RegExp msRe = RegExp(r'(?:photo|after)_(\d{13})\.jpg');
  String? digits14;
  if (rawDateTime != null) {
  final String d = rawDateTime.replaceAll(RegExp(r'[^0-9]'), '');
@@ -1587,48 +1624,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  if (digits14 != null) {
  final String ymd = digits14.substring(0, 8);
- final String hms = digits14.substring(8, 14);
  final String ymdhm = digits14.substring(0, 12);
- final int targetSec = (int.tryParse(hms.substring(0, 2)) ?? 0) * 3600 +
- (int.tryParse(hms.substring(2, 4)) ?? 0) * 60 +
- (int.tryParse(hms.substring(4, 6)) ?? 0);
- for (int tol = 0; tol <= 10; tol++) {
- for (final String p in allGalleryPaths) {
+ for (final entry in galleryWithSizes) {
+ final String p = entry.key;
  final String fn = p.split('/').last;
  if (fn.contains(ymd)) {
- final RegExp re = RegExp(ymd + r'[_\-]?(\d{6})');
- final m = re.firstMatch(fn);
- if (m != null) {
- final String fHms = m.group(1)!;
- final int fSec = (int.tryParse(fHms.substring(0, 2)) ?? 0) * 3600 +
- (int.tryParse(fHms.substring(2, 4)) ?? 0) * 60 +
- (int.tryParse(fHms.substring(4, 6)) ?? 0);
- if ((fSec - targetSec).abs() == tol) {
- final meta = await _extractPhotoMetaFromPath(p);
- if (meta['lat'] != null && meta['lng'] != null) return meta;
- }
- }
- }
- final msMatch = msRe.firstMatch(fn);
- if (msMatch != null) {
- final int? ms = int.tryParse(msMatch.group(1)!);
- if (ms != null) {
- final DateTime dt = DateTime.fromMillisecondsSinceEpoch(ms);
- final String fYmd =
- '${dt.year.toString().padLeft(4, '0')}${dt.month.toString().padLeft(2, '0')}${dt.day.toString().padLeft(2, '0')}';
- if (fYmd == ymd) {
- final int fSec = dt.hour * 3600 + dt.minute * 60 + dt.second;
- if ((fSec - targetSec).abs() == tol) {
- final meta = await _extractPhotoMetaFromPath(p);
- if (meta['lat'] != null && meta['lng'] != null) return meta;
- }
- }
- }
- }
- }
- }
- for (final String p in allGalleryPaths) {
- final String fn = p.split('/').last;
  final String fnDigits = fn.replaceAll(RegExp(r'[^0-9]'), '');
  if (fnDigits.contains(ymdhm)) {
  final meta = await _extractPhotoMetaFromPath(p);
@@ -1636,25 +1636,13 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  }
  }
  }
+ }
  if (pickedSize > 0) {
- int checked = 0;
- final List<String> nearSizePaths = [];
- for (final String p in allGalleryPaths) {
- if (checked++ > 3500) break;
- try {
- final int len = File(p).lengthSync();
- final int diff = (len - pickedSize).abs();
- if (diff == 0) {
- final meta = await _extractPhotoMetaFromPath(p);
+ for (final entry in galleryWithSizes) {
+ if ((entry.value - pickedSize).abs() <= 1024) {
+ final meta = await _extractPhotoMetaFromPath(entry.key);
  if (meta['lat'] != null && meta['lng'] != null) return meta;
- } else if (diff <= 1024) {
- nearSizePaths.add(p);
  }
- } catch (_) {}
- }
- for (final String p in nearSizePaths) {
- final meta = await _extractPhotoMetaFromPath(p);
- if (meta['lat'] != null && meta['lng'] != null) return meta;
  }
  }
  return {};
@@ -1673,12 +1661,9 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  if (pickedFiles.isEmpty) return;
  setState(() {
  _isExporting = true;
- _exportStatusMsg = '사진 위치정보를 분석하여 불러오는 중...';
+ _exportStatusMsg = '⚡ 사진 ${pickedFiles.length}장 초고속 불러오는 중...';
  });
  final Directory docDir = await getApplicationDocumentsDirectory();
- final List<String> galleryPaths = _listGalleryFilePathsFast(docDir.path);
- int addedCount = 0;
- int exifGpsCount = 0;
  double defaultLat = _myCurrentPos?.latitude ?? 37.4984;
  double defaultLng = _myCurrentPos?.longitude ?? 127.1324;
  if (_mapCtrl != null) {
@@ -1688,19 +1673,64 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  defaultLng = camPos.target.longitude;
  } catch (_) {}
  }
- for (int i = 0; i < pickedFiles.length; i++) {
- final XFile picked = pickedFiles[i];
+ List<String>? galleryPaths;
+ Map<String, String>? pathByName;
+ Map<int, String>? pathByExactSize;
+ List<MapEntry<String, int>>? galleryWithSizes;
+ List<MapEntry<PhotoItem, int>>? existingWithSizes;
+ void ensureGalleryIndexed() {
+ if (galleryPaths != null) return;
+ galleryPaths = _listGalleryFilePathsFast(docDir.path);
+ pathByName = {};
+ pathByExactSize = {};
+ galleryWithSizes = [];
+ existingWithSizes = [];
+ for (final PhotoItem ex in widget.photos) {
+ try {
+ if (ex.lat.abs() > 0.001 && ex.lng.abs() > 0.001) {
+ final int sz = File(ex.path).lengthSync();
+ existingWithSizes!.add(MapEntry(ex, sz));
+ }
+ } catch (_) {}
+ }
+ int count = 0;
+ for (final String p in galleryPaths!) {
+ if (count++ > 2500) break;
+ try {
+ final String fn = p.split('/').last;
+ pathByName![fn] = p;
+ final int sz = File(p).lengthSync();
+ pathByExactSize![sz] = p;
+ galleryWithSizes!.add(MapEntry(p, sz));
+ } catch (_) {}
+ }
+ }
+ final int total = pickedFiles.length;
+ final List<PhotoItem?> importedItems = List<PhotoItem?>.filled(total, null);
+ final List<bool> hadExifFlags = List<bool>.filled(total, false);
+ final int baseMs = DateTime.now().millisecondsSinceEpoch;
+ const int batchSize = 8;
+ for (int start = 0; start < total; start += batchSize) {
+ final int end = min(start + batchSize, total);
  if (mounted) {
  setState(() {
- _exportStatusMsg =
- '사진 위치정보 분석 중... (${i + 1} / ${pickedFiles.length}장)';
+ _exportStatusMsg = '⚡ 사진 초고속 불러오는 중... ($end / $total장)';
  });
  }
- Map<String, dynamic> meta =
- await _extractPhotoMetaFromPath(picked.path);
+ await Future.wait(List.generate(end - start, (offset) async {
+ final int i = start + offset;
+ final XFile picked = pickedFiles[i];
+ Map<String, dynamic> meta = await _extractPhotoMetaFromPath(picked.path);
  if (meta['lat'] == null || meta['lng'] == null) {
+ ensureGalleryIndexed();
  final Map<String, dynamic> recovered = await _fastPinpointOriginalGps(
- picked, meta['dateTime'] as String?, galleryPaths);
+ picked,
+ meta['dateTime'] as String?,
+ pathByName!,
+ pathByExactSize!,
+ galleryWithSizes!,
+ existingWithSizes!,
+ );
  if (recovered['lat'] != null && recovered['lng'] != null) {
  meta = {...meta, ...recovered};
  }
@@ -1727,22 +1757,15 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  lat != null && lng != null && (lat.abs() > 0.0001 || lng.abs() > 0.0001);
  final double finalLat = hasValidExifGps ? lat : defaultLat;
  final double finalLng = hasValidExifGps ? lng : defaultLng;
- if (hasValidExifGps) exifGpsCount++;
+ hadExifFlags[i] = hasValidExifGps;
  final String folderDate = timeStr.substring(0, 10);
  final Directory dayDir = Directory('${docDir.path}/$folderDate');
- if (!await dayDir.exists()) {
+ if (!dayDir.existsSync()) {
  await dayDir.create(recursive: true);
  }
- final int nowMs = DateTime.now().millisecondsSinceEpoch + i;
- final String targetPath = '${dayDir.path}/imported_$nowMs.jpg';
- final Uint8List pickedBytes = await File(picked.path).readAsBytes();
- final Uint8List normalizedBytes =
- (await normalizeToAppCameraResolution(pickedBytes)) ?? pickedBytes;
- await File(targetPath).writeAsBytes(normalizedBytes);
- await File('$targetPath.appcam.jpg').writeAsBytes(normalizedBytes);
- globalHtmlBase64Cache[targetPath] =
- 'data:image/jpeg;base64,${base64Encode(normalizedBytes)}';
- widget.photos.add(PhotoItem(
+ final String targetPath = '${dayDir.path}/imported_${baseMs}_$i.jpg';
+ await File(picked.path).copy(targetPath);
+ importedItems[i] = PhotoItem(
  path: targetPath,
  lat: finalLat,
  lng: finalLng,
@@ -1752,9 +1775,19 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  pitch: 0.0,
  timestamp: timeStr,
  category: currentDefaultCategory,
- ));
- addedCount++;
+ );
+ }));
  }
+ int addedCount = 0;
+ int exifGpsCount = 0;
+ for (int i = 0; i < total; i++) {
+ if (importedItems[i] != null) {
+ widget.photos.add(importedItems[i]!);
+ addedCount++;
+ if (hadExifFlags[i]) exifGpsCount++;
+ }
+ }
+ _prewarmHtmlCacheSilently();
  if (addedCount > 0) {
  await _persistPhotoMetadata();
  setState(() {
@@ -3220,8 +3253,8 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  .hdr-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
  .app-copy-btn { background: #00e676; color: #000; border: none; border-radius: 6px; padding: 5px 10px; font-size: 11.5px; font-weight: bold; cursor: pointer; }
  .main-wrap { flex: 1; display: flex; flex-direction: row; overflow: hidden; position: relative; }
- #photos-wrap { flex: 1 1 50%; display: flex; flex-direction: row; overflow: hidden; min-width: 15%; min-height: 15%; width: 100%; height: 100%; }
- .img-pane { flex: 1 1 100%; width: 100%; height: 100%; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; touch-action: none; border-bottom: 1px solid #222; border-right: 1px solid #222; }
+ #photos-wrap { flex: 0 0 50%; display: flex; flex-direction: row; overflow: hidden; min-width: 12%; min-height: 12%; }
+ .img-pane { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; touch-action: none; border-bottom: 1px solid #222; border-right: 1px solid #222; }
  #split-bar { flex: 0 0 14px; background: #1b1b1b; border-left: 1px solid #3a3a3a; border-right: 1px solid #3a3a3a; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; z-index: 500; }
  #split-bar .grip { width: 4px; height: 44px; background: #ffc107; border-radius: 4px; opacity: 0.85; }
  #split-bar.dragging { background: rgba(255,193,7,0.28); }
@@ -3275,74 +3308,31 @@ const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = 0;
 let cachedPayloadStr = null;
-const decodedImgMap = new Map();
+const sharedCanvas = document.createElement('canvas');
+const sharedCtx = sharedCanvas.getContext('2d');
 
-function preloadDataUri(dataUri) {
+function compressDataUriSingleCanvas(dataUri, maxDim, qual) {
  return new Promise((resolve) => {
-  if (!dataUri || dataUri.length < 80) { resolve(null); return; }
-  if (decodedImgMap.has(dataUri)) { resolve(decodedImgMap.get(dataUri)); return; }
+  if (!dataUri || dataUri.length < 100) { resolve(dataUri); return; }
   const im = new Image();
-  im.onload = () => { decodedImgMap.set(dataUri, im); resolve(im); };
-  im.onerror = () => resolve(null);
+  im.onload = () => {
+   try {
+    let w = im.width, h = im.height;
+    if (w > maxDim || h > maxDim) {
+     if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+     else { w = Math.round(w * maxDim / h); h = maxDim; }
+    }
+    sharedCanvas.width = w;
+    sharedCanvas.height = h;
+    sharedCtx.fillStyle = '#ffffff';
+    sharedCtx.fillRect(0, 0, w, h);
+    sharedCtx.drawImage(im, 0, 0, w, h);
+    resolve(sharedCanvas.toDataURL('image/jpeg', qual));
+   } catch (e) { resolve(dataUri); }
+  };
+  im.onerror = () => resolve(dataUri);
   im.src = dataUri;
  });
-}
-
-function resizeImgSync(dataUri, maxDim, qual) {
- if (!dataUri || dataUri.length < 80) return dataUri;
- const im = decodedImgMap.get(dataUri);
- if (!im || !im.width || !im.height) return dataUri;
- try {
-  let w = im.width, h = im.height;
-  if (w > maxDim || h > maxDim) {
-   if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
-   else { w = Math.round(w * maxDim / h); h = maxDim; }
-  }
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(im, 0, 0, w, h);
-  return c.toDataURL('image/jpeg', qual);
- } catch (e) {
-  return dataUri;
- }
-}
-
-function buildCompactPayloadSync() {
- const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
- if (rawStr.length <= 600000) return rawStr;
- const tiers = [
-  { pDim: 640, pQual: 0.62, bDim: 800, bQual: 0.65 },
-  { pDim: 480, pQual: 0.54, bDim: 680, bQual: 0.58 },
-  { pDim: 380, pQual: 0.46, bDim: 560, bQual: 0.50 },
-  { pDim: 300, pQual: 0.38, bDim: 440, bQual: 0.44 },
-  { pDim: 240, pQual: 0.32, bDim: 360, bQual: 0.38 }
- ];
- const totalItems = photos.length + bps.length * 3;
- let startTier = totalItems <= 12 ? 0 : (totalItems <= 28 ? 1 : (totalItems <= 50 ? 2 : 3));
- for (let t = startTier; t < tiers.length; t++) {
-  const spec = tiers[t];
-  const compBps = bps.map((b) => {
-   const nb = Object.assign({}, b);
-   nb.b64 = resizeImgSync(b.b64, spec.bDim, spec.bQual);
-   return nb;
-  });
-  const compPhotos = photos.map((p) => {
-   const np = Object.assign({}, p);
-   np.b64 = resizeImgSync(p.b64, spec.pDim, spec.pQual);
-   if (p.afterB64 && p.afterB64.length > 80) {
-    np.afterB64 = resizeImgSync(p.afterB64, spec.pDim, spec.pQual);
-   }
-   return np;
-  });
-  const candidate = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
-  if (candidate.length <= 600000 || t === tiers.length - 1) {
-   return candidate;
-  }
- }
- return rawStr;
 }
 
 async function prepareCompactPayload() {
@@ -3352,17 +3342,30 @@ async function prepareCompactPayload() {
    cachedPayloadStr = rawStr;
    return;
   }
-  const tasks = [];
-  bps.forEach((b) => { if (b.b64) tasks.push(preloadDataUri(b.b64)); });
-  photos.forEach((p) => {
-   if (p.b64) tasks.push(preloadDataUri(p.b64));
-   if (p.afterB64 && p.afterB64.length > 80) tasks.push(preloadDataUri(p.afterB64));
-  });
-  await Promise.all(tasks);
-  cachedPayloadStr = buildCompactPayloadSync();
+  const n = Math.max(1, photos.length);
+  const pDim = n <= 12 ? 640 : (n <= 28 ? 460 : (n <= 48 ? 360 : 280));
+  const pQual = n <= 12 ? 0.62 : (n <= 28 ? 0.52 : (n <= 48 ? 0.44 : 0.36));
+  const bDim = bps.length <= 1 ? 720 : 540;
+  const bQual = 0.55;
+  const compPhotos = [];
+  for (let i = 0; i < photos.length; i++) {
+   const p = Object.assign({}, photos[i]);
+   p.b64 = await compressDataUriSingleCanvas(p.b64, pDim, pQual);
+   if (p.afterB64 && p.afterB64.length > 80) {
+    p.afterB64 = await compressDataUriSingleCanvas(p.afterB64, pDim, pQual);
+   }
+   compPhotos.push(p);
+  }
+  const compBps = [];
+  for (let i = 0; i < bps.length; i++) {
+   const b = Object.assign({}, bps[i]);
+   b.b64 = await compressDataUriSingleCanvas(b.b64, bDim, bQual);
+   compBps.push(b);
+  }
+  cachedPayloadStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
  } catch (e) {}
 }
-setTimeout(prepareCompactPayload, 10);
+setTimeout(prepareCompactPayload, 300);
 
 function doSyncCopy(textToCopy) {
  let ok = false;
@@ -3385,10 +3388,9 @@ function doSyncCopy(textToCopy) {
 }
 
 function copyProjectForApp() {
- if (!cachedPayloadStr) {
-  cachedPayloadStr = buildCompactPayloadSync();
- }
- let ok = doSyncCopy(cachedPayloadStr);
+ const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
+ const toCopy = cachedPayloadStr || (rawStr.length <= 650000 ? rawStr : ('GPS_CAMERA_HTML_FILE:' + window.location.href));
+ doSyncCopy(toCopy);
  const btn = document.querySelector('.app-copy-btn');
  if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
  const toast = document.getElementById('copy-toast');
@@ -3400,7 +3402,7 @@ function copyProjectForApp() {
 }
 function downloadHtmlForApp() {
  try {
-  const fullHtml = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  const fullHtml = '<!DOCTYPE html>' + document.documentElement.outerHTML;
   const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -3523,72 +3525,66 @@ const resetAfterZoom = bindPinchZoom(document.getElementById('after-pane'), docu
 })();
 const initLat = photos.length > 0 ? photos[0].lat : (bps.length > 0 ? bps[0].lat : 37.4984);
 const initLng = photos.length > 0 ? photos[0].lng : (bps.length > 0 ? bps[0].lng : 127.1324);
-let map = null;
-let markersLayer = null;
-try {
- if (typeof L !== 'undefined') {
-  map = L.map('map-pane', { maxZoom: 22 }).setView([initLat, initLng], ${currentMapZoom.toStringAsFixed(1)});
-  const tileProviders = [
-   { url: 'https://xdworld.vworld.kr/2d/Base/service/{z}/{x}/{y}.png', maxNative: 19, attr: '© VWorld / 국토교통부' },
-   { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', maxNative: 20, attr: '© CARTO / OpenStreetMap' },
-   { url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png', maxNative: 18, attr: '© OpenStreetMap DE' },
-   { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, attr: '© OpenStreetMap' }
-  ];
-  let currentProviderIdx = 0;
-  let tileErrorCount = 0;
-  let activeTileLayer = null;
-  function loadTileProvider(idx) {
-   if (!map || idx >= tileProviders.length) return;
-   currentProviderIdx = idx;
-   tileErrorCount = 0;
-   if (activeTileLayer) {
-    try { map.removeLayer(activeTileLayer); } catch (e) {}
-   }
-   const p = tileProviders[idx];
-   activeTileLayer = L.tileLayer(p.url, {
-    maxNativeZoom: p.maxNative,
-    maxZoom: 22,
-    attribution: p.attr
-   });
-   activeTileLayer.on('tileerror', () => {
-    tileErrorCount++;
-    if (tileErrorCount >= 3 && currentProviderIdx + 1 < tileProviders.length) {
-     loadTileProvider(currentProviderIdx + 1);
-    }
-   });
-   activeTileLayer.addTo(map);
-  }
-  loadTileProvider(0);
-  bps.forEach((bp) => {
-   if (bp.isVisible === false) return;
-   const bpImg = new Image();
-   bpImg.onload = () => {
-    const size = 900;
-    const pad = 40;
-    const inner = size - pad * 2;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, size, size);
-    ctx.save();
-    ctx.globalAlpha = 1.0;
-    ctx.translate(size / 2, size / 2);
-    ctx.rotate(bp.rotation * Math.PI / 180.0);
-    const scale = Math.min(inner / bpImg.width, inner / bpImg.height);
-    const drawW = bpImg.width * scale;
-    const drawH = bpImg.height * scale;
-    ctx.drawImage(bpImg, -drawW / 2, -drawH / 2, drawW, drawH);
-    ctx.restore();
-    const bakedUrl = canvas.toDataURL('image/png');
-    const bounds = [[bp.swLat, bp.swLng], [bp.neLat, bp.neLng]];
-    L.imageOverlay(bakedUrl, bounds, { opacity: 1.0, interactive: false }).addTo(map);
-   };
-   bpImg.src = bp.b64;
-  });
-  markersLayer = L.layerGroup().addTo(map);
+const map = L.map('map-pane', { maxZoom: 22 }).setView([initLat, initLng], ${currentMapZoom.toStringAsFixed(1)});
+const tileProviders = [
+ { url: 'https://xdworld.vworld.kr/2d/Base/service/{z}/{x}/{y}.png', maxNative: 19, attr: '© VWorld / 국토교통부' },
+ { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', maxNative: 20, attr: '© CARTO / OpenStreetMap' },
+ { url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png', maxNative: 18, attr: '© OpenStreetMap DE' },
+ { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, attr: '© OpenStreetMap' }
+];
+let currentProviderIdx = 0;
+let tileErrorCount = 0;
+let activeTileLayer = null;
+function loadTileProvider(idx) {
+ if (idx >= tileProviders.length) return;
+ currentProviderIdx = idx;
+ tileErrorCount = 0;
+ if (activeTileLayer) {
+  try { map.removeLayer(activeTileLayer); } catch (e) {}
  }
-} catch (e) {}
+ const p = tileProviders[idx];
+ activeTileLayer = L.tileLayer(p.url, {
+  maxNativeZoom: p.maxNative,
+  maxZoom: 22,
+  attribution: p.attr
+ });
+ activeTileLayer.on('tileerror', () => {
+  tileErrorCount++;
+  if (tileErrorCount >= 3 && currentProviderIdx + 1 < tileProviders.length) {
+   loadTileProvider(currentProviderIdx + 1);
+  }
+ });
+ activeTileLayer.addTo(map);
+}
+loadTileProvider(0);
+bps.forEach((bp) => {
+ if (bp.isVisible === false) return;
+ const bpImg = new Image();
+ bpImg.onload = () => {
+ const size = 900;
+ const pad = 40;
+ const inner = size - pad * 2;
+ const canvas = document.createElement('canvas');
+ canvas.width = size;
+ canvas.height = size;
+ const ctx = canvas.getContext('2d');
+ ctx.clearRect(0, 0, size, size);
+ ctx.save();
+ ctx.globalAlpha = 1.0;
+ ctx.translate(size / 2, size / 2);
+ ctx.rotate(bp.rotation * Math.PI / 180.0);
+ const scale = Math.min(inner / bpImg.width, inner / bpImg.height);
+ const drawW = bpImg.width * scale;
+ const drawH = bpImg.height * scale;
+ ctx.drawImage(bpImg, -drawW / 2, -drawH / 2, drawW, drawH);
+ ctx.restore();
+ const bakedUrl = canvas.toDataURL('image/png');
+ const bounds = [[bp.swLat, bp.swLng], [bp.neLat, bp.neLng]];
+ L.imageOverlay(bakedUrl, bounds, { opacity: 1.0, interactive: false }).addTo(map);
+ };
+ bpImg.src = bp.b64;
+});
+const markersLayer = L.layerGroup().addTo(map);
 function selectPhoto(idx) {
  selectedIdx = idx;
  resetMainZoom();
@@ -3598,19 +3594,19 @@ function selectPhoto(idx) {
  const afterPane = document.getElementById('after-pane');
  const beforeBadge = document.getElementById('before-badge');
  if (p.afterB64 && p.afterB64.length > 10) {
-  document.getElementById('after-photo').src = p.afterB64;
-  afterPane.style.display = 'flex';
-  beforeBadge.style.display = 'block';
+ document.getElementById('after-photo').src = p.afterB64;
+ afterPane.style.display = 'flex';
+ beforeBadge.style.display = 'block';
  } else {
-  afterPane.style.display = 'none';
-  beforeBadge.style.display = 'none';
+ afterPane.style.display = 'none';
+ beforeBadge.style.display = 'none';
  }
- setTimeout(() => { if (map) map.invalidateSize(); }, 60);
+ setTimeout(() => { map.invalidateSize(); }, 60);
  const memoClean = (p.memo && p.memo.trim().length > 0) ? (' ' + p.memo.trim()) : '';
  document.getElementById('info-txt').innerText = `[\${p.category}]\${memoClean}`;
  renderThumbnails();
  renderMarkers();
- if (map) map.panTo([p.lat, p.lng]);
+ map.panTo([p.lat, p.lng]);
 }
 function renderThumbnails() {
  const box = document.getElementById('thumbs');
@@ -3633,7 +3629,6 @@ function renderThumbnails() {
  });
 }
 function renderMarkers() {
- if (!map || !markersLayer || typeof L === 'undefined') return;
  markersLayer.clearLayers();
  const order = [];
  for (let i = 0; i < photos.length; i++) {
