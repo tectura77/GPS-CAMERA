@@ -1112,8 +1112,175 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  debugPrint('Persist categories error: $e');
  }
  }
- Future<void> _deleteCategory(String targetCat) async {
- if (targetCat == '미분류') return;
+ Future<void> _deletePhotosByCategory(
+ String targetCat, {
+ bool alsoRemoveCategoryName = false,
+ }) async {
+ final List<PhotoItem> toRemove = (targetCat == '전체 카테고리')
+ ? List<PhotoItem>.from(widget.photos)
+ : widget.photos.where((p) => p.category == targetCat).toList();
+
+ for (final PhotoItem p in toRemove) {
+ try {
+ final File f = File(p.path);
+ if (f.existsSync()) await f.delete();
+ final File wf = File('${p.path}.appcam.jpg');
+ if (wf.existsSync()) await wf.delete();
+ globalHtmlBase64Cache.remove(p.path);
+ if (p.afterPath != null && p.afterPath!.isNotEmpty) {
+ final File af = File(p.afterPath!);
+ if (af.existsSync()) await af.delete();
+ final File awf = File('${p.afterPath!}.appcam.jpg');
+ if (awf.existsSync()) await awf.delete();
+ globalHtmlBase64Cache.remove(p.afterPath!);
+ }
+ } catch (_) {}
+ }
+
+ setState(() {
+ if (targetCat == '전체 카테고리') {
+ widget.photos.clear();
+ } else {
+ widget.photos.removeWhere((p) => p.category == targetCat);
+ }
+ if (alsoRemoveCategoryName && targetCat != '미분류' && targetCat != '전체 카테고리') {
+ _customCategories.remove(targetCat);
+ if (_categoryFilter == targetCat) {
+ _categoryFilter = '전체 카테고리';
+ }
+ }
+ if (_visiblePhotos.isEmpty && _categoryFilter != '전체 카테고리') {
+ _categoryFilter = '전체 카테고리';
+ }
+ if (_visiblePhotos.isEmpty) {
+ _selectedIdx = 0;
+ } else if (_selectedIdx >= _visiblePhotos.length) {
+ _selectedIdx = _visiblePhotos.length - 1;
+ }
+ });
+
+ if (alsoRemoveCategoryName && currentDefaultCategory == targetCat) {
+ await saveDefaultCategory('미분류');
+ }
+ await _persistCategories();
+ await _persistPhotoMetadata();
+ await _refreshAllOverlays(includeBlueprint: true);
+ if (_visiblePhotos.isNotEmpty) {
+ final PhotoItem cur = _visiblePhotos[_selectedIdx];
+ _panMapKeepZoom(cur.lat, cur.lng);
+ }
+ if (mounted) {
+ ScaffoldMessenger.of(context).showSnackBar(
+ SnackBar(
+ content: Text(
+ alsoRemoveCategoryName
+ ? "🗑️ '$targetCat' 카테고리와 포함된 사진 ${toRemove.length}장이 모두 삭제되었습니다."
+ : "🗑️ '$targetCat'의 사진 ${toRemove.length}장이 일괄 삭제되었습니다.",
+ ),
+ duration: const Duration(seconds: 2),
+ ),
+ );
+ }
+ }
+
+ Future<void> _showCategoryDeleteDialog(String targetCat) async {
+ final int count = (targetCat == '전체 카테고리')
+ ? widget.photos.length
+ : widget.photos.where((p) => p.category == targetCat).length;
+
+ await showDialog(
+ context: context,
+ builder: (ctx) {
+ return Dialog(
+ backgroundColor: Colors.grey[900],
+ insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+ shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+ child: Padding(
+ padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+ child: Column(
+ mainAxisSize: MainAxisSize.min,
+ crossAxisAlignment: CrossAxisAlignment.stretch,
+ children: [
+ Row(
+ mainAxisAlignment: MainAxisAlignment.spaceBetween,
+ children: [
+ Expanded(
+ child: Row(
+ children: [
+ const Icon(Icons.delete_sweep, color: Colors.redAccent, size: 20),
+ const SizedBox(width: 6),
+ Expanded(
+ child: Text(
+ "'$targetCat' 삭제 옵션 ($count장)",
+ overflow: TextOverflow.ellipsis,
+ style: const TextStyle(
+ color: Colors.amber,
+ fontSize: 14,
+ fontWeight: FontWeight.bold,
+ ),
+ ),
+ ),
+ ],
+ ),
+ ),
+ InkWell(
+ onTap: () => Navigator.pop(ctx),
+ child: const Icon(Icons.close, color: Colors.white54, size: 18),
+ ),
+ ],
+ ),
+ const Divider(color: Colors.white24, height: 18),
+ if (count > 0) ...[
+ ElevatedButton.icon(
+ onPressed: () {
+ Navigator.pop(ctx);
+ _deletePhotosByCategory(
+ targetCat,
+ alsoRemoveCategoryName:
+ targetCat != '미분류' && targetCat != '전체 카테고리',
+ );
+ },
+ icon: const Icon(Icons.delete_forever, size: 18),
+ label: Text(
+ targetCat == '전체 카테고리'
+ ? '🗑️ 전체 사진 $count장 일괄 삭제'
+ : "🗑️ '$targetCat' 사진 $count장 모두 삭제",
+ style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold),
+ ),
+ style: ElevatedButton.styleFrom(
+ backgroundColor: Colors.redAccent,
+ foregroundColor: Colors.white,
+ padding: const EdgeInsets.symmetric(vertical: 11),
+ ),
+ ),
+ const SizedBox(height: 8),
+ ],
+ if (targetCat != '미분류' && targetCat != '전체 카테고리' && count > 0) ...[
+ ElevatedButton.icon(
+ onPressed: () {
+ Navigator.pop(ctx);
+ _deletePhotosByCategory(
+ targetCat,
+ alsoRemoveCategoryName: false,
+ );
+ },
+ icon: const Icon(Icons.cleaning_services, size: 17),
+ label: Text(
+ "🧹 '$targetCat' 이름은 남기고 사진 $count장만 비우기",
+ style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+ ),
+ style: ElevatedButton.styleFrom(
+ backgroundColor: Colors.deepOrange,
+ foregroundColor: Colors.white,
+ padding: const EdgeInsets.symmetric(vertical: 10),
+ ),
+ ),
+ const SizedBox(height: 8),
+ ],
+ if (targetCat != '미분류' && targetCat != '전체 카테고리')
+ OutlinedButton.icon(
+ onPressed: () async {
+ Navigator.pop(ctx);
  setState(() {
  _customCategories.remove(targetCat);
  for (final p in widget.photos) {
@@ -1134,11 +1301,32 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
  if (mounted) {
  ScaffoldMessenger.of(context).showSnackBar(
  SnackBar(
- content: Text("'$targetCat' 카테고리가 삭제되었습니다. (해당 사진은 미분류로 전환)"),
+ content: Text("'$targetCat' 카테고리 이름만 삭제되었습니다. (사진은 미분류로 이동)"),
  duration: const Duration(seconds: 2),
  ),
  );
  }
+ },
+ icon: const Icon(Icons.label_off, size: 16, color: Colors.white70),
+ label: const Text(
+ '사진은 유지하고 카테고리 이름만 삭제 (미분류 전환)',
+ style: TextStyle(color: Colors.white70, fontSize: 11.5),
+ ),
+ style: OutlinedButton.styleFrom(
+ side: const BorderSide(color: Colors.white38),
+ padding: const EdgeInsets.symmetric(vertical: 10),
+ ),
+ ),
+ ],
+ ),
+ ),
+ );
+ },
+ );
+ }
+
+ Future<void> _deleteCategory(String targetCat) async {
+ await _showCategoryDeleteDialog(targetCat);
  }
  Future<void> _restoreBlueprintConfig() async {
  try {
@@ -3307,11 +3495,11 @@ class _GalleryMapDashboardState extends State<GalleryMapDashboard> {
 const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = 0;
-let cachedPayloadStr = null;
+let cachedClipboardStr = null;
 const sharedCanvas = document.createElement('canvas');
 const sharedCtx = sharedCanvas.getContext('2d');
 
-function compressDataUriSingleCanvas(dataUri, maxDim, qual) {
+function encodeImgFittingBudget(dataUri, maxDim, qual) {
  return new Promise((resolve) => {
   if (!dataUri || dataUri.length < 100) { resolve(dataUri); return; }
   const im = new Image();
@@ -3335,37 +3523,35 @@ function compressDataUriSingleCanvas(dataUri, maxDim, qual) {
  });
 }
 
-async function prepareCompactPayload() {
+async function prepareHighQualityClipboard() {
  try {
   const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
-  if (rawStr.length <= 600000) {
-   cachedPayloadStr = rawStr;
+  if (rawStr.length <= 740000) {
+   cachedClipboardStr = rawStr;
    return;
   }
   const n = Math.max(1, photos.length);
-  const pDim = n <= 12 ? 640 : (n <= 28 ? 460 : (n <= 48 ? 360 : 280));
-  const pQual = n <= 12 ? 0.62 : (n <= 28 ? 0.52 : (n <= 48 ? 0.44 : 0.36));
-  const bDim = bps.length <= 1 ? 720 : 540;
-  const bQual = 0.55;
+  const pDim = n <= 6 ? 1280 : (n <= 15 ? 1024 : (n <= 30 ? 840 : 720));
+  const pQual = n <= 6 ? 0.85 : (n <= 15 ? 0.78 : (n <= 30 ? 0.70 : 0.62));
   const compPhotos = [];
   for (let i = 0; i < photos.length; i++) {
    const p = Object.assign({}, photos[i]);
-   p.b64 = await compressDataUriSingleCanvas(p.b64, pDim, pQual);
+   p.b64 = await encodeImgFittingBudget(p.b64, pDim, pQual);
    if (p.afterB64 && p.afterB64.length > 80) {
-    p.afterB64 = await compressDataUriSingleCanvas(p.afterB64, pDim, pQual);
+    p.afterB64 = await encodeImgFittingBudget(p.afterB64, pDim, pQual);
    }
    compPhotos.push(p);
   }
   const compBps = [];
   for (let i = 0; i < bps.length; i++) {
    const b = Object.assign({}, bps[i]);
-   b.b64 = await compressDataUriSingleCanvas(b.b64, bDim, bQual);
+   b.b64 = await encodeImgFittingBudget(b.b64, 1100, 0.78);
    compBps.push(b);
   }
-  cachedPayloadStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
+  cachedClipboardStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
  } catch (e) {}
 }
-setTimeout(prepareCompactPayload, 300);
+setTimeout(prepareHighQualityClipboard, 120);
 
 function doSyncCopy(textToCopy) {
  let ok = false;
@@ -3387,15 +3573,39 @@ function doSyncCopy(textToCopy) {
  return ok;
 }
 
+function triggerSilentHqSave() {
+ try {
+  const fullHtml = '<!DOCTYPE html>' + document.documentElement.outerHTML;
+  const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'GPS_Map_Viewer_HQ_' + photos.length + 'p_' + Date.now() + '.html';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+ } catch (e) {}
+}
+
 function copyProjectForApp() {
  const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
- const toCopy = cachedPayloadStr || (rawStr.length <= 650000 ? rawStr : ('GPS_CAMERA_HTML_FILE:' + window.location.href));
- doSyncCopy(toCopy);
+ const markerPrefix = 'GPS_CAMERA_HTML_META:' + photos.length + ':' + bps.length + ':' + encodeURIComponent(window.location.href) + '|';
+ if (rawStr.length <= 740000) {
+  doSyncCopy(rawStr);
+ } else {
+  triggerSilentHqSave();
+  if (cachedClipboardStr && cachedClipboardStr.length <= 760000) {
+   doSyncCopy(cachedClipboardStr);
+  } else {
+   doSyncCopy('GPS_CAMERA_HTML_FILE:' + photos.length + ':' + window.location.href);
+  }
+ }
  const btn = document.querySelector('.app-copy-btn');
  if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
  const toast = document.getElementById('copy-toast');
  if (toast) {
-  toast.innerHTML = '✅ 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 복사 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
+  toast.innerHTML = '✅ 원본 화질 그대로 사진(' + photos.length + '장) · 도면(' + bps.length + '개) 준비 완료!<br><span style="font-size:12px;font-weight:normal;">GPS 카메라 앱 상단 [공유] → [④ 받은 HTML·ZIP 업로드]를 누르세요</span>';
   toast.style.display = 'block';
   setTimeout(() => { toast.style.display = 'none'; }, 4000);
  }
@@ -3777,6 +3987,18 @@ if (photos.length > 0) {
  return 0;
  }
  });
+ int? expectedPhotoCount;
+ try {
+ const MethodChannel ch = MethodChannel('gps_camera/shutter');
+ final String? mediaHtmlPath =
+ await ch.invokeMethod<String>('findLatestHtmlInDownloads');
+ if (mediaHtmlPath != null && mediaHtmlPath.isNotEmpty) {
+ final File mf = File(mediaHtmlPath);
+ if (mf.existsSync() && seenPaths.add(mf.path)) {
+ foundFiles.insert(0, mf);
+ }
+ }
+ } catch (_) {}
  try {
  final ClipboardData? cdata = await Clipboard.getData('text/plain');
  final String? txt = cdata?.text?.trim();
@@ -3787,8 +4009,14 @@ if (photos.length > 0) {
  (txt.contains('const photos =') && txt.contains('const bps ='))) {
  clipboardPayload = txt;
  } else if (txt.startsWith('GPS_CAMERA_HTML_FILE:')) {
- final String rawUri =
- Uri.decodeFull(txt.substring('GPS_CAMERA_HTML_FILE:'.length).trim());
+ String rest = txt.substring('GPS_CAMERA_HTML_FILE:'.length).trim();
+ final RegExp cntRx = RegExp(r'^(\d+):(.*)$');
+ final Match? cm = cntRx.firstMatch(rest);
+ if (cm != null) {
+ expectedPhotoCount = int.tryParse(cm.group(1)!);
+ rest = cm.group(2)!;
+ }
+ final String rawUri = Uri.decodeFull(rest);
  final int extIdx = rawUri.indexOf('/emulated/0/');
  if (extIdx >= 0) {
  final File directF =
@@ -3802,21 +4030,28 @@ if (photos.length > 0) {
  final File directF2 = File('/storage/emulated/0/$subPath');
  if (directF2.existsSync()) autoReadyFile = directF2;
  }
- if (autoReadyFile == null && foundFiles.isNotEmpty) {
- autoReadyFile = foundFiles.firstWhere(
- (f) => !f.path.toLowerCase().endsWith('.zip'),
- orElse: () => foundFiles.first,
- );
- }
  }
  }
  } catch (_) {}
- if (clipboardPayload == null && autoReadyFile == null && foundFiles.isNotEmpty) {
+ // Only auto-select a file from Downloads if it was just saved (within last 90 seconds)
+ // or matches expectedPhotoCount! Never overwrite a newer clipboard with an old Download file!
+ if (autoReadyFile == null && foundFiles.isNotEmpty) {
+ final DateTime nowDt = DateTime.now();
  for (final File f in foundFiles) {
- if (f.path.toLowerCase().contains('gps_map_viewer')) {
+ if (f.path.toLowerCase().endsWith('.zip')) continue;
+ try {
+ final DateTime mod = f.lastModifiedSync();
+ final int ageSec = nowDt.difference(mod).inSeconds.abs();
+ final String fname = f.path.split('/').last.toLowerCase();
+ if (expectedPhotoCount != null && fname.contains('_${expectedPhotoCount}p_')) {
  autoReadyFile = f;
  break;
  }
+ if (ageSec <= 90 && (fname.contains('gps_map_viewer') || fname.contains('auto_latest_import'))) {
+ autoReadyFile = f;
+ break;
+ }
+ } catch (_) {}
  }
  }
  bool replaceExisting = false;
@@ -3889,19 +4124,35 @@ if (photos.length > 0) {
  const SizedBox(height: 10),
  ElevatedButton.icon(
  onPressed: () async {
- if (clipboardPayload != null) {
+ if (autoReadyFile != null && autoReadyFile!.existsSync()) {
+ try {
+ final String fileContent = await autoReadyFile!.readAsString();
+ if (clipboardPayload == null) {
  Navigator.pop(ctx);
  await _importProjectFromHtmlOrPayload(
- clipboardPayload!,
+ fileContent,
  replaceExisting: replaceExisting,
  );
  return;
  }
- if (autoReadyFile != null && autoReadyFile!.existsSync()) {
+ // Both autoReadyFile and clipboardPayload exist:
+ // Compare photo count so an older Download file with fewer photos is NEVER used!
+ final int filePhotos = '"b64":'.allMatches(fileContent).length;
+ final int clipPhotos = '"b64":'.allMatches(clipboardPayload!).length;
+ if (filePhotos >= clipPhotos && fileContent.length >= clipboardPayload!.length) {
  Navigator.pop(ctx);
- final String content = await autoReadyFile!.readAsString();
  await _importProjectFromHtmlOrPayload(
- content,
+ fileContent,
+ replaceExisting: replaceExisting,
+ );
+ return;
+ }
+ } catch (_) {}
+ }
+ if (clipboardPayload != null) {
+ Navigator.pop(ctx);
+ await _importProjectFromHtmlOrPayload(
+ clipboardPayload!,
  replaceExisting: replaceExisting,
  );
  return;
@@ -5355,18 +5606,17 @@ if (photos.length > 0) {
  ),
  ),
  ),
- if (c != '미분류')
  InkWell(
  onTap: () {
  Navigator.of(context).pop();
- _deleteCategory(c);
+ _showCategoryDeleteDialog(c);
  },
  child: const Padding(
  padding: EdgeInsets.only(
  left: 6, top: 2, bottom: 2),
  child: Icon(
- Icons.close,
- size: 14,
+ Icons.delete_outline,
+ size: 15,
  color: Colors.redAccent,
  ),
  ),
@@ -5954,14 +6204,41 @@ if (photos.length > 0) {
  );
  }).toList();
  },
- items: ['전체 카테고리', ...cats]
- .map(
- (c) => DropdownMenuItem(
+ items: ['전체 카테고리', ...cats].map((c) {
+ final int cnt = (c == '전체 카테고리')
+ ? widget.photos.length
+ : widget.photos.where((p) => p.category == c).length;
+ return DropdownMenuItem<String>(
  value: c,
- child: Text(c, style: unifiedTopTextStyle),
+ child: Row(
+ mainAxisAlignment: MainAxisAlignment.spaceBetween,
+ children: [
+ Expanded(
+ child: Text(
+ '$c ($cnt)',
+ overflow: TextOverflow.ellipsis,
+ style: unifiedTopTextStyle,
  ),
- )
- .toList(),
+ ),
+ if (cnt > 0 || c != '미분류')
+ InkWell(
+ onTap: () {
+ Navigator.of(context).pop();
+ _showCategoryDeleteDialog(c);
+ },
+ child: const Padding(
+ padding: EdgeInsets.only(left: 6, top: 2, bottom: 2),
+ child: Icon(
+ Icons.delete_forever,
+ size: 16,
+ color: Colors.redAccent,
+ ),
+ ),
+ ),
+ ],
+ ),
+ );
+ }).toList(),
  onChanged: (val) {
  if (val == null) return;
  setState(() {
