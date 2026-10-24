@@ -3687,6 +3687,30 @@ if (photos.length > 0) {
  for (final String dPath in scanDirs) {
  scanForImportFiles(Directory(dPath), 0);
  }
+ try {
+ final Directory rootDir = Directory('/storage/emulated/0');
+ if (rootDir.existsSync()) {
+ for (final FileSystemEntity e in rootDir.listSync(followLinks: false)) {
+ if (e is File) {
+ final String low = e.path.toLowerCase();
+ if ((low.endsWith('.html') || low.endsWith('.htm') || low.endsWith('.zip')) &&
+ seenPaths.add(e.path)) {
+ foundFiles.add(e);
+ }
+ } else if (e is Directory) {
+ final String folderName = e.path.split('/').last;
+ if (!folderName.startsWith('.') &&
+ folderName != 'Android' &&
+ folderName != 'DCIM' &&
+ folderName != 'Pictures' &&
+ folderName != 'Movies' &&
+ folderName != 'Music') {
+ scanForImportFiles(e, 1);
+ }
+ }
+ }
+ }
+ } catch (_) {}
  foundFiles.sort((a, b) {
  try {
  return b.lastModifiedSync().compareTo(a.lastModifiedSync());
@@ -3865,48 +3889,7 @@ if (photos.length > 0) {
  padding: const EdgeInsets.symmetric(vertical: 11),
  ),
  ),
- const SizedBox(height: 8),
- ElevatedButton.icon(
- onPressed: () async {
- try {
- final ImagePicker picker = ImagePicker();
- final XFile? picked = await picker.pickMedia();
- if (picked == null) return;
- final String lowName = picked.name.toLowerCase();
- final String lowPath = picked.path.toLowerCase();
- Navigator.pop(ctx);
- if (lowName.endsWith('.zip') || lowPath.endsWith('.zip')) {
- await _importFromZipFile(
- File(picked.path),
- replaceExisting: replaceExisting,
- );
- } else {
- final Uint8List rawBytes = await picked.readAsBytes();
- final String content = utf8.decode(rawBytes, allowMalformed: true);
- await _importProjectFromHtmlOrPayload(
- content,
- replaceExisting: replaceExisting,
- );
- }
- } catch (e) {
- if (mounted) {
- ScaffoldMessenger.of(context).showSnackBar(
- SnackBar(content: Text('파일 선택 오류: $e')),
- );
- }
- }
- },
- icon: const Icon(Icons.folder_open, size: 18),
- label: const Text(
- '📂 태블릿/휴대폰 파일 탐색기(MYBOX·드라이브·다운로드)에서 직접 선택',
- style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold),
- ),
- style: ElevatedButton.styleFrom(
- backgroundColor: Colors.lightBlueAccent,
- foregroundColor: Colors.black,
- padding: const EdgeInsets.symmetric(vertical: 10),
- ),
- ),
+
  const SizedBox(height: 10),
  const Text(
  '📥 다운로드 / MYBOX / 카카오톡 폴더에서 발견된 파일 (터치하여 업로드):',
@@ -4011,22 +3994,27 @@ if (photos.length > 0) {
  photosRaw = (decoded['photos'] as List<dynamic>?) ?? [];
  bpsRaw = (decoded['bps'] as List<dynamic>?) ?? [];
  } else {
- final int pMarker = inputText.indexOf('const photos =');
- final int bMarker = inputText.indexOf('const bps =');
+ final int scriptIdx = inputText.lastIndexOf('<script>');
+ final String scriptBody = scriptIdx >= 0 ? inputText.substring(scriptIdx) : inputText;
+ final int pMarker = scriptBody.indexOf('const photos =');
+ final int bMarker = scriptBody.indexOf('const bps =');
  if (pMarker >= 0 && bMarker > pMarker) {
- final int pStart = inputText.indexOf('[', pMarker);
- final int pEnd = inputText.lastIndexOf('];', bMarker);
- if (pStart >= 0 && pEnd > pStart) {
- photosRaw = jsonDecode(inputText.substring(pStart, pEnd + 1)) as List<dynamic>;
+ final int pStart = scriptBody.indexOf('[', pMarker);
+ final String pSegment = scriptBody.substring(pStart, bMarker).trimRight();
+ if (pSegment.endsWith(';')) {
+ final String pJson = pSegment.substring(0, pSegment.length - 1).trimRight();
+ photosRaw = jsonDecode(pJson) as List<dynamic>;
  }
  }
  if (bMarker >= 0) {
- final int bStart = inputText.indexOf('[', bMarker);
- final int afterBps = inputText.indexOf('let selectedIdx', bMarker);
- final int searchUntil = afterBps > bStart ? afterBps : inputText.length;
- final int bEnd = inputText.lastIndexOf('];', searchUntil);
- if (bStart >= 0 && bEnd > bStart) {
- bpsRaw = jsonDecode(inputText.substring(bStart, bEnd + 1)) as List<dynamic>;
+ final int bStart = scriptBody.indexOf('[', bMarker);
+ final int afterBps = scriptBody.indexOf('let selectedIdx', bMarker);
+ if (bStart >= 0 && afterBps > bStart) {
+ final String bSegment = scriptBody.substring(bStart, afterBps).trimRight();
+ if (bSegment.endsWith(';')) {
+ final String bJson = bSegment.substring(0, bSegment.length - 1).trimRight();
+ bpsRaw = jsonDecode(bJson) as List<dynamic>;
+ }
  }
  }
  }
