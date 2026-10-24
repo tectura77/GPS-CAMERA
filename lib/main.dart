@@ -3275,82 +3275,120 @@ const photos = $photosJs;
 const bps = $bpsJs;
 let selectedIdx = 0;
 let cachedPayloadStr = null;
+const decodedImgMap = new Map();
 
-function compressDataUriAsync(dataUri, maxDim, qual, mimeOut) {
+function preloadDataUri(dataUri) {
  return new Promise((resolve) => {
-  if (!dataUri || dataUri.length < 100) { resolve(dataUri); return; }
+  if (!dataUri || dataUri.length < 80) { resolve(null); return; }
+  if (decodedImgMap.has(dataUri)) { resolve(decodedImgMap.get(dataUri)); return; }
   const im = new Image();
-  im.onload = () => {
-   try {
-    let w = im.width, h = im.height;
-    if (w > maxDim || h > maxDim) {
-     if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
-     else { w = Math.round(w * maxDim / h); h = maxDim; }
-    }
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    const ctx = c.getContext('2d');
-    ctx.drawImage(im, 0, 0, w, h);
-    resolve(c.toDataURL(mimeOut || 'image/jpeg', qual));
-   } catch (e) { resolve(dataUri); }
-  };
-  im.onerror = () => resolve(dataUri);
+  im.onload = () => { decodedImgMap.set(dataUri, im); resolve(im); };
+  im.onerror = () => resolve(null);
   im.src = dataUri;
  });
+}
+
+function resizeImgSync(dataUri, maxDim, qual) {
+ if (!dataUri || dataUri.length < 80) return dataUri;
+ const im = decodedImgMap.get(dataUri);
+ if (!im || !im.width || !im.height) return dataUri;
+ try {
+  let w = im.width, h = im.height;
+  if (w > maxDim || h > maxDim) {
+   if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+   else { w = Math.round(w * maxDim / h); h = maxDim; }
+  }
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(im, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', qual);
+ } catch (e) {
+  return dataUri;
+ }
+}
+
+function buildCompactPayloadSync() {
+ const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
+ if (rawStr.length <= 600000) return rawStr;
+ const tiers = [
+  { pDim: 640, pQual: 0.62, bDim: 800, bQual: 0.65 },
+  { pDim: 480, pQual: 0.54, bDim: 680, bQual: 0.58 },
+  { pDim: 380, pQual: 0.46, bDim: 560, bQual: 0.50 },
+  { pDim: 300, pQual: 0.38, bDim: 440, bQual: 0.44 },
+  { pDim: 240, pQual: 0.32, bDim: 360, bQual: 0.38 }
+ ];
+ const totalItems = photos.length + bps.length * 3;
+ let startTier = totalItems <= 12 ? 0 : (totalItems <= 28 ? 1 : (totalItems <= 50 ? 2 : 3));
+ for (let t = startTier; t < tiers.length; t++) {
+  const spec = tiers[t];
+  const compBps = bps.map((b) => {
+   const nb = Object.assign({}, b);
+   nb.b64 = resizeImgSync(b.b64, spec.bDim, spec.bQual);
+   return nb;
+  });
+  const compPhotos = photos.map((p) => {
+   const np = Object.assign({}, p);
+   np.b64 = resizeImgSync(p.b64, spec.pDim, spec.pQual);
+   if (p.afterB64 && p.afterB64.length > 80) {
+    np.afterB64 = resizeImgSync(p.afterB64, spec.pDim, spec.pQual);
+   }
+   return np;
+  });
+  const candidate = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
+  if (candidate.length <= 600000 || t === tiers.length - 1) {
+   return candidate;
+  }
+ }
+ return rawStr;
 }
 
 async function prepareCompactPayload() {
  try {
   const rawStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps });
-  if (rawStr.length <= 750000) {
+  if (rawStr.length <= 600000) {
    cachedPayloadStr = rawStr;
    return;
   }
-  const totalImgs = Math.max(1, photos.length + bps.length);
-  const maxDim = totalImgs <= 12 ? 960 : (totalImgs <= 28 ? 720 : (totalImgs <= 48 ? 560 : 440));
-  const qual = totalImgs <= 12 ? 0.74 : (totalImgs <= 28 ? 0.64 : 0.54);
-  const compPhotos = [];
-  for (let i = 0; i < photos.length; i++) {
-   const p = Object.assign({}, photos[i]);
-   p.b64 = await compressDataUriAsync(p.b64, maxDim, qual, 'image/jpeg');
-   if (p.afterB64 && p.afterB64.length > 50) {
-    p.afterB64 = await compressDataUriAsync(p.afterB64, maxDim, qual, 'image/jpeg');
-   }
-   compPhotos.push(p);
-  }
-  const compBps = [];
-  for (let i = 0; i < bps.length; i++) {
-   const b = Object.assign({}, bps[i]);
-   b.b64 = await compressDataUriAsync(b.b64, 900, 0.75, 'image/png');
-   compBps.push(b);
-  }
-  cachedPayloadStr = 'GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: compPhotos, bps: compBps });
+  const tasks = [];
+  bps.forEach((b) => { if (b.b64) tasks.push(preloadDataUri(b.b64)); });
+  photos.forEach((p) => {
+   if (p.b64) tasks.push(preloadDataUri(p.b64));
+   if (p.afterB64 && p.afterB64.length > 80) tasks.push(preloadDataUri(p.afterB64));
+  });
+  await Promise.all(tasks);
+  cachedPayloadStr = buildCompactPayloadSync();
  } catch (e) {}
 }
-setTimeout(prepareCompactPayload, 30);
+setTimeout(prepareCompactPayload, 10);
 
-function copyProjectForApp() {
- const payload = cachedPayloadStr || ('GPS_CAMERA_HTML_V2:' + JSON.stringify({ photos: photos, bps: bps }));
- const ta = document.createElement('textarea');
- ta.value = payload;
- ta.setAttribute('readonly', '');
- ta.style.position = 'fixed';
- ta.style.top = '0';
- ta.style.left = '-9999px';
- ta.style.opacity = '0';
- document.body.appendChild(ta);
- ta.focus();
- ta.select();
- try { ta.setSelectionRange(0, ta.value.length); } catch (e) {}
+function doSyncCopy(textToCopy) {
  let ok = false;
- try { ok = document.execCommand('copy'); } catch (e) {}
- if (!ok) {
-  ta.value = 'GPS_CAMERA_HTML_FILE:' + window.location.href;
+ try {
+  const ta = document.createElement('textarea');
+  ta.value = textToCopy;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = '-9999px';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.focus();
   ta.select();
   try { ta.setSelectionRange(0, ta.value.length); } catch (e) {}
-  try { document.execCommand('copy'); } catch (e) {}
+  try { ok = document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(ta);
+ } catch (e) {}
+ return ok;
+}
+
+function copyProjectForApp() {
+ if (!cachedPayloadStr) {
+  cachedPayloadStr = buildCompactPayloadSync();
  }
- document.body.removeChild(ta);
+ let ok = doSyncCopy(cachedPayloadStr);
  const btn = document.querySelector('.app-copy-btn');
  if (btn) { btn.innerText = '✅ 복사완료! 앱에서 업로드하세요'; btn.style.background = '#ffc107'; }
  const toast = document.getElementById('copy-toast');
@@ -3917,7 +3955,53 @@ if (photos.length > 0) {
  padding: const EdgeInsets.symmetric(vertical: 11),
  ),
  ),
-
+ const SizedBox(height: 8),
+ ElevatedButton.icon(
+ onPressed: () async {
+ try {
+ const MethodChannel ch = MethodChannel('gps_camera/shutter');
+ final String? pickedPath = await ch.invokeMethod<String>('pickHtmlOrZip');
+ if (pickedPath == null || pickedPath.isEmpty) return;
+ final File pickedFile = File(pickedPath);
+ if (!pickedFile.existsSync()) return;
+ Navigator.pop(ctx);
+ if (pickedPath.toLowerCase().endsWith('.zip')) {
+ await _importFromZipFile(
+ pickedFile,
+ replaceExisting: replaceExisting,
+ );
+ } else {
+ final Uint8List rawBytes = await pickedFile.readAsBytes();
+ final String content = utf8.decode(rawBytes, allowMalformed: true);
+ await _importProjectFromHtmlOrPayload(
+ content,
+ replaceExisting: replaceExisting,
+ );
+ }
+ } catch (e) {
+ if (mounted) {
+ ScaffoldMessenger.of(context).showSnackBar(
+ const SnackBar(
+ content: Text(
+ '💡 파일 탐색기 기능을 쓰시려면 GitHub의 .github/workflows/build.yml 파일도 함께 최신 코드로 업데이트해 주세요!',
+ ),
+ duration: Duration(seconds: 4),
+ ),
+ );
+ }
+ }
+ },
+ icon: const Icon(Icons.folder_open, size: 18),
+ label: const Text(
+ '📂 휴대폰 파일 탐색기(카톡·드라이브·다운로드)에서 .html 직접 선택',
+ style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold),
+ ),
+ style: ElevatedButton.styleFrom(
+ backgroundColor: Colors.lightBlueAccent,
+ foregroundColor: Colors.black,
+ padding: const EdgeInsets.symmetric(vertical: 10),
+ ),
+ ),
  const SizedBox(height: 10),
  const Text(
  '📥 다운로드 / MYBOX / 카카오톡 폴더에서 발견된 파일 (터치하여 업로드):',
