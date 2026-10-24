@@ -23,7 +23,7 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Create Clean V2 Flutter Project Structure
+      - name: 
         run: |
           rm -rf android
           mv pubspec.yaml pubspec.yaml.bak
@@ -215,6 +215,29 @@ jobs:
           keyPassword=${{ secrets.KEYSTORE_PASSWORD }}
           keyAlias=upload
           storeFile=upload-keystore.jks
+          EOF
+          cat <<EOF >> android/app/build.gradle
+
+          android {
+              signingConfigs {
+                  release {
+                      def keystoreProperties = new Properties()
+                      def keystorePropertiesFile = rootProject.file('key.properties')
+                      if (keystorePropertiesFile.exists()) {
+                          keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+                      }
+                      keyAlias = keystoreProperties['keyAlias']
+                      keyPassword = keystoreProperties['keyPassword']
+                      storeFile = keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+                      storePassword = keystoreProperties['storePassword']
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.release
+                  }
+              }
+          }
           EOF
           
       - name: Build App Bundle (AAB)
